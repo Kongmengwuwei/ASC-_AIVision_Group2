@@ -1,0 +1,167 @@
+###############################################################################
+
+# Professional .gitignore for Keil MDK / ARM Cortex-M / NXP RT10xx Projects
+
+# Suitable for i.MX RT1064 / MCUXpresso SDK + Keil MDK
+
+###############################################################################
+
+############################
+
+# Build Output
+
+############################
+Objects/
+Listings/
+Output/
+Debug/
+Release/
+build/
+Build/
+
+############################
+
+# Compiled Files
+
+############################
+*.o
+*.d
+*.axf
+*.elf
+*.bin
+*.hex
+*.map
+*.lst
+*.crf
+*.lib
+*.sbr
+
+############################
+
+# Linker / Build Temp
+
+############################
+*.dep
+*.lnp
+*.tmp
+*.bak
+*.dmp
+
+############################
+
+# Keil User Settings
+
+############################
+*.uvopt
+*.uvoptx
+*.uvgui.*
+*.uvguix.*
+
+############################
+
+# Keil Log Files
+
+############################
+*.log
+
+############################
+
+# Keil Pack Installer Cache
+
+############################
+*.pack
+
+############################
+
+# Flash / Debug Generated
+
+############################
+*.flm
+
+############################
+
+# IDE Databases
+
+############################
+*.cache
+*.db
+*.opendb
+*.idb
+*.pdb
+
+############################
+
+# CMSIS / RTE Generated Temp
+
+############################
+RTE/_Log
+RTE/_tmp
+RTE/Device/RTE_Device.h
+
+############################
+
+# MCUXpresso / NXP Tools
+
+############################
+*.mex
+*.launch
+.metadata/
+.settings/
+
+############################
+
+# Python Script Cache
+
+############################
+**pycache**/
+*.pyc
+
+############################
+
+# CMake (if mixed build system)
+
+############################
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+
+############################
+
+# VSCode
+
+############################
+.vscode/*
+!.vscode/settings.json
+!.vscode/launch.json
+!.vscode/extensions.json
+
+############################
+
+# OS Generated Files
+
+############################
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+############################
+
+# Temporary Files
+
+############################
+*.tmp
+*.temp
+*.swp
+*.swo
+
+############################
+
+# Archive Files
+
+############################
+*.zip
+*.rar
+*.7z
+*.tar
+*.gz

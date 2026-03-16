@@ -35,12 +35,11 @@
 
 #include "zf_common_headfile.h"
 #include "Mymenu.h"
+#include "Attitude.h"
 
 // 打开新的工程或者工程移动了位置务必执行以下操作
 // 第一步 关闭上面所有打开的文件
 // 第二步 project->clean  等 待下方进度条走完
-
-// 本例程是开源库移植用空工程
 
 
 int main(void)

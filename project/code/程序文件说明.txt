@@ -1,0 +1,16 @@
+本文档旨在说明各个文件功能，便于区分，参考与使用
+分为不同模块，模块内由上到下为底层到表层顺序
+
+菜单模块：
+    menu
+    链表菜单基础架构，被Mymenu调用
+    Mymenu      
+    被主函数调用，可调用函数用于菜单初始化，刷新，显示
+    在此修改菜单，增加或调整选项
+
+姿态解算模块：
+    matrix
+    EKF_Platform
+    kalman_filter
+    QuaternionEKF
+    Attitude

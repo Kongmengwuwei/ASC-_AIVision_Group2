@@ -1,6 +1,7 @@
-#ifndef __MENU_H
-#define __MENU_H
+#ifndef _MENU_H
+#define _MENU_H
 
+#include "Flash.h"
 #include <stdio.h>
 #include <stdint.h>
 #include <stdbool.h>

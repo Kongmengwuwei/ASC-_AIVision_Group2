@@ -474,6 +474,16 @@
               <FileType>5</FileType>
               <FilePath>..\code\QuaternionEKF.h</FilePath>
             </File>
+            <File>
+              <FileName>Flash.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\code\Flash.c</FilePath>
+            </File>
+            <File>
+              <FileName>Flash.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\code\Flash.h</FilePath>
+            </File>
           </Files>
         </Group>
         <Group>

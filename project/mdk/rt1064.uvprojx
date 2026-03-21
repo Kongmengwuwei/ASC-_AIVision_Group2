@@ -484,6 +484,56 @@
               <FileType>5</FileType>
               <FilePath>..\code\Flash.h</FilePath>
             </File>
+            <File>
+              <FileName>Camera_Receive.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\code\Camera_Receive.c</FilePath>
+            </File>
+            <File>
+              <FileName>Camera_Receive.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\code\Camera_Receive.h</FilePath>
+            </File>
+            <File>
+              <FileName>Path.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\code\Path.c</FilePath>
+            </File>
+            <File>
+              <FileName>Path.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\code\Path.h</FilePath>
+            </File>
+            <File>
+              <FileName>pid.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\code\pid.c</FilePath>
+            </File>
+            <File>
+              <FileName>pid.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\code\pid.h</FilePath>
+            </File>
+            <File>
+              <FileName>config.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\code\config.c</FilePath>
+            </File>
+            <File>
+              <FileName>config.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\code\config.h</FilePath>
+            </File>
+            <File>
+              <FileName>Motor.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\code\Motor.c</FilePath>
+            </File>
+            <File>
+              <FileName>Motor.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\code\Motor.h</FilePath>
+            </File>
           </Files>
         </Group>
         <Group>

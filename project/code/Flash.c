@@ -77,7 +77,7 @@ uint8 Data_load_from_flash(void)
     return 1;
 }
 
-uint8 param_clear_flash(void)
+uint8 Data_clear_flash(void)
 {
     flash_buffer_clear();
     if (flash_erase_page(FLASH_SECTION_INDEX, FLASH_PAGE_INDEX) != 0)

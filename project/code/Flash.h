@@ -14,5 +14,6 @@
 
 uint8 Data_save_to_flash(void);
 uint8 Data_load_from_flash(void);
+uint8 Data_clear_flash(void);
 
 #endif

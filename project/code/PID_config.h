@@ -1,10 +1,7 @@
-#ifndef __CONFIG_H_
-#define __CONFIG_H_
+#ifndef _PID_CONFIG_H_
+#define _PID_CONFIG_H_
 
-#include "pid.h"
-
-
-//#define Basic_Speed 2200
+#include "PID.h"
 
 extern tagPID_T ULpid;
 extern tagPID_T URpid;

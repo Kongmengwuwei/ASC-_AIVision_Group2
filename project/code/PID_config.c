@@ -1,5 +1,4 @@
-#include "config.h"
-
+#include "PID_config.h"
 
 tagPID_T ULpid;
 tagPID_T URpid;

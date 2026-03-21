@@ -1,5 +1,5 @@
-#ifndef _pid_h_
-#define _pid_h_
+#ifndef _PID_h_
+#define _PID_h_
 
 typedef struct
 {

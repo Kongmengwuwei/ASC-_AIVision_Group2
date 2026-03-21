@@ -3,7 +3,7 @@
 
 #include <stddef.h>
 #include "zf_common_typedef.h"
-#include "pid.h"
+#include "PID.h"
 
 #define PRESTART_MOVE_LEFT_M      0.11f
 #define PRESTART_MOVE_RIGHT_M     0.00f

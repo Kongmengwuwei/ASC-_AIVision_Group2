@@ -34,6 +34,7 @@
  ********************************************************************************************************************/
 
 #include "zf_common_headfile.h"
+#include "Flash.h"
 #include "Mymenu.h"
 #include "Attitude.h"
 
@@ -51,8 +52,10 @@ int main(void)
   interrupt_set_priority(PIT_IRQn, 2); // 设置 PIT0 对周期中断的中断优先级为 2
 
   // 模块初始化
+  uart_blob_init();
   flash_init();
   Menu_Init();
+  Attitude_Init();
   interrupt_global_enable(0);
 
   while (1)

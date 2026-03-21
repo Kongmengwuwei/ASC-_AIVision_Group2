@@ -4,7 +4,7 @@
 #include "zf_common_typedef.h"
 
 
-#define MAX_DUTY            (50 )                                               // 最大 MAX_DUTY% 占空比
+#define MAX_DUTY                 (50 )                           // 最大 MAX_DUTY% 占空比
 #define MOTOR1_DIR               (C9 )                           //上左
 #define MOTOR1_PWM               (PWM2_MODULE1_CHA_C8)
 

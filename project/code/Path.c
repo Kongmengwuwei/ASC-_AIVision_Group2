@@ -1,6 +1,6 @@
 #include "Path.h"
 #include "Motor.h"
-#include "pid.h"
+#include "PID.h"
 #include "zf_device_ips200.h"
 #include <math.h>
 #include "Attitude.h"

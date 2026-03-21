@@ -40,10 +40,10 @@ typedef struct Menu_Item
     
 } Menu_Item;
 
-// 使链表节点首尾相连循环实现文件夹内文件的循环切换
+//使链表节点首尾相连循环实现文件夹内文件的循环切换
 void All_Folder_Menu_Init(Menu_Item *Menu);    
 
-// 创建文件夹     参数：(父文件夹地址，新建文件夹地址，文件夹名称)
+//创建文件夹     参数：(父文件夹地址，新建文件夹地址，文件夹名称)
 void Create_Menu_Folder(Menu_Item *Father, Menu_Item *me, const char name[]);
 //创建文件       参数：(父文件夹地址，新建文件夹地址，文件名称，文件数据的地址，文件类型)
 void Create_Menu_File(Menu_Item *Father, Menu_Item *me, const char name[], void *data, Menu_Kind kind);

@@ -1,6 +1,6 @@
 #include "Motor.h"
 #include "string.h"
-#include "config.h"
+#include "PID_config.h"
 #include "zf_driver_gpio.h"
 #include "zf_driver_pwm.h"
 #include "zf_driver_encoder.h"
@@ -118,7 +118,7 @@ void encoder_get(void)//多重滤波，1234就是4个的均值滤波
 
 /**************************************************************************
 函数功能：低通滤波
-入口参数：旧X，新X
+入口参数：旧X，新X；
 返回  值：新值
 **************************************************************************/
 int16 Lowpass(int16 X_last,int16 X_new)

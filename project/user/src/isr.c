@@ -50,18 +50,22 @@ void PIT_IRQHandler(void)
 {
     if(pit_flag_get(PIT_CH0))
     {
-				extern void pit_0_handler (void);
-				pit_0_handler();
+		extern void pit_0_handler (void);
+		pit_0_handler();
         pit_flag_clear(PIT_CH0);
     }
     
     if(pit_flag_get(PIT_CH1))
     {
+        extern void pit_1_handler(void);
+        pit_1_handler();
         pit_flag_clear(PIT_CH1);
     }
     
     if(pit_flag_get(PIT_CH2))
     {
+        extern void pit_2_handler(void);
+        pit_2_handler();
         pit_flag_clear(PIT_CH2);
     }
     
@@ -77,6 +81,8 @@ void LPUART1_IRQHandler(void)
 {
     if(kLPUART_RxDataRegFullFlag & LPUART_GetStatusFlags(LPUART1))
     {
+        extern void uart_rx_interrupt_handler();
+        uart_rx_interrupt_handler();
         // 接收中断
     #if DEBUG_UART_USE_INTERRUPT                        // 如果开启 debug 串口中断
         debug_interrupr_handler();                      // 调用 debug 串口接收处理函数 数据会被 debug 环形缓冲区读取

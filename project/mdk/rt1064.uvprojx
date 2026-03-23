@@ -485,16 +485,6 @@
               <FilePath>..\code\Flash.h</FilePath>
             </File>
             <File>
-              <FileName>Camera_Receive.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>..\code\Camera_Receive.c</FilePath>
-            </File>
-            <File>
-              <FileName>Camera_Receive.h</FileName>
-              <FileType>5</FileType>
-              <FilePath>..\code\Camera_Receive.h</FilePath>
-            </File>
-            <File>
               <FileName>Path.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\code\Path.c</FilePath>
@@ -505,26 +495,6 @@
               <FilePath>..\code\Path.h</FilePath>
             </File>
             <File>
-              <FileName>pid.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>..\code\pid.c</FilePath>
-            </File>
-            <File>
-              <FileName>pid.h</FileName>
-              <FileType>5</FileType>
-              <FilePath>..\code\pid.h</FilePath>
-            </File>
-            <File>
-              <FileName>config.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>..\code\config.c</FilePath>
-            </File>
-            <File>
-              <FileName>config.h</FileName>
-              <FileType>5</FileType>
-              <FilePath>..\code\config.h</FilePath>
-            </File>
-            <File>
               <FileName>Motor.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\code\Motor.c</FilePath>
@@ -533,6 +503,36 @@
               <FileName>Motor.h</FileName>
               <FileType>5</FileType>
               <FilePath>..\code\Motor.h</FilePath>
+            </File>
+            <File>
+              <FileName>PID.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\code\PID.c</FilePath>
+            </File>
+            <File>
+              <FileName>PID.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\code\PID.h</FilePath>
+            </File>
+            <File>
+              <FileName>PID_config.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\code\PID_config.c</FilePath>
+            </File>
+            <File>
+              <FileName>PID_config.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\code\PID_config.h</FilePath>
+            </File>
+            <File>
+              <FileName>Camera_handler.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\code\Camera_handler.c</FilePath>
+            </File>
+            <File>
+              <FileName>Camera_handler.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\code\Camera_handler.h</FilePath>
             </File>
           </Files>
         </Group>

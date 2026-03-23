@@ -37,36 +37,90 @@
 #include "Flash.h"
 #include "Mymenu.h"
 #include "Attitude.h"
+#include "Camera_handler.h"
 
 // 打开新的工程或者工程移动了位置务必执行以下操作
 // 第一步 关闭上面所有打开的文件
 // 第二步 project->clean  等 待下方进度条走完
+
+uint8_t get_data = 0;
 
 int main(void)
 {
   clock_init(SYSTEM_CLOCK_600M); // 不可删除
   debug_init();                  // 调试端口初始化
 
-  // 中断初始化
-  pit_ms_init(PIT_CH0, 20);            // 初始化 PIT_CH0 为周期中断 20ms 周期
-  interrupt_set_priority(PIT_IRQn, 2); // 设置 PIT0 对周期中断的中断优先级为 2
-
   // 模块初始化
-  uart_blob_init();
-  flash_init();
-  Menu_Init();
-  Attitude_Init();
-  interrupt_global_enable(0);
+  system_delay_ms(300); // 等待主板其他外设上电完成
+  uart_blob_init();     // 摄像头串口接收与解析模块初始化
+  flash_init();         // Flash模块初始化
+  Menu_Init();          // 菜单系统初始化(包含按键，显示屏等相关初始化)
+  Attitude_Init();      // 姿态解算模块初始化
+
+  // 中断初始化
+  pit_ms_init(PIT_CH0, 20);                 // 初始化 PIT_CH0 为周期中断 20ms 周期
+  interrupt_set_priority(PIT_IRQn, 2);      // 设置 PIT0 对周期中断的中断优先级为 2
+  pit_ms_init(PIT_CH1, 10);                 // 初始化 PIT_CH1 为周期中断 10ms 周期
+  interrupt_set_priority(PIT_IRQn, 1);      // 设置 PIT1 对周期中断的中断优先级为 1
+  pit_ms_init(PIT_CH2, 2);                  // 初始化 PIT_CH2 为周期中断 2ms 周期
+  interrupt_set_priority(PIT_IRQn, 0);      // 设置 PIT2 对周期中断的中断优先级为 0
+  interrupt_set_priority(LPUART1_IRQn, 3);  // 设置中断优先级（中等）
+  interrupt_global_enable(0);               // 中断使能
 
   while (1)
   {
-    // 此处编写需要循环执行的代码
-    Menu_Switch();
+    process_blob_data();      //处理摄像头串口数据
+    Menu_Switch();          
     Menu_Show();
   }
 }
 
+//20ms中断：按键扫描
 void pit_0_handler(void)
 {
   key_scanner();
+}
+
+//10ms中断：运动控制
+void pit_1_handler(void)
+{
+  // encoder_get();
+  // distance_speed_strategy();
+  // // speed_encoder[0]=25;
+  // if (car_go_flag == 1 && car_stop_flag == 0)
+  // {
+  //   if (wait_stop == 1)
+  //   {
+  //     motor_control(car_stop_array);
+  //   }
+  //   else
+  //   {
+  //     motor_control(speed_encoder);
+  //   }
+  // }
+  // else if (car_go_flag == 1 && car_stop_flag == 1)
+  // {
+  //   motor_control(car_stop_array);
+  // }
+  // else
+  // {
+  //   motor_pwm(0, 0, 0, 0);
+  // }
+}
+
+// 2ms中断：姿态解算
+void pit_2_handler(void)
+{
+  Attitude_Calculate();
+}
+
+// 串口接收中断：摄像头数据接收
+void uart_rx_interrupt_handler(void)
+{
+  // 查询式读取1字节（无数据则直接退出，确保中断快速执行）
+  if (uart_query_byte(UART_INDEX, &get_data))
+  {
+    // 用fifo_write_buffer写入1字节（length=1，地址为get_data的地址）
+    fifo_write_buffer(&uart_data_fifo, &get_data, 1);
+  }
 }

@@ -55,7 +55,7 @@ int main(void)
   uart_blob_init();     // 摄像头串口接收与解析模块初始化
   flash_init();         // Flash模块初始化
   Menu_Init();          // 菜单系统初始化(包含按键，显示屏等相关初始化)
-  Attitude_Init();      // 姿态解算模块初始化
+//  Attitude_Init();      // 姿态解算模块初始化
 
   // 中断初始化
   pit_ms_init(PIT_CH0, 20);                 // 初始化 PIT_CH0 为周期中断 20ms 周期
@@ -67,10 +67,26 @@ int main(void)
   interrupt_set_priority(LPUART1_IRQn, 3);  // 设置中断优先级（中等）
   interrupt_global_enable(0);               // 中断使能
 
+  // 在此直接输入地图
+  const char *map_text = "################\n"
+                         "#.#............#\n"
+                         "#........#####.#\n"
+                         "##B###...#T..#.#\n"
+                         "#....#...#T#.#.#\n"
+                         "#....#####T#.#.#\n"
+                         "#C......B..B.#.#\n"
+                         "#..........###.#\n"
+                         "#..............#\n"
+                         "#.....####.....#\n"
+                         "#..............#\n"
+                         "################";
+  parse_map_from_string(map_text);
+
+  // 主循环
   while (1)
   {
     process_blob_data();      //处理摄像头串口数据
-    Menu_Switch();          
+    Menu_Switch();        
     Menu_Show();
   }
 }
@@ -111,7 +127,7 @@ void pit_1_handler(void)
 // 2ms中断：姿态解算
 void pit_2_handler(void)
 {
-  Attitude_Calculate();
+//  Attitude_Calculate();
 }
 
 // 串口接收中断：摄像头数据接收

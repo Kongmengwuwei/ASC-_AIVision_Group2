@@ -22,8 +22,8 @@
 #define CAMERA_HEIGHT 240
 
 // 地图尺寸与符号协议定义（与串口文本协议对应）
-#define MAP_ROWS 16
-#define MAP_COLS 12
+#define MAP_ROWS 12
+#define MAP_COLS 16
 #define MAP_SYMBOL_OBSTACLE '#'
 #define MAP_SYMBOL_EMPTY '.'
 #define MAP_SYMBOL_CAR 'C'
@@ -39,6 +39,12 @@ typedef struct
 
 typedef struct
 {
+    float row; // 车辆行坐标（可带小数）
+    float col; // 车辆列坐标（可带小数）
+} CarPosition;
+
+typedef struct
+{
     int16_t cx;   // 色块中心x（像素）
     int16_t cy;   // 色块中心y（像素）
     int16_t w;    // 色块宽度（像素）
@@ -48,12 +54,6 @@ typedef struct
     int w_error;   // 相对期望宽度的误差
     float distance; // 距离估计值（单位由上层约定）
 } BlobInfo;
-
-typedef struct
-{
-    float row; // 车辆行坐标（可带小数）
-    float col; // 车辆列坐标（可带小数）
-} CarPosition;
 
 #define MAX_OBSTACLES 100
 #define MAX_BOXES 10
@@ -82,6 +82,8 @@ void process_blob_data(void);
 // 像素坐标转换为栅格坐标
 void pixel_to_grid(int pixel_row, int pixel_col, float *grid_row, float *grid_col,
                    float grid_ratio_row, float grid_ratio_col);
+// 直接从多行字符串解析地图（不经过串口帧）
+bool parse_map_from_string(const char *map_text);
 
 // 模块运行状态
 extern map_state_t map_state;              // 当前地图解析状态（初始/动态）

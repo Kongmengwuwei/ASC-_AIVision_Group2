@@ -274,7 +274,7 @@ void pixel_to_grid(int pixel_row, int pixel_col, float *grid_row, float *grid_co
     }
 }
 
-// 解析初始地图正文（固定16x12字符矩阵）
+// 解析初始地图正文（固定12x16字符矩阵）
 static bool parse_map_payload(const uint8_t *payload, uint16_t payload_len)
 {
     if (payload == NULL)
@@ -439,6 +439,37 @@ static bool parse_map_payload(const uint8_t *payload, uint16_t payload_len)
     get_data_4 = (new_targets_count > 0U) ? 4 : 0;
 
     return true;
+}
+
+// 从直接输入的多行字符串解析地图（等价于 parse_map_payload 的语义）
+bool parse_map_from_string(const char *map_text)
+{
+    if (map_text == NULL)
+    {
+        return false;
+    }
+
+    size_t payload_len = strlen(map_text);
+    if (payload_len == 0U || payload_len > 0xFFFFU)
+    {
+        return false;
+    }
+
+    // 兼容直接输入字符串最后一行没有换行符的情况
+    if (map_text[payload_len - 1U] != '\n' && map_text[payload_len - 1U] != '\r')
+    {
+        if (payload_len + 1U > FRAME_BUF_SIZE)
+        {
+            return false;
+        }
+
+        uint8_t temp_payload[FRAME_BUF_SIZE] = {0};
+        memcpy(temp_payload, map_text, payload_len);
+        temp_payload[payload_len] = '\n';
+        return parse_map_payload(temp_payload, (uint16_t)(payload_len + 1U));
+    }
+
+    return parse_map_payload((const uint8_t *)map_text, (uint16_t)payload_len);
 }
 
 // 从流缓冲提取并解析 $MAP...$END 完整包

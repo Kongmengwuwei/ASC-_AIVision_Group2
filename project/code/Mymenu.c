@@ -1,4 +1,5 @@
 #include "Mymenu.h"
+#include "Camera_handler.h"
 #include "zf_device_key.h"
 #include "zf_common_font.h"
 #include "zf_device_ips200.h"
@@ -155,6 +156,130 @@ void Show_Number(void)
     }
 }
 
+// 显示地图
+void Show_Map(void)
+{
+    // 地图参数
+    const uint16 map_rows = 12;
+    const uint16 map_cols = 16;
+    const uint16 cell_size = 10;
+    const uint16 start_x = 0;
+    const uint16 start_y = 199;
+
+    // 绘制障碍物
+    for (size_t i = 0; i < actual_obstacles_count; i++)
+    {
+        int obs_row = obstacles[i].row;
+        int obs_col = obstacles[i].col;
+        if (obs_row < 0 || obs_col < 0 || obs_row >= (int)map_rows || obs_col >= (int)map_cols)
+        {
+            continue;
+        }
+        uint16 cell_x = start_x + (uint16)obs_col * cell_size;
+        uint16 cell_y = start_y + (uint16)obs_row * cell_size;
+        uint16 x_min = cell_x + 1U;
+        uint16 y_min = cell_y + 1U;
+        uint16 x_max = cell_x + cell_size - 1U;
+        uint16 y_max = cell_y + cell_size - 1U;
+        uint16 span = cell_size - 2U;
+        const uint16 hatch_step = 2U;
+
+        for (uint16 k = 0; k <= span; k += hatch_step)
+        {
+            ips200_draw_line(x_min + k, y_min, x_min, y_min + k, RGB565_WHITE);
+        }
+        for (uint16 k = hatch_step; k <= span; k += hatch_step)
+        {
+            ips200_draw_line(x_max, y_min + k, x_min + k, y_max, RGB565_WHITE);
+        }
+    }   
+    // 绘制箱子
+    for (size_t i = 0; i < actual_boxes_count; i++)
+    {
+        int box_row = boxes[i].row;
+        int box_col = boxes[i].col;
+        if (box_row < 0 || box_col < 0 || box_row >= (int)map_rows || box_col >= (int)map_cols)
+        {
+            continue;
+        }
+
+        uint16 cell_x = start_x + (uint16)box_col * cell_size;
+        uint16 cell_y = start_y + (uint16)box_row * cell_size;
+
+        for (uint16 y = cell_y + 1U; y < cell_y + cell_size; y++)
+        {
+            ips200_draw_line(cell_x + 1U, y, cell_x + cell_size - 1U, y, RGB565_YELLOW);
+        }
+    }
+    // 绘制目标点
+    for (size_t i = 0; i < actual_targets_count; i++)
+    {
+        int target_row = targets[i].row;
+        int target_col = targets[i].col;
+        if (target_row < 0 || target_col < 0 || target_row >= (int)map_rows || target_col >= (int)map_cols)
+        {
+            continue;
+        }
+
+        uint16 cell_x = start_x + (uint16)target_col * cell_size;
+        uint16 cell_y = start_y + (uint16)target_row * cell_size;
+
+        for (uint16 y = cell_y + 1U; y < cell_y + cell_size; y++)
+        {
+            ips200_draw_line(cell_x + 1U, y, cell_x + cell_size - 1U, y, RGB565_PURPLE);
+        }
+    }
+    // 绘制炸弹
+    for (size_t i = 0; i < actual_bombs_count; i++)
+    {
+        int bomb_row = map_bombs[i].row;
+        int bomb_col = map_bombs[i].col;
+        if (bomb_row < 0 || bomb_col < 0 || bomb_row >= (int)map_rows || bomb_col >= (int)map_cols)
+        {
+            continue;
+        }
+
+        uint16 cell_x = start_x + (uint16)bomb_col * cell_size;
+        uint16 cell_y = start_y + (uint16)bomb_row * cell_size;
+
+        for (uint16 y = cell_y + 1U; y < cell_y + cell_size; y++)
+        {
+            ips200_draw_line(cell_x + 1U, y, cell_x + cell_size - 1U, y, RGB565_RED);
+        }
+    }
+
+    // 绘制网格线
+    if (car.row >= 0 && car.col >= 0 && car.row < (int)map_rows && car.col < (int)map_cols)
+    {
+        uint16 cell_x = start_x + (uint16)car.col * cell_size;
+        uint16 cell_y = start_y + (uint16)car.row * cell_size;
+
+        for (uint16 y = cell_y + 1U; y < cell_y + cell_size; y++)
+        {
+            ips200_draw_line(cell_x + 1U, y, cell_x + cell_size - 1U, y, RGB565_CYAN);
+        }
+    }
+
+    for (uint16 i = 0; i <= map_cols; i++)
+    {
+        uint16 x = start_x + i * cell_size;
+        ips200_draw_line(x, start_y, x, start_y + map_rows * cell_size, RGB565_WHITE);
+    }
+    for (uint16 j = 0; j <= map_rows; j++)
+    {
+        uint16 y = start_y + j * cell_size;
+        ips200_draw_line(start_x, y, start_x + map_cols * cell_size, y, RGB565_WHITE);
+    }
+
+    // 地图数据显示
+    ips200_show_string(start_x + (map_cols + 1) * cell_size, start_y, "BOX:");
+    ips200_show_uint(start_x + (map_cols + 1) * cell_size + FONT_W * 5, start_y, actual_boxes_count, 2);
+    ips200_show_string(start_x + (map_cols + 1) * cell_size, start_y + FONT_H, "TAR:");
+    ips200_show_uint(start_x + (map_cols + 1) * cell_size + FONT_W * 5, start_y + FONT_H, actual_targets_count, 2);
+    ips200_show_string(start_x + (map_cols + 1) * cell_size, start_y + FONT_H * 2, "BOM:");
+    ips200_show_uint(start_x + (map_cols + 1) * cell_size + FONT_W * 5, start_y + FONT_H * 2, actual_bombs_count, 2);
+}
+
 // 菜单显示
 void Menu_Show(void)
 {
@@ -172,6 +297,7 @@ void Menu_Show(void)
     Show_Key();
     Show_Setup();
     Show_Number();
+    Show_Map();
 }
 
 // 各类指针操作
@@ -281,9 +407,10 @@ void Key_SetupCtrl_Sub(void) // 步进参数增大(可回到最小值)
 // 菜单切换
 void Menu_Switch(void)
 {
-    key_state_enum k3 = key_get_state(KEY_1);
+    //按键在这里调整
+    key_state_enum k1 = key_get_state(KEY_1);
     key_state_enum k2 = key_get_state(KEY_2);
-    key_state_enum k1 = key_get_state(KEY_3);
+    key_state_enum k3 = key_get_state(KEY_3);
     key_state_enum k4 = key_get_state(KEY_4);
 
     if (k1 == KEY_SHORT_PRESS)

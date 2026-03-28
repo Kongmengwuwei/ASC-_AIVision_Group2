@@ -37,6 +37,8 @@
 #include "Flash.h"
 #include "Mymenu.h"
 #include "Attitude.h"
+#include "Algorithm.h"
+#include "Algorithm_Test.h"
 #include "Camera_handler.h"
 
 // 打开新的工程或者工程移动了位置务必执行以下操作
@@ -67,13 +69,14 @@ int main(void)
   interrupt_set_priority(LPUART1_IRQn, 3);  // 设置中断优先级（中等）
   interrupt_global_enable(0);               // 中断使能
 
+  /*以下为测试*/
   // 在此直接输入地图
   const char *map_text = "################\n"
                          "#.#............#\n"
                          "#........#####.#\n"
                          "##B###...#T..#.#\n"
                          "#....#...#T#.#.#\n"
-                         "#....#####T#.#.#\n"
+                         "#..D.#####T#.#.#\n"
                          "#C......B..B.#.#\n"
                          "#..........###.#\n"
                          "#..............#\n"
@@ -81,11 +84,17 @@ int main(void)
                          "#..............#\n"
                          "################";
   parse_map_from_string(map_text);
+	Test_Data_Load(); // 数据加载到内部测试地图
+  /*以上为测试*/
 
   // 主循环
   while (1)
   {
-    process_blob_data();      //处理摄像头串口数据
+    /*以下为测试*/
+    Test_Data_Save();  // 将内部测试地图数据保存回全局数组
+    /*以上为测试*/
+
+    process_blob_data(); // 处理摄像头串口数据
     Menu_Switch();        
     Menu_Show();
   }

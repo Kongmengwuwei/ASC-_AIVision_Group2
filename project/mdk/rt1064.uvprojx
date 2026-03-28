@@ -534,6 +534,26 @@
               <FileType>5</FileType>
               <FilePath>..\code\Camera_handler.h</FilePath>
             </File>
+            <File>
+              <FileName>Algorithm.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\code\Algorithm.c</FilePath>
+            </File>
+            <File>
+              <FileName>Algorithm.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\code\Algorithm.h</FilePath>
+            </File>
+            <File>
+              <FileName>Algorithm_Test.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\code\Algorithm_Test.c</FilePath>
+            </File>
+            <File>
+              <FileName>Algorithm_Test.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\code\Algorithm_Test.h</FilePath>
+            </File>
           </Files>
         </Group>
         <Group>

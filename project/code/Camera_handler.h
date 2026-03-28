@@ -102,8 +102,8 @@ extern size_t actual_car_path_count;  // 当前路径点数量（若使用）
 extern Point obstacles[MAX_OBSTACLES];                   // 障碍物坐标列表
 extern Point boxes[MAX_BOXES];                           // 箱子坐标列表
 extern Point targets[MAX_TARGETS];                       // 目标点坐标列表
-extern Point map_bombs[MAX_BOMBS];                       // 炸弹坐标列表
-extern Point cat_turth_path[MAX_CAR_PATH];               // 规划路径坐标列表（命名沿用原工程）
+extern Point bombs[MAX_BOMBS];                       // 炸弹坐标列表
+extern Point car_path[MAX_CAR_PATH];                     // 规划路径坐标列表（命名沿用原工程）
 extern Point car;                                        // 车辆整数栅格位置
 extern CarPosition car_position;            // 车辆浮点栅格位置
 extern CarPosition car_position_m;          // 车辆米制位置（row/col * GRID_SIZE_M）

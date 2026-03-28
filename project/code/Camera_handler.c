@@ -21,7 +21,7 @@ static uint8_t fifo_read_buf[FIFO_READ_BUF_SIZE] = {0}; // 每次从FIFO读出�
 Point obstacles[MAX_OBSTACLES] = {{0}};                 // 当前障碍物坐标列表
 Point boxes[MAX_BOXES] = {{0}};                         // 当前箱子坐标列表
 Point targets[MAX_TARGETS] = {{0}};                     // 当前目标点坐标列表
-Point map_bombs[MAX_BOMBS] = {{0}};                     // 当前炸弹坐标列表
+Point bombs[MAX_BOMBS] = {{0}};                     // 当前炸弹坐标列表
 Point cat_turth_path[MAX_CAR_PATH] = {{0}};             // 预留路径坐标列表
 Point car = {1, 2};                                     // 车辆整数栅格位置
 CarPosition car_position = {0.0f, 0.0f};             // 车辆浮点栅格位置
@@ -253,8 +253,8 @@ static void commit_dynamic_round(void)
 
     if (dynamic_bombs_count > 0U)
     {
-        memset(map_bombs, 0, sizeof(map_bombs));
-        memcpy(map_bombs, dynamic_bombs, dynamic_bombs_count * sizeof(Point));
+        memset(bombs, 0, sizeof(bombs));
+        memcpy(bombs, dynamic_bombs, dynamic_bombs_count * sizeof(Point));
         actual_bombs_count = dynamic_bombs_count;
     }
 
@@ -394,7 +394,7 @@ static bool parse_map_payload(const uint8_t *payload, uint16_t payload_len)
     memset(obstacles, 0, sizeof(obstacles));
     memset(boxes, 0, sizeof(boxes));
     memset(targets, 0, sizeof(targets));
-    memset(map_bombs, 0, sizeof(map_bombs));
+    memset(bombs, 0, sizeof(bombs));
 
     if (new_obstacles_count > 0U)
     {
@@ -410,7 +410,7 @@ static bool parse_map_payload(const uint8_t *payload, uint16_t payload_len)
     }
     if (new_bombs_count > 0U)
     {
-        memcpy(map_bombs, new_bombs, new_bombs_count * sizeof(Point
+        memcpy(bombs, new_bombs, new_bombs_count * sizeof(Point
         ));
     }
 
@@ -654,7 +654,7 @@ void uart_blob_init(void)
     memset(obstacles, 0, sizeof(obstacles));
     memset(boxes, 0, sizeof(boxes));
     memset(targets, 0, sizeof(targets));
-    memset(map_bombs, 0, sizeof(map_bombs));
+    memset(bombs, 0, sizeof(bombs));
     memset(cat_turth_path, 0, sizeof(cat_turth_path));
     memset(stream_buf, 0, sizeof(stream_buf));
     stream_len = 0;

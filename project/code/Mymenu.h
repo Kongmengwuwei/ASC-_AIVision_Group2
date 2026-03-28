@@ -2,6 +2,10 @@
 #define __MYMENU_H__
 
 #include "menu.h"
+#include "Algorithm_Test.h"
+#include "Camera_handler.h"
+#include "zf_device_key.h"
+#include "zf_common_font.h"
 #include "zf_device_ips200.h"
 
 #define FONT_W (8)               //字体宽

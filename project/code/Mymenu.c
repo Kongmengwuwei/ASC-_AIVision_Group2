@@ -5,8 +5,8 @@ Menu_Item *Key; // 指针
 
 int32_t test1 = 1234; // 测试数据
 float test2 = 123.45; // 测试数据
-uint8_t test3 = 1; // 测试数据
-bool test4 = true; // 测试数据
+uint8_t test3 = 1;    // 测试数据
+bool test4 = true;    // 测试数据
 
 bool Algo_Test = false; // 算法测试开关
 
@@ -170,56 +170,67 @@ void Show_Map(void)
 
     enum
     {
-        OBS = 0x01,
-        BOX = 0x02,
-        TAR = 0x04,
-        BOM = 0x08,
-        CAR = 0x10
+        MAP_OBS = 0x01,
+        MAP_BOX = 0x02,
+        MAP_TAR = 0x04,
+        MAP_BOM = 0x08,
+        MAP_CAR = 0x10,
+        MAP_PATH = 0x20
     };
 
-    for (size_t i = 0; i < actual_obstacles_count; i++)
+    for (size_t i = 0; i < Obstacles_count; i++)
     {
         int r = obstacles[i].row;
         int c = obstacles[i].col;
         if (r >= 0 && c >= 0 && r < (int)map_rows && c < (int)map_cols)
         {
-            curr_cells[r][c] |= OBS;
-        } 
+            curr_cells[r][c] |= MAP_OBS;
+        }
     }
 
-    for (size_t i = 0; i < actual_boxes_count; i++)
+    for (size_t i = 0; i < Boxes_count; i++)
     {
         int r = boxes[i].row;
         int c = boxes[i].col;
         if (r >= 0 && c >= 0 && r < (int)map_rows && c < (int)map_cols)
         {
-            curr_cells[r][c] |= CELL_BOX;
+            curr_cells[r][c] |= MAP_BOX;
         }
     }
 
-    for (size_t i = 0; i < actual_targets_count; i++)
+    for (size_t i = 0; i < Targets_count; i++)
     {
         int r = targets[i].row;
         int c = targets[i].col;
         if (r >= 0 && c >= 0 && r < (int)map_rows && c < (int)map_cols)
         {
-            curr_cells[r][c] |= TAR;
+            curr_cells[r][c] |= MAP_TAR;
         }
     }
 
-    for (size_t i = 0; i < actual_bombs_count; i++)
+    for (size_t i = 0; i < Bombs_count; i++)
     {
         int r = bombs[i].row;
         int c = bombs[i].col;
         if (r >= 0 && c >= 0 && r < (int)map_rows && c < (int)map_cols)
         {
-            curr_cells[r][c] |= BOM;
+            curr_cells[r][c] |= MAP_BOM;
+        }
+    }
+
+    for (size_t i = 0; i < Car_path_count; i++)
+    {
+        int r = car_path[i].row;
+        int c = car_path[i].col;
+        if (r >= 0 && c >= 0 && r < (int)map_rows && c < (int)map_cols)
+        {
+            curr_cells[r][c] |= MAP_PATH;
         }
     }
 
     if (car.row >= 0 && car.col >= 0 && car.row < (int)map_rows && car.col < (int)map_cols)
     {
-        curr_cells[car.row][car.col] |= CAR;
+        curr_cells[car.row][car.col] |= MAP_CAR;
     }
 
     uint8 changed = (inited == 0U) ? 1U : 0U;
@@ -254,35 +265,42 @@ void Show_Map(void)
                     ips200_draw_line(cell_x + 1U, y, cell_x + cell_size - 1U, y, RGB565_BLACK);
                 }
 
-                if (curr_cells[r][c] & CAR)
+                if (curr_cells[r][c] & MAP_CAR)
                 {
                     for (uint16 y = cell_y + 1U; y < cell_y + cell_size; y++)
                     {
                         ips200_draw_line(cell_x + 1U, y, cell_x + cell_size - 1U, y, RGB565_CYAN);
                     }
                 }
-                else if (curr_cells[r][c] & BOM)
+                else if (curr_cells[r][c] & MAP_BOM)
                 {
                     for (uint16 y = cell_y + 1U; y < cell_y + cell_size; y++)
                     {
                         ips200_draw_line(cell_x + 1U, y, cell_x + cell_size - 1U, y, RGB565_RED);
                     }
                 }
-                else if (curr_cells[r][c] & CELL_BOX)
+                else if (curr_cells[r][c] & MAP_BOX)
                 {
                     for (uint16 y = cell_y + 1U; y < cell_y + cell_size; y++)
                     {
                         ips200_draw_line(cell_x + 1U, y, cell_x + cell_size - 1U, y, RGB565_YELLOW);
                     }
                 }
-                else if (curr_cells[r][c] & TAR)
+                else if (curr_cells[r][c] & MAP_TAR)
                 {
                     for (uint16 y = cell_y + 1U; y < cell_y + cell_size; y++)
                     {
                         ips200_draw_line(cell_x + 1U, y, cell_x + cell_size - 1U, y, RGB565_PURPLE);
                     }
                 }
-                else if (curr_cells[r][c] & OBS)
+                else if (curr_cells[r][c] & MAP_PATH)
+                {
+                    for (uint16 y = cell_y + 1U; y < cell_y + cell_size; y++)
+                    {
+                        ips200_draw_line(cell_x + 1U, y, cell_x + cell_size - 1U, y, RGB565_GRAY);
+                    }
+                }
+                else if (curr_cells[r][c] & MAP_OBS)
                 {
                     uint16 x_min = cell_x + 1U;
                     uint16 y_min = cell_y + 1U;
@@ -325,11 +343,11 @@ void Show_Map(void)
     inited = 1U;
 
     ips200_show_string(start_x + (map_cols + 1) * cell_size, start_y, "BOX:");
-    ips200_show_uint(start_x + (map_cols + 1) * cell_size + FONT_W * 5, start_y, actual_boxes_count, 2);
+    ips200_show_uint(start_x + (map_cols + 1) * cell_size + FONT_W * 5, start_y, Boxes_count, 2);
     ips200_show_string(start_x + (map_cols + 1) * cell_size, start_y + FONT_H, "TAR:");
-    ips200_show_uint(start_x + (map_cols + 1) * cell_size + FONT_W * 5, start_y + FONT_H, actual_targets_count, 2);
+    ips200_show_uint(start_x + (map_cols + 1) * cell_size + FONT_W * 5, start_y + FONT_H, Targets_count, 2);
     ips200_show_string(start_x + (map_cols + 1) * cell_size, start_y + FONT_H * 2, "BOM:");
-    ips200_show_uint(start_x + (map_cols + 1) * cell_size + FONT_W * 5, start_y + FONT_H * 2, actual_bombs_count, 2);
+    ips200_show_uint(start_x + (map_cols + 1) * cell_size + FONT_W * 5, start_y + FONT_H * 2, Bombs_count, 2);
 }
 
 // 菜单显示
@@ -479,7 +497,7 @@ void Menu_Switch(void)
     key_state_enum k4 = key_get_state(KEY_4);
 
     if (k1 == KEY_SHORT_PRESS)
-    {   
+    {
         Move_car('W'); // 测试用小车向上移动
 
         if (Key->selected == false)

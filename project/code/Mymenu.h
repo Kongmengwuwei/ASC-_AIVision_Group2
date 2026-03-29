@@ -2,6 +2,7 @@
 #define __MYMENU_H__
 
 #include "menu.h"
+#include "Algorithm.h"
 #include "Algorithm_Test.h"
 #include "Camera_handler.h"
 #include "zf_device_key.h"

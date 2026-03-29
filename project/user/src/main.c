@@ -40,6 +40,7 @@
 #include "Algorithm.h"
 #include "Algorithm_Test.h"
 #include "Camera_handler.h"
+#include <string.h>
 
 // 打开新的工程或者工程移动了位置务必执行以下操作
 // 第一步 关闭上面所有打开的文件
@@ -84,8 +85,10 @@ int main(void)
                          "#..............#\n"
                          "################";
   parse_map_from_string(map_text);
-	Test_Data_Load(); // 数据加载到内部测试地图
+	Test_Data_Load(); // 数据加载到内部测试地图+
   /*以上为测试*/
+
+  
 
   // 主循环
   while (1)

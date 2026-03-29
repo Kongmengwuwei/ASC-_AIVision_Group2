@@ -1,34 +1,40 @@
-#include "Algorithm_Test.h"
+﻿#include "Algorithm_Test.h"
 #include <string.h>
 
 /*
- * 内部状态说明：
- * s_grid  : 地图位图，按位存储障碍/箱子/目标/炸弹。
- * s_rows  : 当前地图行数。
- * s_cols  : 当前地图列数。
- * s_car   : 小车当前位置（网格坐标）。
- * s_ready : 地图是否已完成初始化。
+ * 内部状态：
+ * s_grid  : 地图位图（按位存储障碍/箱子/目标/炸弹）
+ * s_rows  : 当前地图行数
+ * s_cols  : 当前地图列数
+ * s_car   : 小车当前位置
+ * s_ready : 地图是否已初始化
  */
 static uint8 s_grid[MAP_ROWS * MAP_COLS] = {0};
 static int s_rows = MAP_ROWS;
 static int s_cols = MAP_COLS;
-static Point s_car = {0, 0};
+static Position s_car = {0, 0};
 static uint8 s_ready = 0u;
 
-// 判断坐标是否在当前地图有效范围内。
+// 判断坐标是否在地图范围内。
 static int in_range(int row, int col)
 {
     return (row >= 0 && row < s_rows && col >= 0 && col < s_cols);
 }
 
-// 将二维(row,col)映射到一维数组下标。
+// 判断是否位于地图最外圈（边界）。
+static int is_outer_ring(int row, int col)
+{
+    return (row == 0 || col == 0 || row == (s_rows - 1) || col == (s_cols - 1));
+}
+
+// 二维坐标映射到一维数组下标。
 static int grid_index(int row, int col)
 {
     return row * s_cols + col;
 }
 
-// 将 points 列表中的元素按 flag 写入位图（越界点自动忽略）。
-static void fill_points(const Point *points, int count, uint8 flag)
+// 将点集写入地图位图（越界点自动忽略）。
+static void fill_points(const Position *points, int count, uint8 flag)
 {
     int i;
     if (points == 0 || count <= 0)
@@ -47,11 +53,7 @@ static void fill_points(const Point *points, int count, uint8 flag)
     }
 }
 
-/*
- * 把用户输入命令解析为方向增量。
- * d_row = 行方向，d_col = 列方向：
- * 上(-1,0) 下(1,0) 左(0,-1) 右(0,1)
- */
+// 解析移动命令，输出行列方向增量。
 static int decode_move(char move_cmd, int *d_row, int *d_col)
 {
     if (d_row == 0 || d_col == 0)
@@ -65,15 +67,19 @@ static int decode_move(char move_cmd, int *d_row, int *d_col)
     switch (move_cmd)
     {
     case 'W':
+    case 'w':
         *d_row = -1;
         return 1;
     case 'S':
+    case 's':
         *d_row = 1;
         return 1;
     case 'A':
+    case 'a':
         *d_col = -1;
         return 1;
     case 'D':
+    case 'd':
         *d_col = 1;
         return 1;
     default:
@@ -81,7 +87,10 @@ static int decode_move(char move_cmd, int *d_row, int *d_col)
     }
 }
 
-// 清除以(center_row, center_col)为中心 3x3 范围内的所有墙(OBSTACLE)。
+/*
+ * 清除(center_row, center_col)周围3x3范围内的墙。
+ * 新规则：地图最外圈障碍物不可被炸毁。
+ */
 static void clear_obstacles_3x3(int center_row, int center_col)
 {
     int row;
@@ -91,29 +100,29 @@ static void clear_obstacles_3x3(int center_row, int center_col)
     {
         for (col = center_col - 1; col <= center_col + 1; col++)
         {
-            if (in_range(row, col))
+            if (!in_range(row, col))
             {
-                s_grid[grid_index(row, col)] &= (uint8)(~CELL_OBSTACLE);
+                continue;
             }
+
+            if (is_outer_ring(row, col))
+            {
+                continue;
+            }
+
+            s_grid[grid_index(row, col)] &= (uint8)(~CELL_OBSTACLE);
         }
     }
 }
 
-/*
- * 初始化地图：
- * 1) 校验并设置地图尺寸；
- * 2) 清空内部位图；
- * 3) 写入障碍/箱子/目标/炸弹；
- * 4) 设置小车初始位置；
- * 5) 标记地图已就绪。
- */
+// 用外部输入对象初始化内部地图状态。
 void Test_init_map(int rows, int cols,
-                   const Point *obstacles, int obstacles_cnt,
-                   const Point *boxes, int boxes_cnt,
-                   const Point *targets, int targets_cnt,
-                   const Point *bombs, int bombs_cnt,
-                   Point car_start)
-{   
+                   const Position *obstacles, int obstacles_cnt,
+                   const Position *boxes, int boxes_cnt,
+                   const Position *targets, int targets_cnt,
+                   const Position *bombs, int bombs_cnt,
+                   Position car_start)
+{
     if (rows > 0 && rows <= MAP_ROWS)
     {
         s_rows = rows;
@@ -122,6 +131,7 @@ void Test_init_map(int rows, int cols,
     {
         s_rows = MAP_ROWS;
     }
+
     if (cols > 0 && cols <= MAP_COLS)
     {
         s_cols = cols;
@@ -151,23 +161,19 @@ void Test_init_map(int rows, int cols,
     s_ready = 1u;
 }
 
-// 直接读取识别模块当前全局数据，刷新内部地图。
+// 从全局识别结果加载地图。
 void Test_Data_Load(void)
 {
     Test_init_map(MAP_ROWS, MAP_COLS,
-                  obstacles, (int)actual_obstacles_count,
-                  boxes, (int)actual_boxes_count,
-                  targets, (int)actual_targets_count,
-                       bombs, (int)actual_bombs_count,
-                       car);
+                  obstacles, (int)Obstacles_count,
+                  boxes, (int)Boxes_count,
+                  targets, (int)Targets_count,
+                  bombs, (int)Bombs_count,
+                  car);
 }
 
-/*
- * 统计并导出指定元素的坐标。
- * 当 out_points 为空时，函数仍会进行计数；
- * 当计数超过 max_points 时，仅写入前 max_points 个。
- */
-int Test_get_positions(uint8 element_flag, Point *out_points, int max_points)
+// 导出指定元素坐标。
+int Test_get_positions(uint8 element_flag, Position *out_points, int max_points)
 {
     int count = 0;
     int row;
@@ -202,10 +208,7 @@ int Test_get_positions(uint8 element_flag, Point *out_points, int max_points)
     return count;
 }
 
-/*
- * 将内部位图反向同步到 Camera_handler 的全局数组：
- * obstacles / boxes / targets / map_bombs / car
- */
+// 将内部状态回写到全局数组。
 void Test_Data_Save(void)
 {
     if (!s_ready)
@@ -218,23 +221,21 @@ void Test_Data_Save(void)
     memset(targets, 0, sizeof(targets));
     memset(bombs, 0, sizeof(bombs));
 
-    actual_obstacles_count = (size_t)Test_get_positions(CELL_OBSTACLE, obstacles, MAX_OBSTACLES);
-    actual_boxes_count = (size_t)Test_get_positions(CELL_BOX, boxes, MAX_BOXES);
-    actual_targets_count = (size_t)Test_get_positions(CELL_TARGET, targets, MAX_TARGETS);
-    actual_bombs_count = (size_t)Test_get_positions(CELL_BOMB, bombs, MAX_BOMBS);
+    Obstacles_count = (size_t)Test_get_positions(CELL_OBSTACLE, obstacles, MAX_OBSTACLES);
+    Boxes_count = (size_t)Test_get_positions(CELL_BOX, boxes, MAX_BOXES);
+    Targets_count = (size_t)Test_get_positions(CELL_TARGET, targets, MAX_TARGETS);
+    Bombs_count = (size_t)Test_get_positions(CELL_BOMB, bombs, MAX_BOMBS);
 
     car = s_car;
 }
 
 /*
- * 执行一次小车移动并处理交互：
- * A. 普通移动：目标格为空或只有目标点 -> 小车直接前进；
- * B. 推箱子：
- *    - 前方是箱子，且箱子下一格必须可进入（不能是墙/箱子/炸弹）；
- *    - 若箱子下一格是目标点，则箱子和目标点同时消失；
- * C. 推炸弹：
- *    - 前方是炸弹，且炸弹下一格不能是箱子或炸弹；
- *    - 若炸弹下一格是墙，则触发爆炸，清除该墙中心 3x3 范围内的墙。
+ * 执行一次小车移动：
+ * 1) 撞墙不能走；
+ * 2) 可推动箱子一格；
+ * 3) 箱子进目标点后，箱子和目标点同时消失；
+ * 4) 可推动炸弹；炸弹撞墙时爆炸并清除3x3墙体；
+ * 5) 最外圈障碍物不可被炸毁。
  */
 Move_Result Move_car(char move_cmd)
 {
@@ -270,7 +271,7 @@ Move_Result Move_car(char move_cmd)
         return MOVE_BLOCKED;
     }
 
-    // 规则1：推箱子（单向 1 格）。
+    // 处理推箱子。
     if ((next_cell & CELL_BOX) != 0u)
     {
         push_row = next_row + d_row;
@@ -286,25 +287,22 @@ Move_Result Move_car(char move_cmd)
             return MOVE_BLOCKED;
         }
 
-        // 先移除原位置箱子。
         s_grid[grid_index(next_row, next_col)] &= (uint8)(~CELL_BOX);
         if ((push_cell & CELL_TARGET) != 0u)
         {
-            // 规则2：箱子进入目标点时，箱子和目标点都消失。
             s_grid[grid_index(push_row, push_col)] &= (uint8)(~CELL_TARGET);
             s_car.row = next_row;
             s_car.col = next_col;
             return MOVE_BOX_TARGET_CLEARED;
         }
 
-        // 普通推箱子成功：箱子占据下一格。
         s_grid[grid_index(push_row, push_col)] |= CELL_BOX;
         s_car.row = next_row;
         s_car.col = next_col;
         return MOVE_OK;
     }
 
-    // 规则3：推炸弹。
+    // 处理推炸弹。
     if ((next_cell & CELL_BOMB) != 0u)
     {
         push_row = next_row + d_row;
@@ -320,25 +318,22 @@ Move_Result Move_car(char move_cmd)
             return MOVE_BLOCKED;
         }
 
-        // 炸弹离开原位置。
         s_grid[grid_index(next_row, next_col)] &= (uint8)(~CELL_BOMB);
         if ((push_cell & CELL_OBSTACLE) != 0u)
         {
-            // 规则4：炸弹撞墙后爆炸，清除墙体 3x3。
             clear_obstacles_3x3(push_row, push_col);
             s_car.row = next_row;
             s_car.col = next_col;
             return MOVE_BOMB_EXPLODED;
         }
 
-        // 炸弹未撞墙，正常被推动一格。
         s_grid[grid_index(push_row, push_col)] |= CELL_BOMB;
         s_car.row = next_row;
         s_car.col = next_col;
         return MOVE_OK;
     }
 
-    // 普通前进（前方不是墙/箱子/炸弹）。
+    // 普通前进。
     s_car.row = next_row;
     s_car.col = next_col;
     return MOVE_OK;

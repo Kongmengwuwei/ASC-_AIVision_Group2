@@ -11,61 +11,46 @@
 // 动态更新行的最大长度（如 C123,456）
 #define DYNAMIC_LINE_MAX_LEN 48U
 
+volatile bool car_position_valid = false; // 车辆位置是否有效
+uint8_t image_find_flag = 0; // 车辆位置是否越界（1越界）
+
 // 串口FIFO底层缓存与一次处理读缓冲
-uint32 format_count = 0;                              // 完成有效解析（初始帧/动态轮）的计数器
-uint8_t uart_fifo_buf[FIFO_SIZE];                     // FIFO底层存储数组
-fifo_struct uart_data_fifo;                           // 串口接收FIFO对象
+uint32 format_count = 0;                                // 完成有效解析（初始帧/动态轮）的计数器
+uint8_t uart_fifo_buf[FIFO_SIZE];                       // FIFO底层存储数组
+fifo_struct uart_data_fifo;                             // 串口接收FIFO对象
 static uint8_t fifo_read_buf[FIFO_READ_BUF_SIZE] = {0}; // 每次从FIFO读出的临时缓冲
 
-// 当前生效地图对象（供外部模块读取）
-Point obstacles[MAX_OBSTACLES] = {{0}};                 // 当前障碍物坐标列表
-Point boxes[MAX_BOXES] = {{0}};                         // 当前箱子坐标列表
-Point targets[MAX_TARGETS] = {{0}};                     // 当前目标点坐标列表
-Point bombs[MAX_BOMBS] = {{0}};                     // 当前炸弹坐标列表
-Point cat_turth_path[MAX_CAR_PATH] = {{0}};             // 预留路径坐标列表
-Point car = {1, 2};                                     // 车辆整数栅格位置
-CarPosition car_position = {0.0f, 0.0f};             // 车辆浮点栅格位置
-CarPosition car_position_m = {0.0f, 0.0f};           // 车辆米制坐标
-volatile bool car_position_valid = false;            // 车辆位置是否有效
-uint8_t image_find_flag = 0;                         // 车辆位置是否越界（1越界）
+bool data_reception_complete = false; // 初始地图数据是否接收完成
+BlobInfo blob_info = {0};             // 色块识别结果缓存
 
-size_t actual_obstacles_count = 0;                   // 当前障碍物数量
-size_t actual_boxes_count = 0;                       // 当前箱子数量
-size_t actual_targets_count = 0;                     // 当前目标点数量
-size_t actual_bombs_count = 0;                       // 当前炸弹数量
-size_t actual_car_path_count = 0;                    // 当前路径点数量
+map_state_t map_state = MAP_STATE_INIT;    // 当前解析状态机状态
+bool initial_map_ready = false;            // 初始地图是否已可用
+bool uart_data_processing_enabled = false; // 串口解析总开关
+int32 dynamic_map_enable = 1;              // 是否允许动态地图更新
 
-bool data_reception_complete = false;                // 初始地图数据是否接收完成
-BlobInfo blob_info = {0};                            // 色块识别结果缓存
+uint8_t init_map_received_count = 0; // 初始地图成功接收次数
+bool current_round_complete = false; // 当前一轮解析是否完成
 
-map_state_t map_state = MAP_STATE_INIT;              // 当前解析状态机状态
-bool initial_map_ready = false;                      // 初始地图是否已可用
-bool uart_data_processing_enabled = false;           // 串口解析总开关
-int32 dynamic_map_enable = 1;                        // 是否允许动态地图更新
-
-uint8_t init_map_received_count = 0;                 // 初始地图成功接收次数
-bool current_round_complete = false;                 // 当前一轮解析是否完成
-
-uint8_t get_data_1 = 0;                              // 车辆数据到位标记
-uint8_t get_data_2 = 0;                              // 障碍物数据到位标记
-uint8_t get_data_3 = 0;                              // 箱子数据到位标记
-uint8_t get_data_4 = 0;                              // 目标点数据到位标记
+uint8_t get_data_1 = 0; // 车辆数据到位标记
+uint8_t get_data_2 = 0; // 障碍物数据到位标记
+uint8_t get_data_3 = 0; // 箱子数据到位标记
+uint8_t get_data_4 = 0; // 目标点数据到位标记
 
 // 字节流拼接缓冲：用于拼接串口碎片数据
-static uint8_t stream_buf[FRAME_BUF_SIZE] = {0};     // 拼包缓冲区
-static uint16_t stream_len = 0;                      // 当前拼包缓冲有效长度
+static uint8_t stream_buf[FRAME_BUF_SIZE] = {0}; // 拼包缓冲区
+static uint16_t stream_len = 0;                  // 当前拼包缓冲有效长度
 
 // 动态地图一轮临时缓存：遇到车辆行后统一提交
-static Point dynamic_obstacles[MAX_OBSTACLES] = {{0}};              // 本轮动态障碍物缓存
-static Point dynamic_boxes[MAX_BOXES] = {{0}};                      // 本轮动态箱子缓存
-static Point dynamic_targets[MAX_TARGETS] = {{0}};                  // 本轮动态目标点缓存
-static Point dynamic_bombs[MAX_BOMBS] = {{0}};                      // 本轮动态炸弹缓存
-static size_t dynamic_obstacles_count = 0;             // 本轮动态障碍物数量
-static size_t dynamic_boxes_count = 0;                 // 本轮动态箱子数量
-static size_t dynamic_targets_count = 0;               // 本轮动态目标点数量
-static size_t dynamic_bombs_count = 0;                 // 本轮动态炸弹数量
-static Point dynamic_car = {0, 0};                     // 本轮动态车辆位置
-static bool dynamic_car_received = false;              // 本轮是否收到车辆行（提交触发条件）
+static Position dynamic_obstacles[MAX_OBSTACLES] = {{0}}; // 本轮动态障碍物缓存
+static Position dynamic_boxes[MAX_BOXES] = {{0}};         // 本轮动态箱子缓存
+static Position dynamic_targets[MAX_TARGETS] = {{0}};     // 本轮动态目标点缓存
+static Position dynamic_bombs[MAX_BOMBS] = {{0}};         // 本轮动态炸弹缓存
+static size_t dynamic_obstacles_count = 0;                // 本轮动态障碍物数量
+static size_t dynamic_boxes_count = 0;                    // 本轮动态箱子数量
+static size_t dynamic_targets_count = 0;                  // 本轮动态目标点数量
+static size_t dynamic_bombs_count = 0;                    // 本轮动态炸弹数量
+static Position dynamic_car = {0, 0};                     // 本轮动态车辆位置
+static bool dynamic_car_received = false;                 // 本轮是否收到车辆行（提交触发条件）
 
 // 在缓冲区中查找指定子串，返回首位置或-1
 static int find_pattern(const uint8_t *buf, uint16_t len, const char *pattern, uint16_t pattern_len)
@@ -230,32 +215,32 @@ static void commit_dynamic_round(void)
     if (dynamic_obstacles_count > 0U)
     {
         memset(obstacles, 0, sizeof(obstacles));
-        memcpy(obstacles, dynamic_obstacles, dynamic_obstacles_count * sizeof(Point));
-        actual_obstacles_count = dynamic_obstacles_count;
+        memcpy(obstacles, dynamic_obstacles, dynamic_obstacles_count * sizeof(Position));
+        Obstacles_count = dynamic_obstacles_count;
         get_data_2 = 2;
     }
 
     if (dynamic_boxes_count > 0U)
     {
         memset(boxes, 0, sizeof(boxes));
-        memcpy(boxes, dynamic_boxes, dynamic_boxes_count * sizeof(Point));
-        actual_boxes_count = dynamic_boxes_count;
+        memcpy(boxes, dynamic_boxes, dynamic_boxes_count * sizeof(Position));
+        Boxes_count = dynamic_boxes_count;
         get_data_3 = 3;
     }
 
     if (dynamic_targets_count > 0U)
     {
         memset(targets, 0, sizeof(targets));
-        memcpy(targets, dynamic_targets, dynamic_targets_count * sizeof(Point));
-        actual_targets_count = dynamic_targets_count;
+        memcpy(targets, dynamic_targets, dynamic_targets_count * sizeof(Position));
+        Targets_count = dynamic_targets_count;
         get_data_4 = 4;
     }
 
     if (dynamic_bombs_count > 0U)
     {
         memset(bombs, 0, sizeof(bombs));
-        memcpy(bombs, dynamic_bombs, dynamic_bombs_count * sizeof(Point));
-        actual_bombs_count = dynamic_bombs_count;
+        memcpy(bombs, dynamic_bombs, dynamic_bombs_count * sizeof(Position));
+        Bombs_count = dynamic_bombs_count;
     }
 
     current_round_complete = true;
@@ -282,17 +267,17 @@ static bool parse_map_payload(const uint8_t *payload, uint16_t payload_len)
         return false;
     }
 
-    Point new_obstacles[MAX_OBSTACLES] = {{0}};              // 新解析出的障碍物列表（临时）
-    Point new_boxes[MAX_BOXES] = {{0}};         // 新解析出的箱子列表（临时）
-    Point new_targets[MAX_TARGETS] = {{0}};     // 新解析出的目标点列表（临时）
-    Point new_bombs[MAX_BOMBS] = {{0}};         // 新解析出的炸弹列表（临时）
-    Point new_car = {0, 0};                     // 新解析出的车辆位置（临时）
-    size_t new_obstacles_count = 0;             // 新障碍物数量
-    size_t new_boxes_count = 0;                 // 新箱子数量
-    size_t new_targets_count = 0;               // 新目标点数量
-    size_t new_bombs_count = 0;                 // 新炸弹数量
-    bool car_found = false;                     // 本帧是否找到且仅找到一个车辆标记
-    uint16_t idx = 0U;                          // payload遍历游标
+    Position new_obstacles[MAX_OBSTACLES] = {{0}}; // 新解析出的障碍物列表（临时）
+    Position new_boxes[MAX_BOXES] = {{0}};         // 新解析出的箱子列表（临时）
+    Position new_targets[MAX_TARGETS] = {{0}};     // 新解析出的目标点列表（临时）
+    Position new_bombs[MAX_BOMBS] = {{0}};         // 新解析出的炸弹列表（临时）
+    Position new_car = {0, 0};                     // 新解析出的车辆位置（临时）
+    size_t new_obstacles_count = 0;                // 新障碍物数量
+    size_t new_boxes_count = 0;                    // 新箱子数量
+    size_t new_targets_count = 0;                  // 新目标点数量
+    size_t new_bombs_count = 0;                    // 新炸弹数量
+    bool car_found = false;                        // 本帧是否找到且仅找到一个车辆标记
+    uint16_t idx = 0U;                             // payload遍历游标
 
     for (size_t row = 0; row < MAP_ROWS; row++) // row: 当前解析的地图行
     {
@@ -398,20 +383,19 @@ static bool parse_map_payload(const uint8_t *payload, uint16_t payload_len)
 
     if (new_obstacles_count > 0U)
     {
-        memcpy(obstacles, new_obstacles, new_obstacles_count * sizeof(Point));
+        memcpy(obstacles, new_obstacles, new_obstacles_count * sizeof(Position));
     }
     if (new_boxes_count > 0U)
     {
-        memcpy(boxes, new_boxes, new_boxes_count * sizeof(Point));
+        memcpy(boxes, new_boxes, new_boxes_count * sizeof(Position));
     }
     if (new_targets_count > 0U)
     {
-        memcpy(targets, new_targets, new_targets_count * sizeof(Point));
+        memcpy(targets, new_targets, new_targets_count * sizeof(Position));
     }
     if (new_bombs_count > 0U)
     {
-        memcpy(bombs, new_bombs, new_bombs_count * sizeof(Point
-        ));
+        memcpy(bombs, new_bombs, new_bombs_count * sizeof(Position));
     }
 
     car = new_car;
@@ -422,10 +406,10 @@ static bool parse_map_payload(const uint8_t *payload, uint16_t payload_len)
     car_position_valid = true;
     image_find_flag = 0;
 
-    actual_obstacles_count = new_obstacles_count;
-    actual_boxes_count = new_boxes_count;
-    actual_targets_count = new_targets_count;
-    actual_bombs_count = new_bombs_count;
+    Obstacles_count = new_obstacles_count;
+    Boxes_count = new_boxes_count;
+    Targets_count = new_targets_count;
+    Bombs_count = new_bombs_count;
 
     data_reception_complete = true;
     initial_map_ready = true;
@@ -483,7 +467,7 @@ static void parse_map_packets(void)
             return;
         }
 
-        uint16_t search_from = (uint16_t)start + MAP_FRAME_HEADER_TAG_LEN; // search_from: 开始寻找$END的位置
+        uint16_t search_from = (uint16_t)start + MAP_FRAME_HEADER_TAG_LEN;                         // search_from: 开始寻找$END的位置
         int end_rel = find_pattern(stream_buf + search_from, (uint16_t)(stream_len - search_from), // end_rel: 相对search_from的$END偏移
                                    MAP_FRAME_TAIL_TAG, MAP_FRAME_TAIL_TAG_LEN);
         if (end_rel < 0)
@@ -491,10 +475,10 @@ static void parse_map_packets(void)
             return;
         }
 
-        uint16_t end_tag_pos = (uint16_t)(search_from + end_rel); // end_tag_pos: $END标签起点
+        uint16_t end_tag_pos = (uint16_t)(search_from + end_rel);                             // end_tag_pos: $END标签起点
         uint16_t payload_start = skip_line_break_prefix(stream_buf, stream_len, search_from); // payload起始（跳过首部换行）
-        uint16_t payload_end = end_tag_pos; // payload结束（不含$END）
-        uint16_t packet_end = (uint16_t)(end_tag_pos + MAP_FRAME_TAIL_TAG_LEN); // packet_end: 完整包结束位置
+        uint16_t payload_end = end_tag_pos;                                                   // payload结束（不含$END）
+        uint16_t packet_end = (uint16_t)(end_tag_pos + MAP_FRAME_TAIL_TAG_LEN);               // packet_end: 完整包结束位置
         packet_end = skip_line_break_prefix(stream_buf, stream_len, packet_end);
 
         if (payload_end > payload_start)
@@ -655,15 +639,15 @@ void uart_blob_init(void)
     memset(boxes, 0, sizeof(boxes));
     memset(targets, 0, sizeof(targets));
     memset(bombs, 0, sizeof(bombs));
-    memset(cat_turth_path, 0, sizeof(cat_turth_path));
+    memset(car_path, 0, sizeof(car_path));
     memset(stream_buf, 0, sizeof(stream_buf));
     stream_len = 0;
 
-    actual_obstacles_count = 0;
-    actual_boxes_count = 0;
-    actual_targets_count = 0;
-    actual_bombs_count = 0;
-    actual_car_path_count = 0;
+    Obstacles_count = 0;
+    Boxes_count = 0;
+    Targets_count = 0;
+    Bombs_count = 0;
+    Car_path_count = 0;
     init_map_received_count = 0;
     current_round_complete = false;
 

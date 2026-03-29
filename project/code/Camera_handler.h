@@ -1,10 +1,10 @@
 #ifndef __CAMERA_HANDLER_H_
 #define __CAMERA_HANDLER_H_
 
-// #include "assigned_box_planner_greedy_2.h"
 #include "zf_common_fifo.h"
 #include "zf_common_typedef.h"
 #include "zf_driver_uart.h"
+#include "Algorithm.h"
 
 // 串口配置：用于接收摄像头发送的数据流
 #define UART_INDEX UART_1
@@ -33,18 +33,6 @@
 
 typedef struct
 {
-    int row; // 栅格行号
-    int col; // 栅格列号
-} Point;
-
-typedef struct
-{
-    float row; // 车辆行坐标（可带小数）
-    float col; // 车辆列坐标（可带小数）
-} CarPosition;
-
-typedef struct
-{
     int16_t cx;   // 色块中心x（像素）
     int16_t cy;   // 色块中心y（像素）
     int16_t w;    // 色块宽度（像素）
@@ -54,12 +42,6 @@ typedef struct
     int w_error;   // 相对期望宽度的误差
     float distance; // 距离估计值（单位由上层约定）
 } BlobInfo;
-
-#define MAX_OBSTACLES 100
-#define MAX_BOXES 10
-#define MAX_TARGETS 10
-#define MAX_BOMBS 10
-#define MAX_CAR_PATH 250
 
 #define NO_PIXEL_TO_GRID_RATIO 1
 #define ROW_PIXEL_TO_GRID_RATIO 10.67f
@@ -91,24 +73,6 @@ extern bool initial_map_ready;             // 初始地图是否已经解析成�
 extern bool uart_data_processing_enabled;  // 串口数据解析总开关
 extern int32 dynamic_map_enable;           // 是否启用动态更新解析（0关闭，非0开启）
 
-// 当前生效对象数量
-extern size_t actual_obstacles_count; // 当前障碍物数量
-extern size_t actual_boxes_count;     // 当前箱子数量
-extern size_t actual_targets_count;   // 当前目标点数量
-extern size_t actual_bombs_count;     // 当前炸弹数量
-extern size_t actual_car_path_count;  // 当前路径点数量（若使用）
-
-// 当前生效地图对象与车辆位置
-extern Point obstacles[MAX_OBSTACLES];                   // 障碍物坐标列表
-extern Point boxes[MAX_BOXES];                           // 箱子坐标列表
-extern Point targets[MAX_TARGETS];                       // 目标点坐标列表
-extern Point bombs[MAX_BOMBS];                       // 炸弹坐标列表
-extern Point car_path[MAX_CAR_PATH];                     // 规划路径坐标列表（命名沿用原工程）
-extern Point car;                                        // 车辆整数栅格位置
-extern CarPosition car_position;            // 车辆浮点栅格位置
-extern CarPosition car_position_m;          // 车辆米制位置（row/col * GRID_SIZE_M）
-extern volatile bool car_position_valid;    // 车辆位置是否有效
-
 // 帧级状态
 extern uint8_t init_map_received_count; // 成功接收到初始地图的次数
 extern bool current_round_complete;     // 当前一轮解析是否完成
@@ -125,5 +89,6 @@ extern fifo_struct uart_data_fifo; // 串口原始字节FIFO
 extern BlobInfo blob_info;         // 色块识别信息缓存
 extern uint32 format_count;        // 成功完成的解析轮次计数
 extern uint8_t image_find_flag;    // 图像定位异常标记（越界等）
+extern volatile bool car_position_valid; // 车辆位置是否有效
 
 #endif

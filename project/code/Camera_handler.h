@@ -2,9 +2,8 @@
 #define __CAMERA_HANDLER_H_
 
 #include "zf_common_fifo.h"
-#include "zf_common_typedef.h"
 #include "zf_driver_uart.h"
-#include "Algorithm.h"
+#include "Map_Route_Data.h"
 
 // 串口配置：用于接收摄像头发送的数据流
 #define UART_INDEX UART_1
@@ -21,9 +20,7 @@
 #define CAMERA_WIDTH 320
 #define CAMERA_HEIGHT 240
 
-// 地图尺寸与符号协议定义（与串口文本协议对应）
-#define MAP_ROWS 12
-#define MAP_COLS 16
+// 地图符号协议定义（与串口文本协议对应）
 #define MAP_SYMBOL_OBSTACLE '#'
 #define MAP_SYMBOL_EMPTY '.'
 #define MAP_SYMBOL_CAR 'C'

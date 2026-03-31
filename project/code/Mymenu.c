@@ -1,14 +1,18 @@
 ﻿#include "Mymenu.h"
 
 Menu_Item Root; // 根目录
-Menu_Item *Key; // 指针
+Menu_Item *pointer; // 指针
+
+char move_cmd = 'X'; // 移动命令缓存
+uint8 move_ret = 0; // 移动结果缓存
 
 int32_t test1 = 1234; // 测试数据
 float test2 = 123.45; // 测试数据
 uint8_t test3 = 1;    // 测试数据
 bool test4 = true;    // 测试数据
 
-bool Algo_Test = false; // 算法测试开关
+bool Algo_Test_auto = true;    // 自动算法测试开关
+bool Algo_Test_hand = false;    // 手动算法测试开关
 
 // 创建菜单
 void Menu_Create(void)
@@ -21,7 +25,8 @@ void Menu_Create(void)
     Menu_Item *Folder5 = Create_Menu_Folder_dynamic(&Root, "Folder5");
 
     // 在此动态创建文件 //
-    Create_Menu_File_dynamic(Folder1, "ALgo_Test", &Algo_Test, bool_Box);
+    Create_Menu_File_dynamic(Folder1, "ALgo_Auto", &Algo_Test_auto, bool_Box);
+    Create_Menu_File_dynamic(Folder1, "ALgo_Hand", &Algo_Test_hand, bool_Box);
     Create_Menu_File_dynamic(Folder2, "File2", &test2, float_Box);
     Create_Menu_File_dynamic(Folder3, "File3", &test3, uint8_Box);
     Create_Menu_File_dynamic(Folder4, "File4", &test4, bool_Box);
@@ -38,7 +43,7 @@ void Menu_Init(void)
     ips200_init(IPS200_TYPE_SPI);
 
     // 按键初始化
-    key_init(20);
+    key_init(20); 
 
     // 菜单节点初始化
     Root.name = "MENU";
@@ -56,7 +61,7 @@ void Menu_Init(void)
 
     // 菜单初始化处理
     if (Root.sons != 0)
-        Key = Root.First_Son;    // 指针默认指向第一个节点
+        pointer = Root.First_Son; // 指针默认指向第一个节点
     All_Folder_Menu_Init(&Root); // 初始化所有文件夹菜单
 }
 
@@ -66,7 +71,7 @@ static void Show_title(void)
     char tmpchar[COLS_SUM_LEN - SETUP_NUMBER_LEN + 1];
     for (int i = 0; i < COLS_SUM_LEN - SETUP_NUMBER_LEN + 1; i++)
         tmpchar[i] = ' ';
-    sprintf(tmpchar, "%s/", Key->Father->name);
+    sprintf(tmpchar, "%s/", pointer->Father->name);
     tmpchar[strlen(tmpchar)] = ' ';
     tmpchar[COLS_SUM_LEN - SETUP_NUMBER_LEN] = '\0';
     ips200_show_string(0, SHOW_START_Y, tmpchar);
@@ -75,12 +80,12 @@ static void Show_title(void)
 // 显示指针位置
 void Show_Key(void)
 {
-    Menu_Item *r = Key->Father;
+    Menu_Item *r = pointer->Father;
     Menu_Item *s = r->First_Son;
 
     for (int i = 1; i < r->sons + 1; i++)
     {
-        if (s == Key)
+        if (s == pointer)
         {
             ips200_show_string(0, SHOW_START_Y + FONT_H * i, "->");
         }
@@ -110,7 +115,7 @@ static void Show_Setup(void)
 // 显示各类数据
 void Show_Number(void)
 {
-    Menu_Item *r = Key->Father;
+    Menu_Item *r = pointer->Father;
     Menu_Item *s = r->First_Son;
 
     for (int i = 1; i < r->sons + 1; i++)
@@ -158,16 +163,22 @@ void Show_Number(void)
 // 显示地图
 void Show_Map(void)
 {
+    // 地图参数配置
     const uint16 map_rows = 12;
     const uint16 map_cols = 16;
+    const uint16 inner_rows = 10;
+    const uint16 inner_cols = 14;
+    const uint16 inner_row_offset = 1;
+    const uint16 inner_col_offset = 1;
     const uint16 cell_size = 10;
+    // 地图起始坐标（左上角）
     const uint16 start_x = 0;
     const uint16 start_y = 199;
-
+    // 地图元素状态缓存
     static uint8 inited = 0U;
     static uint8 last_cells[12][16] = {{0}};
     uint8 curr_cells[12][16] = {{0}};
-
+    // 地图元素类型位定义
     enum
     {
         MAP_OBS = 0x01,
@@ -178,61 +189,70 @@ void Show_Map(void)
         MAP_PATH = 0x20
     };
 
+    // 固定绘制外圈一整圈障碍物（12x16 边框）
+    for (uint16 r = 0; r < map_rows; r++)
+    {
+        curr_cells[r][0] |= MAP_OBS;
+        curr_cells[r][map_cols - 1] |= MAP_OBS;
+    }
+    for (uint16 c = 0; c < map_cols; c++)
+    {
+        curr_cells[0][c] |= MAP_OBS;
+        curr_cells[map_rows - 1][c] |= MAP_OBS;
+    }
+
+    // 内圈元素坐标：基于 10x14（row:0~9, col:0~13），显示时映射到 [1..10][1..14]
     for (size_t i = 0; i < Obstacles_count; i++)
     {
         int r = obstacles[i].row;
         int c = obstacles[i].col;
-        if (r >= 0 && c >= 0 && r < (int)map_rows && c < (int)map_cols)
+        if (r >= 0 && c >= 0 && r < (int)inner_rows && c < (int)inner_cols)
         {
-            curr_cells[r][c] |= MAP_OBS;
+            curr_cells[r + inner_row_offset][c + inner_col_offset] |= MAP_OBS;
         }
     }
-
     for (size_t i = 0; i < Boxes_count; i++)
     {
         int r = boxes[i].row;
         int c = boxes[i].col;
-        if (r >= 0 && c >= 0 && r < (int)map_rows && c < (int)map_cols)
+        if (r >= 0 && c >= 0 && r < (int)inner_rows && c < (int)inner_cols)
         {
-            curr_cells[r][c] |= MAP_BOX;
+            curr_cells[r + inner_row_offset][c + inner_col_offset] |= MAP_BOX;
         }
     }
-
     for (size_t i = 0; i < Targets_count; i++)
     {
         int r = targets[i].row;
         int c = targets[i].col;
-        if (r >= 0 && c >= 0 && r < (int)map_rows && c < (int)map_cols)
+        if (r >= 0 && c >= 0 && r < (int)inner_rows && c < (int)inner_cols)
         {
-            curr_cells[r][c] |= MAP_TAR;
+            curr_cells[r + inner_row_offset][c + inner_col_offset] |= MAP_TAR;
         }
     }
-
     for (size_t i = 0; i < Bombs_count; i++)
     {
         int r = bombs[i].row;
         int c = bombs[i].col;
-        if (r >= 0 && c >= 0 && r < (int)map_rows && c < (int)map_cols)
+        if (r >= 0 && c >= 0 && r < (int)inner_rows && c < (int)inner_cols)
         {
-            curr_cells[r][c] |= MAP_BOM;
+            curr_cells[r + inner_row_offset][c + inner_col_offset] |= MAP_BOM;
         }
     }
-
     for (size_t i = 0; i < Car_path_count; i++)
     {
         int r = car_path[i].row;
         int c = car_path[i].col;
-        if (r >= 0 && c >= 0 && r < (int)map_rows && c < (int)map_cols)
+        if (r >= 0 && c >= 0 && r < (int)inner_rows && c < (int)inner_cols)
         {
-            curr_cells[r][c] |= MAP_PATH;
+            curr_cells[r + inner_row_offset][c + inner_col_offset] |= MAP_PATH;
         }
     }
-
-    if (car.row >= 0 && car.col >= 0 && car.row < (int)map_rows && car.col < (int)map_cols)
+    if (car.row >= 0 && car.col >= 0 && car.row < (int)inner_rows && car.col < (int)inner_cols)
     {
-        curr_cells[car.row][car.col] |= MAP_CAR;
+        curr_cells[car.row + inner_row_offset][car.col + inner_col_offset] |= MAP_CAR;
     }
 
+    // 检测地图状态是否变化，未变化则不重绘
     uint8 changed = (inited == 0U) ? 1U : 0U;
     for (uint16 r = 0; r < map_rows && !changed; r++)
     {
@@ -245,12 +265,12 @@ void Show_Map(void)
             }
         }
     }
-
     if (!changed)
     {
         return;
     }
 
+    // 绘制地图元素
     for (uint16 r = 0; r < map_rows; r++)
     {
         for (uint16 c = 0; c < map_cols; c++)
@@ -321,7 +341,7 @@ void Show_Map(void)
             }
         }
     }
-
+    // 绘制网格线
     for (uint16 i = 0; i <= map_cols; i++)
     {
         uint16 x = start_x + i * cell_size;
@@ -332,7 +352,7 @@ void Show_Map(void)
         uint16 y = start_y + j * cell_size;
         ips200_draw_line(start_x, y, start_x + map_cols * cell_size, y, RGB565_WHITE);
     }
-
+    // 记录当前地图状态
     for (uint16 r = 0; r < map_rows; r++)
     {
         for (uint16 c = 0; c < map_cols; c++)
@@ -341,19 +361,24 @@ void Show_Map(void)
         }
     }
     inited = 1U;
-
+    // 显示地图数据
     ips200_show_string(start_x + (map_cols + 1) * cell_size, start_y, "BOX:");
     ips200_show_uint(start_x + (map_cols + 1) * cell_size + FONT_W * 5, start_y, Boxes_count, 2);
     ips200_show_string(start_x + (map_cols + 1) * cell_size, start_y + FONT_H, "TAR:");
     ips200_show_uint(start_x + (map_cols + 1) * cell_size + FONT_W * 5, start_y + FONT_H, Targets_count, 2);
     ips200_show_string(start_x + (map_cols + 1) * cell_size, start_y + FONT_H * 2, "BOM:");
     ips200_show_uint(start_x + (map_cols + 1) * cell_size + FONT_W * 5, start_y + FONT_H * 2, Bombs_count, 2);
+
+    ips200_show_char(start_x + (map_cols + 1) * cell_size, start_y + FONT_H * 5, move_cmd);
+    ips200_show_uint(start_x + (map_cols + 1) * cell_size, start_y + FONT_H * 6, s_path_index, 3);
+    ips200_show_char(start_x + (map_cols + 1) * cell_size + FONT_W * 3, start_y + FONT_H * 6, '/');
+    ips200_show_uint(start_x + (map_cols + 1) * cell_size + FONT_W * 4, start_y + FONT_H * 6, Car_path_count, 3);
 }
 
 // 菜单显示
 void Menu_Show(void)
 {
-    Menu_Item *r = Key->Father;
+    Menu_Item *r = pointer->Father;
     Menu_Item *s = r->First_Son;
 
     Show_title();
@@ -372,72 +397,72 @@ void Menu_Show(void)
 // 各类按键处理
 void Key_Up(void) // 指针上移
 {
-    if (Key->Last_Brother != NULL)
-        Key = Key->Last_Brother;
+    if (pointer->Last_Brother != NULL)
+        pointer = pointer->Last_Brother;
 }
 void Key_Down(void) // 指针下移
 {
-    if (Key->Next_Brother != NULL)
-        Key = Key->Next_Brother;
+    if (pointer->Next_Brother != NULL)
+        pointer = pointer->Next_Brother;
 }
 void Key_Plus(void) // 数据增大
 {
-    switch (Key->kind)
+    switch (pointer->kind)
     {
     case int32_Box:
-        *(int32_t *)Key->data += (int32_t)SetupNumber[SetupIndex];
+        *(int32_t *)pointer->data += (int32_t)SetupNumber[SetupIndex];
         break;
     case uint32_Box:
-        *(uint32_t *)Key->data += (uint32_t)SetupNumber[SetupIndex];
+        *(uint32_t *)pointer->data += (uint32_t)SetupNumber[SetupIndex];
         break;
     case int16_Box:
-        *(int16_t *)Key->data += (int16_t)SetupNumber[SetupIndex];
+        *(int16_t *)pointer->data += (int16_t)SetupNumber[SetupIndex];
         break;
     case uint16_Box:
-        *(uint16_t *)Key->data += (uint16_t)SetupNumber[SetupIndex];
+        *(uint16_t *)pointer->data += (uint16_t)SetupNumber[SetupIndex];
         break;
     case int8_Box:
-        *(int8_t *)Key->data += (int8_t)SetupNumber[SetupIndex];
+        *(int8_t *)pointer->data += (int8_t)SetupNumber[SetupIndex];
         break;
     case uint8_Box:
-        *(uint8_t *)Key->data += (uint8_t)SetupNumber[SetupIndex];
+        *(uint8_t *)pointer->data += (uint8_t)SetupNumber[SetupIndex];
         break;
     case float_Box:
-        *(float *)Key->data += SetupNumber[SetupIndex];
+        *(float *)pointer->data += SetupNumber[SetupIndex];
         break;
     case bool_Box:
-        *(bool *)Key->data = true;
+        *(bool *)pointer->data = true;
     default:
         break;
     }
 }
 void Key_Sub(void) // 数据减小
 {
-    switch (Key->kind)
+    switch (pointer->kind)
     {
     case int32_Box:
-        *(int32_t *)Key->data -= (int32_t)SetupNumber[SetupIndex];
+        *(int32_t *)pointer->data -= (int32_t)SetupNumber[SetupIndex];
         break;
     case uint32_Box:
-        *(uint32_t *)Key->data -= (uint32_t)SetupNumber[SetupIndex];
+        *(uint32_t *)pointer->data -= (uint32_t)SetupNumber[SetupIndex];
         break;
     case int16_Box:
-        *(int16_t *)Key->data -= (int16_t)SetupNumber[SetupIndex];
+        *(int16_t *)pointer->data -= (int16_t)SetupNumber[SetupIndex];
         break;
     case uint16_Box:
-        *(uint16_t *)Key->data -= (uint16_t)SetupNumber[SetupIndex];
+        *(uint16_t *)pointer->data -= (uint16_t)SetupNumber[SetupIndex];
         break;
     case int8_Box:
-        *(int8_t *)Key->data -= (int8_t)SetupNumber[SetupIndex];
+        *(int8_t *)pointer->data -= (int8_t)SetupNumber[SetupIndex];
         break;
     case uint8_Box:
-        *(uint8_t *)Key->data -= (uint8_t)SetupNumber[SetupIndex];
+        *(uint8_t *)pointer->data -= (uint8_t)SetupNumber[SetupIndex];
         break;
     case float_Box:
-        *(float *)Key->data -= SetupNumber[SetupIndex];
+        *(float *)pointer->data -= SetupNumber[SetupIndex];
         break;
     case bool_Box:
-        *(bool *)Key->data = false;
+        *(bool *)pointer->data = false;
         break;
     default:
         break;
@@ -445,9 +470,9 @@ void Key_Sub(void) // 数据减小
 }
 void Key_Enter(void) // 进入文件夹
 {
-    if (Key->kind == MENU_Folder)
+    if (pointer->kind == MENU_Folder)
     {
-        Key = Key->First_Son;
+        pointer = pointer->First_Son;
         ips200_show_string(0, 0, "                              ");
         ips200_show_string(0, 16, "                              ");
         ips200_show_string(0, 32, "                              ");
@@ -460,9 +485,9 @@ void Key_Enter(void) // 进入文件夹
 }
 void Key_Exit(void) // 退出文件夹
 {
-    if (Key->Father->Father != NULL)
+    if (pointer->Father->Father != NULL)
     {
-        Key = Key->Father;
+        pointer = pointer->Father;
         ips200_show_string(0, 0, "                              ");
         ips200_show_string(0, 16, "                              ");
         ips200_show_string(0, 32, "                              ");
@@ -475,8 +500,8 @@ void Key_Exit(void) // 退出文件夹
 }
 void Key_Select(void) // 选中/取消选中
 {
-    if (Key->kind != MENU_Folder)
-        Key->selected = !Key->selected;
+    if (pointer->kind != MENU_Folder)
+        pointer->selected = !pointer->selected;
 }
 void Key_SetupCtrl_Plus(void) // 步进值增大
 {
@@ -498,39 +523,58 @@ void Menu_Switch(void)
 
     if (k1 == KEY_SHORT_PRESS)
     {
-        Move_car('W'); // 测试用小车向上移动
+        if (Algo_Test_hand)Move_car('W'); // 算法测试用小车向上移动
 
-        if (Key->selected == false)
-            Key_Up();
-        else
-            Key_Plus();
+        //常规模式下菜单操作：选中文件时增大数据，未选中时指针上移
+        if (!Algo_Test_hand && !Algo_Test_auto)
+        {
+            if (pointer->selected == false)
+                Key_Up();
+            else
+                Key_Plus();
+        }
     }
     else if (k2 == KEY_SHORT_PRESS)
     {
-        Move_car('S'); // 测试用小车向下移动
+        if (Algo_Test_hand)Move_car('S'); // 算法测试用小车向下移动
 
-        if (Key->selected == false)
-            Key_Down();
-        else
-            Key_Sub();
+        //常规模式下菜单操作：选中文件时减小数据，未选中时指针下移
+        if (!Algo_Test_hand && !Algo_Test_auto)
+        {       
+            if (pointer->selected == false)
+                Key_Down();
+            else
+                Key_Sub();
+        }
     }
     else if (k3 == KEY_SHORT_PRESS)
     {
-        Move_car('A'); // 测试用小车向左移动
+        if (Algo_Test_hand)Move_car('A'); // 算法测试用小车向左移动
+        if (Algo_Test_auto)move_ret = Test_Path_ALL(); // 算法测试自动一次性执行完整路径
 
-        if (Key->kind == MENU_Folder)
-            Key_Enter();
-        else
-            Key_Select();
+        //常规模式下菜单操作：文件夹进入，文件选中/取消选中
+        if (!Algo_Test_hand && !Algo_Test_auto)
+        {
+            if (pointer->kind == MENU_Folder)
+                Key_Enter();
+            else
+                Key_Select();
+        }
     }
+
     else if (k4 == KEY_SHORT_PRESS)
     {
-        Move_car('D'); // 测试用小车向右移动
+        if (Algo_Test_hand)Move_car('D'); // 算法测试用小车向右移动
+        if (Algo_Test_auto)move_ret = Test_Path_Step(&move_cmd); // 算法测试自动执行路径一步
 
-        if (Key->kind != MENU_Folder && Key->selected == true)
-            Key_SetupCtrl_Sub();
-        else
-            Key_Exit();
+        // 常规模式下菜单操作：选中文件时调整步进值，未选中时退出文件夹
+        if (!Algo_Test_hand && !Algo_Test_auto)
+        {
+            if (pointer->kind != MENU_Folder && pointer->selected == true)
+                Key_SetupCtrl_Sub();
+            else
+                Key_Exit();
+        }
     }
 
     key_clear_state(KEY_1);

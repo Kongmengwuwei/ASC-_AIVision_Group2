@@ -1,22 +1,5 @@
 #include "Algorithm.h"
 
-// 当前生效地图对象数量
-size_t Obstacles_count = 0; // 当前障碍物数量
-size_t Boxes_count = 0;     // 当前箱子数量
-size_t Targets_count = 0;   // 当前目标点数量
-size_t Bombs_count = 0;     // 当前炸弹数量
-size_t Car_path_count = 0;  // 当前路径点数量
-
-// 当前生效地图对象位置
-Position obstacles[MAX_OBSTACLES] = {{0}}; // 当前障碍物坐标列表
-Position boxes[MAX_BOXES] = {{0}};         // 当前箱子坐标列表
-Position targets[MAX_TARGETS] = {{0}};     // 当前目标点坐标列表
-Position bombs[MAX_BOMBS] = {{0}};         // 当前炸弹坐标列表
-Position car_path[MAX_CAR_PATH] = {{0}};   // 预留路径坐标列表
-Position car = {1, 2};                     // 车辆整数栅格位置
-CarPosition car_position = {0.0f, 0.0f};   // 车辆浮点栅格位置
-CarPosition car_position_m = {0.0f, 0.0f}; // 车辆米制坐标
-
 // 网格构建
 static void grid_build(int row_cnt, int col_cnt,
                        const Position *obstacles, int obstacles_cnt,
@@ -27,8 +10,8 @@ static void grid_build(int row_cnt, int col_cnt,
 {
     // 确定网格大小
     int n = row_cnt * col_cnt;
-    if (n > available_max_grid_size)
-        n = available_max_grid_size;
+    if (n > grid_size)
+        n = grid_size;
     // 清空网格
     memset(grid, 0, n);
     // 标记各块
@@ -44,12 +27,6 @@ static void grid_build(int row_cnt, int col_cnt,
         if (r >= 0 && r < row_cnt && c >= 0 && c < col_cnt)
             grid[r * col_cnt + c] |= BOMB;
     }
-    //  if(use_blocked_bombs){
-    //      for(int i = 0; i < blocked_bombs_cnt; i++){
-    //      int r = blocked_bombs[i].row, c = blocked_bombs[i].col;
-    //      if (r >= 0 && r < row_cnt && c >= 0 && c < col_cnt)
-    //      grid[r * col_cnt + c] |= BLOCKED_BOMB;
-    //  }}
     for (int i = 0; i < boxes_cnt; i++)
     {
         int r = boxes[i].row, c = boxes[i].col;
@@ -176,7 +153,7 @@ static inline void heap_sift_down(a_star_param *nodes, binary_heap *heap, int i)
 // 压入元素并维持堆属性
 static void heap_push(a_star_param *nodes, binary_heap *heap, int node_index)
 {
-    if (heap->size >= available_max_grid_size)
+    if (heap->size >= grid_size)
         return;
 
     int i = heap->size++;
@@ -266,7 +243,7 @@ static int extract_push_points_from_path(const Position *box_path, int path_len,
 }
 
 // A*算法路径规划
-a_star_param a_star[available_max_grid_size];
+a_star_param a_star[grid_size];
 
 static int a_star_path_plan(int row_cnt, int col_cnt,
                             const Position *obstacles, int obstacles_cnt,
@@ -283,7 +260,7 @@ static int a_star_path_plan(int row_cnt, int col_cnt,
         return -1;
 
     // 构建网格状态
-    uint8_t grid[available_max_grid_size];
+    uint8_t grid[grid_size];
     grid_build(row_cnt, col_cnt, obstacles, obstacles_cnt, bombs, bombs_cnt, boxes, boxes_cnt, 0, grid);
 
     // 初始化 A* 的节点访问组标识
@@ -417,7 +394,7 @@ static int a_star_path_plan(int row_cnt, int col_cnt,
 }
 
 // 二叉堆代码(添加推面状态)
-a_star_3d_param a_star_3d[available_max_grid_size * 4];
+a_star_3d_param a_star_3d[grid_size * 4];
 
 static inline void heap_swap_3d(binary_heap_3d *heap, int i, int j)
 {
@@ -477,7 +454,7 @@ static inline void heap_sift_down_3d(binary_heap_3d *heap, int i)
 
 static void heap_push_3d(binary_heap_3d *heap, int node_index)
 {
-    if (heap->size >= available_max_grid_size * 4)
+    if (heap->size >= grid_size * 4)
         return;
 
     int i = heap->size++;
@@ -527,7 +504,7 @@ int a_star_path_plan_3d(int row_cnt, int col_cnt,
         local_boxes[i] = boxes[i];
     Position box_start = local_boxes[box_index];
 
-    uint8_t grid[available_max_grid_size];
+    uint8_t grid[grid_size];
     grid_build(row_cnt, col_cnt, obstacles, obstacles_cnt, bombs, bombs_cnt, local_boxes, boxes_cnt, 0, grid);
 
     memset(a_star_3d, 0, sizeof(a_star_3d));
@@ -547,7 +524,7 @@ int a_star_path_plan_3d(int row_cnt, int col_cnt,
         int push_point_col = box_start.col - dir_col_3d[f];
 
         local_boxes[box_index] = box_start;
-        Position temp_path[available_max_grid_size];
+        Position temp_path[grid_size];
 
         // 计算到达推点的路径
         int walk_len = a_star_path_plan(row_cnt, col_cnt,
@@ -695,7 +672,7 @@ int a_star_path_plan_3d(int row_cnt, int col_cnt,
 
             local_boxes[box_index] = (Position){row, col}; // 将箱子本身定为障碍
             Position car_from = {row - dir_row_3d[face], col - dir_col_3d[face]};
-            Position temp_path[available_max_grid_size];
+            Position temp_path[grid_size];
 
             int walk_len = a_star_path_plan(row_cnt, col_cnt,
                                             obstacles, obstacles_cnt, bombs, bombs_cnt,
@@ -732,7 +709,7 @@ int a_star_path_plan_3d(int row_cnt, int col_cnt,
     if (target_3d_index == -1)
         return -1;
 
-    int sp_path[available_max_grid_size * 4];
+    int sp_path[grid_size * 4];
     int sp_path_len = 0;
     int curr = target_3d_index;
 
@@ -759,7 +736,7 @@ int a_star_path_plan_3d(int row_cnt, int col_cnt,
 
     Position car_target = {start_row - dir_row_3d[start_face], start_col - dir_col_3d[start_face]};
     local_boxes[box_index] = (Position){start_row, start_col};
-    Position temp[available_max_grid_size];
+    Position temp[grid_size];
 
     int walk_len = a_star_path_plan(row_cnt, col_cnt,
                                     obstacles, obstacles_cnt, bombs, bombs_cnt,
@@ -796,7 +773,7 @@ int a_star_path_plan_3d(int row_cnt, int col_cnt,
             Position c_to = {prev_r - dir_row_3d[curr_f], prev_c - dir_col_3d[curr_f]};
 
             local_boxes[box_index] = (Position){prev_r, prev_c};
-            Position temp[available_max_grid_size];
+            Position temp[grid_size];
 
             int walk_steps = a_star_path_plan(row_cnt, col_cnt,
                                               obstacles, obstacles_cnt, bombs, bombs_cnt,
@@ -895,7 +872,7 @@ int evaluate_bomb_shortcut(int row_cnt, int col_cnt,
     }
 
     // 剔除目标墙壁，以便可以将炸弹直接推入墙壁的坐标内爆破
-    Position phase1_obs[available_max_grid_size];
+    Position phase1_obs[grid_size];
     int phase1_obs_cnt = 0;
     for (int i = 0; i < obstacles_cnt; i++)
     {
@@ -923,7 +900,7 @@ int evaluate_bomb_shortcut(int row_cnt, int col_cnt,
         return -1;
 
     // 修改地形
-    Position temp_obstacles[available_max_grid_size];
+    Position temp_obstacles[grid_size];
     for (int i = 0; i < obstacles_cnt; i++)
         temp_obstacles[i] = obstacles[i];
     int temp_obs_cnt = obstacles_cnt;
@@ -975,7 +952,7 @@ int integrated_path_output(int row_cnt, int col_cnt,
 
     int best_len = -1;
 
-    Position simple_path[available_max_grid_size * 4];
+    Position simple_path[grid_size * 4];
     Position simple_target;
 
     int simple_len = a_star_path_plan_3d(row_cnt, col_cnt,
@@ -1002,7 +979,7 @@ int integrated_path_output(int row_cnt, int col_cnt,
 
     if (bombs_cnt > 0)
     {
-        Position candidate_walls[available_max_grid_size];
+        Position candidate_walls[grid_size];
         int wall_cnt;
 
         if (simple_len < 0)
@@ -1026,7 +1003,7 @@ int integrated_path_output(int row_cnt, int col_cnt,
         {
             for (int w = 0; w < wall_cnt; w++)
             {
-                Position temp_path[available_max_grid_size * 8];
+                Position temp_path[grid_size * 8];
                 Position actual_bomb_target;
                 Position actual_box_target;
                 int bomb_steps = evaluate_bomb_shortcut(row_cnt, col_cnt,

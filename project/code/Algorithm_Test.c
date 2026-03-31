@@ -14,17 +14,13 @@ static int s_rows = MAP_ROWS;
 static int s_cols = MAP_COLS;
 static Position s_car = {0, 0};
 static uint8 s_ready = 0u;
+static uint8 s_path_ready = 0u;
+size_t s_path_index = 0u;
 
 // 判断坐标是否在地图范围内。
 static int in_range(int row, int col)
 {
     return (row >= 0 && row < s_rows && col >= 0 && col < s_cols);
-}
-
-// 判断是否位于地图最外圈（边界）。
-static int is_outer_ring(int row, int col)
-{
-    return (row == 0 || col == 0 || row == (s_rows - 1) || col == (s_cols - 1));
 }
 
 // 二维坐标映射到一维数组下标。
@@ -87,10 +83,38 @@ static int decode_move(char move_cmd, int *d_row, int *d_col)
     }
 }
 
-/*
- * 清除(center_row, center_col)周围3x3范围内的墙。
- * 新规则：地图最外圈障碍物不可被炸毁。
- */
+// 将路径相邻点位移转换为 Move_car 可识别的方向命令。
+static int delta_to_move_cmd(int d_row, int d_col, char *cmd)
+{
+    if (cmd == 0)
+    {
+        return 0;
+    }
+
+    if (d_row == -1 && d_col == 0)
+    {
+        *cmd = 'W';
+        return 1;
+    }
+    if (d_row == 1 && d_col == 0)
+    {
+        *cmd = 'S';
+        return 1;
+    }
+    if (d_row == 0 && d_col == -1)
+    {
+        *cmd = 'A';
+        return 1;
+    }
+    if (d_row == 0 && d_col == 1)
+    {
+        *cmd = 'D';
+        return 1;
+    }
+    return 0;
+}
+
+// 清除(center_row, center_col)周围3x3范围内的墙。
 static void clear_obstacles_3x3(int center_row, int center_col)
 {
     int row;
@@ -101,11 +125,6 @@ static void clear_obstacles_3x3(int center_row, int center_col)
         for (col = center_col - 1; col <= center_col + 1; col++)
         {
             if (!in_range(row, col))
-            {
-                continue;
-            }
-
-            if (is_outer_ring(row, col))
             {
                 continue;
             }
@@ -234,8 +253,7 @@ void Test_Data_Save(void)
  * 1) 撞墙不能走；
  * 2) 可推动箱子一格；
  * 3) 箱子进目标点后，箱子和目标点同时消失；
- * 4) 可推动炸弹；炸弹撞墙时爆炸并清除3x3墙体；
- * 5) 最外圈障碍物不可被炸毁。
+ * 4) 可推动炸弹；炸弹撞墙时爆炸并清除3x3墙体。
  */
 Move_Result Move_car(char move_cmd)
 {
@@ -337,4 +355,96 @@ Move_Result Move_car(char move_cmd)
     s_car.row = next_row;
     s_car.col = next_col;
     return MOVE_OK;
+}
+
+void Test_Path_Init(void)
+{
+    if (!s_ready)
+    {
+        Test_Data_Load();
+    }
+    // 小车对齐到路径起点，从第2个点开始逐步执行。
+    s_car = car_path[0];
+    car = s_car;
+    s_path_index = 1u;
+    s_path_ready = 1u;
+
+    Test_Data_Save();
+}
+
+int Test_Path_Step(char *out_cmd)
+{
+    char cmd;
+    Move_Result ret;
+
+    if (!s_path_ready)
+    {
+        return -1;
+    }
+
+    while (s_path_index < Car_path_count)
+    {
+        int d_row = car_path[s_path_index].row - car_path[s_path_index - 1u].row;
+        int d_col = car_path[s_path_index].col - car_path[s_path_index - 1u].col;
+        s_path_index++;
+
+        // 相邻重复点不产生移动命令，直接跳过。
+        if (d_row == 0 && d_col == 0)
+        {
+            continue;
+        }
+
+        if (!delta_to_move_cmd(d_row, d_col, &cmd))
+        {
+            s_path_ready = 0u;
+            return -3;
+        }
+
+        ret = Move_car(cmd);
+
+        if (out_cmd != 0)
+        {
+            *out_cmd = cmd;
+        }
+
+        if (ret == MOVE_BLOCKED)
+        {
+            s_path_ready = 0u;
+            return -4;
+        }
+
+        Test_Data_Save();
+        return 1;
+    }
+
+    // 路径结束。
+    s_path_ready = 0u;
+    Test_Data_Save();
+    return 0;
+}
+
+int Test_Path_ALL(void)
+{
+    int ret;
+    int step_count = 0;
+
+    if (ret < 0)
+    {
+        return ret;
+    }
+
+    while (1)
+    {
+        ret = Test_Path_Step(0);
+        if (ret == 1)
+        {
+            step_count++;
+            continue;
+        }
+        if (ret == 0)
+        {
+            return step_count;
+        }
+        return ret;
+    }
 }

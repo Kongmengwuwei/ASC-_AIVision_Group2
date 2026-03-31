@@ -58,7 +58,7 @@ int main(void)
   uart_blob_init();     // 摄像头串口接收与解析模块初始化
   flash_init();         // Flash模块初始化
   Menu_Init();          // 菜单系统初始化(包含按键，显示屏等相关初始化)
-//  Attitude_Init();      // 姿态解算模块初始化
+  //  Attitude_Init();      // 姿态解算模块初始化
 
   // 中断初始化
   pit_ms_init(PIT_CH0, 20);                 // 初始化 PIT_CH0 为周期中断 20ms 周期
@@ -72,23 +72,34 @@ int main(void)
 
   /*以下为测试*/
   // 在此直接输入地图
-  const char *map_text = "################\n"
-                         "#.#............#\n"
-                         "#........#####.#\n"
-                         "##B###...#T..#.#\n"
-                         "#....#...#T#.#.#\n"
-                         "#..D.#####T#.#.#\n"
-                         "#C......B..B.#.#\n"
-                         "#..........###.#\n"
-                         "#..............#\n"
-                         "#.....####.....#\n"
-                         "#..............#\n"
-                         "################";
-  parse_map_from_string(map_text);
-	Test_Data_Load(); // 数据加载到内部测试地图+
-  /*以上为测试*/
+  const char *map_text = ".#............\n"
+                         "........#####.\n"
+                         "#B###...#T..#.\n"
+                         "....#...#T#.#.\n"
+                         "..D.#####T#.#.\n"
+                         "C......B..B.#.\n"
+                         "..........###.\n"
+                         "..............\n"
+                         ".....####.....\n"
+                         "..............\n";
 
-  
+  parse_map_from_string(map_text);
+  Car_path_count = 11;
+  car_path[0].row = 6;car_path[0].col = 0;
+  car_path[1].row = 5;car_path[1].col = 0;
+  car_path[2].row = 4;car_path[2].col = 0;
+  car_path[3].row = 4;car_path[3].col = 1;
+  car_path[4].row = 4;car_path[4].col = 2;
+  car_path[5].row = 4;car_path[5].col = 3;
+  car_path[6].row = 5;car_path[6].col = 3;
+  car_path[7].row = 5;car_path[7].col = 4;
+  car_path[8].row = 5;car_path[8].col = 5;
+  car_path[9].row = 5;car_path[9].col = 6;
+  car_path[10].row = 5;car_path[10].col = 7;
+  car_path[11].row = 5;car_path[11].col = 8;
+  Test_Data_Load(); // 数据加载到内部测试地图
+  Test_Path_Init(); // 路径初始化
+  /*以上为测试*/
 
   // 主循环
   while (1)

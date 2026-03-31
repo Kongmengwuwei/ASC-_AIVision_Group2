@@ -1,14 +1,20 @@
 本文档旨在说明各个文件功能，便于区分，参考与使用
 分为不同模块，模块内由上到下为底层到表层顺序
 
+
+
 菜单模块：
-    menu
-    链表菜单基础架构
-    Flash
-    Flash数据写入，读取，清除，用于菜单存储参数
+    menu        
+    Flash       //Flash数据写入，读取，清除，用于菜单存储参数
     Mymenu      
-    可调用函数用于菜单初始化，刷新，显示
-    在此修改菜单，增加或调整选项
+
+摄像头数据处理模块：
+    Camera_handler
+
+算法模块：
+    Map_Route_Data
+    Algorithm
+    Algorithm_Test
 
 姿态解算模块：
     matrix
@@ -21,7 +27,5 @@
     PID_Config
     PID
     Motor
-
-摄像头数据处理：
-    Camera_handler
+    Path
     

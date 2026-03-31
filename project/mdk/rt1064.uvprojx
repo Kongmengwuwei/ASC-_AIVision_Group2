@@ -515,16 +515,6 @@
               <FilePath>..\code\PID.h</FilePath>
             </File>
             <File>
-              <FileName>PID_config.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>..\code\PID_config.c</FilePath>
-            </File>
-            <File>
-              <FileName>PID_config.h</FileName>
-              <FileType>5</FileType>
-              <FilePath>..\code\PID_config.h</FilePath>
-            </File>
-            <File>
               <FileName>Camera_handler.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\code\Camera_handler.c</FilePath>
@@ -553,6 +543,26 @@
               <FileName>Algorithm_Test.h</FileName>
               <FileType>5</FileType>
               <FilePath>..\code\Algorithm_Test.h</FilePath>
+            </File>
+            <File>
+              <FileName>PID_config.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\code\PID_config.c</FilePath>
+            </File>
+            <File>
+              <FileName>PID_config.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\code\PID_config.h</FilePath>
+            </File>
+            <File>
+              <FileName>Map_Route_Data.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\code\Map_Route_Data.c</FilePath>
+            </File>
+            <File>
+              <FileName>Map_Route_Data.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\code\Map_Route_Data.h</FilePath>
             </File>
           </Files>
         </Group>

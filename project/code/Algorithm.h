@@ -5,8 +5,6 @@
 #include "Camera_handler.h"
 
 #define grid_size       140 // 不含墙的有效区域
-#define max_boxes_cnt   10  // 最大箱子数量
-#define max_bombs_cnt   5   // 支持的最大炸弹数量
 
 /*方格识别码*/
 #define OBSTACLE        0x01

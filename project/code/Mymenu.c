@@ -177,6 +177,7 @@ void Show_Map(void)
     // 地图元素状态缓存
     static uint8 inited = 0U;
     static uint8 last_cells[12][16] = {{0}};
+    static uint32 last_path_sig = 0U;
     uint8 curr_cells[12][16] = {{0}};
     // 地图元素类型位定义
     enum
@@ -252,8 +253,16 @@ void Show_Map(void)
         curr_cells[car.row + inner_row_offset][car.col + inner_col_offset] |= MAP_CAR;
     }
 
-    // 检测地图状态是否变化，未变化则不重绘
-    uint8 changed = (inited == 0U) ? 1U : 0U;
+    // 检测地图状态是否变化（含路径序列变化），未变化则不重绘
+    uint32 path_sig = 2166136261u;
+    path_sig = (path_sig ^ (uint32)Car_path_count) * 16777619u;
+    for (size_t i = 0; i < Car_path_count; i++)
+    {
+        path_sig = (path_sig ^ (uint32)(uint16)car_path[i].row) * 16777619u;
+        path_sig = (path_sig ^ (uint32)(uint16)car_path[i].col) * 16777619u;
+    }
+
+    uint8 changed = (inited == 0U || path_sig != last_path_sig) ? 1U : 0U;
     for (uint16 r = 0; r < map_rows && !changed; r++)
     {
         for (uint16 c = 0; c < map_cols; c++)
@@ -313,13 +322,6 @@ void Show_Map(void)
                         ips200_draw_line(cell_x + 1U, y, cell_x + cell_size - 1U, y, RGB565_PURPLE);
                     }
                 }
-                else if (curr_cells[r][c] & MAP_PATH)
-                {
-                    for (uint16 y = cell_y + 1U; y < cell_y + cell_size; y++)
-                    {
-                        ips200_draw_line(cell_x + 1U, y, cell_x + cell_size - 1U, y, RGB565_GRAY);
-                    }
-                }
                 else if (curr_cells[r][c] & MAP_OBS)
                 {
                     uint16 x_min = cell_x + 1U;
@@ -352,6 +354,33 @@ void Show_Map(void)
         uint16 y = start_y + j * cell_size;
         ips200_draw_line(start_x, y, start_x + map_cols * cell_size, y, RGB565_WHITE);
     }
+
+    // 路径显示：绘制中心到中心的绿色直线，覆盖在其他元素之上
+    if (Car_path_count >= 2U)
+    {
+        for (size_t i = 1; i < Car_path_count; i++)
+        {
+            int r0 = car_path[i - 1].row;
+            int c0 = car_path[i - 1].col;
+            int r1 = car_path[i].row;
+            int c1 = car_path[i].col;
+
+            if (r0 < 0 || c0 < 0 || r1 < 0 || c1 < 0 ||
+                r0 >= (int)inner_rows || c0 >= (int)inner_cols ||
+                r1 >= (int)inner_rows || c1 >= (int)inner_cols)
+            {
+                continue;
+            }
+
+            uint16 x0 = start_x + (uint16)(c0 + inner_col_offset) * cell_size + cell_size / 2U;
+            uint16 y0 = start_y + (uint16)(r0 + inner_row_offset) * cell_size + cell_size / 2U;
+            uint16 x1 = start_x + (uint16)(c1 + inner_col_offset) * cell_size + cell_size / 2U;
+            uint16 y1 = start_y + (uint16)(r1 + inner_row_offset) * cell_size + cell_size / 2U;
+
+            ips200_draw_line(x0, y0, x1, y1, RGB565_GREEN);
+        }
+    }
+
     // 记录当前地图状态
     for (uint16 r = 0; r < map_rows; r++)
     {
@@ -361,6 +390,7 @@ void Show_Map(void)
         }
     }
     inited = 1U;
+    last_path_sig = path_sig;
     // 显示地图数据
     ips200_show_string(start_x + (map_cols + 1) * cell_size, start_y, "BOX:");
     ips200_show_uint(start_x + (map_cols + 1) * cell_size + FONT_W * 5, start_y, Boxes_count, 2);
@@ -370,6 +400,7 @@ void Show_Map(void)
     ips200_show_uint(start_x + (map_cols + 1) * cell_size + FONT_W * 5, start_y + FONT_H * 2, Bombs_count, 2);
 
     ips200_show_char(start_x + (map_cols + 1) * cell_size, start_y + FONT_H * 5, move_cmd);
+    ips200_show_int(start_x + (map_cols + 1) * cell_size + FONT_W * 3, start_y + FONT_H * 5, move_ret, 1);
     ips200_show_uint(start_x + (map_cols + 1) * cell_size, start_y + FONT_H * 6, s_path_index, 3);
     ips200_show_char(start_x + (map_cols + 1) * cell_size + FONT_W * 3, start_y + FONT_H * 6, '/');
     ips200_show_uint(start_x + (map_cols + 1) * cell_size + FONT_W * 4, start_y + FONT_H * 6, Car_path_count, 3);

@@ -499,7 +499,7 @@ int a_star_path_plan_3d(int row_cnt, int col_cnt,
                         Position *full_car_path,
                         Position *best_target_out)
 {
-    Position local_boxes[max_boxes_cnt + 4];
+    Position local_boxes[MAX_BOXES + 4];
     for (int i = 0; i < boxes_cnt; i++)
         local_boxes[i] = boxes[i];
     Position box_start = local_boxes[box_index];
@@ -854,7 +854,7 @@ int evaluate_bomb_shortcut(int row_cnt, int col_cnt,
                            Position *out_box_target)
 {
     // 把炸弹加入箱子数组进行A*计算
-    Position temp_boxes[max_boxes_cnt + 1];
+    Position temp_boxes[MAX_BOXES + 1];
     for (int i = 0; i < boxes_cnt; i++)
         temp_boxes[i] = boxes[i];
 
@@ -863,7 +863,7 @@ int evaluate_bomb_shortcut(int row_cnt, int col_cnt,
     int temp_boxes_cnt = boxes_cnt + 1;
 
     // 剔除这颗炸弹
-    Position temp_bombs[max_bombs_cnt + 2];
+    Position temp_bombs[MAX_BOMBS + 2];
     int temp_bombs_cnt = 0;
     for (int i = 0; i < bombs_cnt; i++)
     {

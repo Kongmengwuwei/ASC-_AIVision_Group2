@@ -564,6 +564,16 @@
               <FileType>5</FileType>
               <FilePath>..\code\Map_Route_Data.h</FilePath>
             </File>
+            <File>
+              <FileName>Game_logic.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\code\Game_logic.c</FilePath>
+            </File>
+            <File>
+              <FileName>Game_logic.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\code\Game_logic.h</FilePath>
+            </File>
           </Files>
         </Group>
         <Group>

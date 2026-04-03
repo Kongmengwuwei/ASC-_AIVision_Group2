@@ -39,6 +39,7 @@
 #include "Attitude.h"
 #include "Algorithm.h"
 #include "Algorithm_Test.h"
+#include "Game_logic.h"
 #include "Camera_handler.h"
 #include <string.h>
 
@@ -61,16 +62,16 @@ int main(void)
   //  Attitude_Init();      // 姿态解算模块初始化
 
   // 中断初始化
-  pit_ms_init(PIT_CH0, 20);                 // 初始化 PIT_CH0 为周期中断 20ms 周期
-  interrupt_set_priority(PIT_IRQn, 2);      // 设置 PIT0 对周期中断的中断优先级为 2
-  pit_ms_init(PIT_CH1, 10);                 // 初始化 PIT_CH1 为周期中断 10ms 周期
-  interrupt_set_priority(PIT_IRQn, 1);      // 设置 PIT1 对周期中断的中断优先级为 1
-  pit_ms_init(PIT_CH2, 2);                  // 初始化 PIT_CH2 为周期中断 2ms 周期
-  interrupt_set_priority(PIT_IRQn, 0);      // 设置 PIT2 对周期中断的中断优先级为 0
-  interrupt_set_priority(LPUART1_IRQn, 3);  // 设置中断优先级（中等）
-  interrupt_global_enable(0);               // 中断使能
+  pit_ms_init(PIT_CH0, 20);                // 初始化 PIT_CH0 为周期中断 20ms 周期
+  interrupt_set_priority(PIT_IRQn, 2);     // 设置 PIT0 对周期中断的中断优先级为 2
+  pit_ms_init(PIT_CH1, 10);                // 初始化 PIT_CH1 为周期中断 10ms 周期
+  interrupt_set_priority(PIT_IRQn, 1);     // 设置 PIT1 对周期中断的中断优先级为 1
+  pit_ms_init(PIT_CH2, 2);                 // 初始化 PIT_CH2 为周期中断 2ms 周期
+  interrupt_set_priority(PIT_IRQn, 0);     // 设置 PIT2 对周期中断的中断优先级为 0
+  interrupt_set_priority(LPUART1_IRQn, 3); // 设置中断优先级（中等）
+  interrupt_global_enable(0);              // 中断使能
 
-  /*以下为测试*/
+  /*以下为算法测试*/
   // 在此直接输入地图
   const char *map_text = ".#............\n"
                          "........#####.\n"
@@ -84,43 +85,45 @@ int main(void)
                          "..............\n";
 
   parse_map_from_string(map_text);
-  Car_path_count = 11;
-  car_path[0].row = 6;car_path[0].col = 0;
-  car_path[1].row = 5;car_path[1].col = 0;
-  car_path[2].row = 4;car_path[2].col = 0;
-  car_path[3].row = 4;car_path[3].col = 1;
-  car_path[4].row = 4;car_path[4].col = 2;
-  car_path[5].row = 4;car_path[5].col = 3;
-  car_path[6].row = 5;car_path[6].col = 3;
-  car_path[7].row = 5;car_path[7].col = 4;
-  car_path[8].row = 5;car_path[8].col = 5;
-  car_path[9].row = 5;car_path[9].col = 6;
-  car_path[10].row = 5;car_path[10].col = 7;
-  car_path[11].row = 5;car_path[11].col = 8;
   Test_Data_Load(); // 数据加载到内部测试地图
+  Plan_path_Mode1(); // 关卡一路径规划
+  // Car_path_count = 11;
+  // car_path[0].row = 6;car_path[0].col = 0;
+  // car_path[1].row = 5;car_path[1].col = 0;
+  // car_path[2].row = 4;car_path[2].col = 0;
+  // car_path[3].row = 4;car_path[3].col = 1;
+  // car_path[4].row = 4;car_path[4].col = 2;
+  // car_path[5].row = 4;car_path[5].col = 3;
+  // car_path[6].row = 5;car_path[6].col = 3;
+  // car_path[7].row = 5;car_path[7].col = 4;
+  // car_path[8].row = 5;car_path[8].col = 5;
+  // car_path[9].row = 5;car_path[9].col = 6;
+  // car_path[10].row = 5;car_path[10].col = 7;
+  // car_path[11].row = 5;car_path[11].col = 8;
+
   Test_Path_Init(); // 路径初始化
-  /*以上为测试*/
+  /*以上为算法测试*/
 
   // 主循环
   while (1)
   {
-    /*以下为测试*/
-    Test_Data_Save();  // 将内部测试地图数据保存回全局数组
-    /*以上为测试*/
+    /*以下为算法测试*/
+    Test_Data_Save(); // 将内部测试地图数据保存回全局数组
+    /*以上为算法测试*/
 
     process_blob_data(); // 处理摄像头串口数据
-    Menu_Switch();        
+    Menu_Switch();
     Menu_Show();
   }
 }
 
-//20ms中断：按键扫描
+// 20ms中断：按键扫描
 void pit_0_handler(void)
 {
   key_scanner();
 }
 
-//10ms中断：运动控制
+// 10ms中断：运动控制
 void pit_1_handler(void)
 {
   // encoder_get();
@@ -150,7 +153,7 @@ void pit_1_handler(void)
 // 2ms中断：姿态解算
 void pit_2_handler(void)
 {
-//  Attitude_Calculate();
+  //  Attitude_Calculate();
 }
 
 // 串口接收中断：摄像头数据接收

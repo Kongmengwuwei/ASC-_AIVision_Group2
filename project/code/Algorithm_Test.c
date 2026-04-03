@@ -78,6 +78,26 @@ static int decode_move(char move_cmd, int *d_row, int *d_col)
     case 'd':
         *d_col = 1;
         return 1;
+    case 'Q':
+    case 'q':
+        *d_row = -1;
+        *d_col = -1;
+        return 1;
+    case 'E':
+    case 'e':
+        *d_row = -1;
+        *d_col = 1;
+        return 1;
+    case 'Z':
+    case 'z':
+        *d_row = 1;
+        *d_col = -1;
+        return 1;
+    case 'C':
+    case 'c':
+        *d_row = 1;
+        *d_col = 1;
+        return 1;
     default:
         return 0;
     }
@@ -109,6 +129,26 @@ static int delta_to_move_cmd(int d_row, int d_col, char *cmd)
     if (d_row == 0 && d_col == 1)
     {
         *cmd = 'D';
+        return 1;
+    }
+    if (d_row == -1 && d_col == -1)
+    {
+        *cmd = 'Q';
+        return 1;
+    }
+    if (d_row == -1 && d_col == 1)
+    {
+        *cmd = 'E';
+        return 1;
+    }
+    if (d_row == 1 && d_col == -1)
+    {
+        *cmd = 'Z';
+        return 1;
+    }
+    if (d_row == 1 && d_col == 1)
+    {
+        *cmd = 'C';
         return 1;
     }
     return 0;

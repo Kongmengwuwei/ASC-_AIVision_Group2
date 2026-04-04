@@ -78,28 +78,35 @@ int main(void)
                          "#B###...#T..#.\n"
                          "....#...#T#.#.\n"
                          "..D.#####T#.#.\n"
-                         "C......B..B.#.\n"
+                         "C.....DB..B.#.\n"
                          "..........###.\n"
-                         "...B...T......\n"
+                         "..B...T....D..\n"
                          ".....####.....\n"
                          "..............\n";
+  // const char *map_text = ".#...#..#....T\n"
+  //                        "...#..#.####..\n"
+  //                        "#.###.#.#.....\n"
+  //                        ".T#.#.#.#..#..\n"
+  //                        ".##.#.........\n"
+  //                        "..#.......##..\n"
+  //                        "CD.......D.#..\n"
+  //                        "..B.#.....BD..\n"
+  //                        ".B..########..\n"
+  //                        "....#T........\n";
 
   parse_map_from_string(map_text);
+
+  boxes[0].id = 0;
+  boxes[1].id = 1;
+  boxes[2].id = 2;
+  boxes[3].id = 3;
+  targets[0].id = 0;
+  targets[1].id = 1;
+  targets[2].id = 2;
+  targets[3].id = 3;
+
   Test_Data_Load(); // 数据加载到内部测试地图
-  Plan_path_Mode1(); // 关卡一路径规划
-  // Car_path_count = 11;
-  // car_path[0].row = 6;car_path[0].col = 0;
-  // car_path[1].row = 5;car_path[1].col = 0;
-  // car_path[2].row = 4;car_path[2].col = 0;
-  // car_path[3].row = 4;car_path[3].col = 1;
-  // car_path[4].row = 4;car_path[4].col = 2;
-  // car_path[5].row = 4;car_path[5].col = 3;
-  // car_path[6].row = 5;car_path[6].col = 3;
-  // car_path[7].row = 5;car_path[7].col = 4;
-  // car_path[8].row = 5;car_path[8].col = 5;
-  // car_path[9].row = 5;car_path[9].col = 6;
-  // car_path[10].row = 5;car_path[10].col = 7;
-  // car_path[11].row = 5;car_path[11].col = 8;
+  Plan_path_Mode2(); // 关卡一路径规划
 
   Test_Path_Init(); // 路径初始化
   /*以上为算法测试*/

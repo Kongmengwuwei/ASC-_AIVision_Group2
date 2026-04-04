@@ -16,6 +16,8 @@ static Position s_car = {0, 0};
 static uint8 s_ready = 0u;
 static uint8 s_path_ready = 0u;
 size_t s_path_index = 0u;
+static int s_box_id_map[MAP_ROWS * MAP_COLS];
+static int s_target_id_map[MAP_ROWS * MAP_COLS];
 
 // 判断坐标是否在地图范围内。
 static int in_range(int row, int col)
@@ -29,8 +31,45 @@ static int grid_index(int row, int col)
     return row * s_cols + col;
 }
 
+static void reset_id_maps(void)
+{
+    int i;
+    for (i = 0; i < (MAP_ROWS * MAP_COLS); i++)
+    {
+        s_box_id_map[i] = -1;
+        s_target_id_map[i] = -1;
+    }
+}
+
+static int get_id_by_flag(uint8 element_flag, int idx)
+{
+    // 仅箱子和目标点需要维护ID，其它元素ID统一按0处理。
+    if (element_flag == CELL_BOX)
+    {
+        return s_box_id_map[idx];
+    }
+    if (element_flag == CELL_TARGET)
+    {
+        return s_target_id_map[idx];
+    }
+    return 0;
+}
+
+// 若箱子和目标点都具备有效ID，则必须ID相同才允许消除；否则按旧规则直接消除。
+static int can_box_clear_target(int box_id, int target_id)
+{
+    int box_has_id = (box_id > 0);
+    int target_has_id = (target_id > 0);
+
+    if (box_has_id && target_has_id)
+    {
+        return (box_id == target_id);
+    }
+    return 1;
+}
+
 // 将点集写入地图位图（越界点自动忽略）。
-static void fill_points(const Position *points, int count, uint8 flag)
+static void fill_points(const Position *points, int count, uint8 flag, int *id_map)
 {
     int i;
     if (points == 0 || count <= 0)
@@ -44,7 +83,12 @@ static void fill_points(const Position *points, int count, uint8 flag)
         int col = points[i].col;
         if (in_range(row, col))
         {
-            s_grid[grid_index(row, col)] |= flag;
+            int idx = grid_index(row, col);
+            s_grid[idx] |= flag;
+            if (id_map != 0)
+            {
+                id_map[idx] = points[i].id;
+            }
         }
     }
 }
@@ -168,8 +212,10 @@ static void clear_obstacles_3x3(int center_row, int center_col)
             {
                 continue;
             }
-
-            s_grid[grid_index(row, col)] &= (uint8)(~CELL_OBSTACLE);
+            {
+                int idx = grid_index(row, col);
+                s_grid[idx] &= (uint8)(~CELL_OBSTACLE);
+            }
         }
     }
 }
@@ -201,11 +247,12 @@ void Test_init_map(int rows, int cols,
     }
 
     memset(s_grid, 0, sizeof(s_grid));
+    reset_id_maps();
 
-    fill_points(obstacles, obstacles_cnt, CELL_OBSTACLE);
-    fill_points(boxes, boxes_cnt, CELL_BOX);
-    fill_points(targets, targets_cnt, CELL_TARGET);
-    fill_points(bombs, bombs_cnt, CELL_BOMB);
+    fill_points(obstacles, obstacles_cnt, CELL_OBSTACLE, 0);
+    fill_points(boxes, boxes_cnt, CELL_BOX, s_box_id_map);
+    fill_points(targets, targets_cnt, CELL_TARGET, s_target_id_map);
+    fill_points(bombs, bombs_cnt, CELL_BOMB, 0);
 
     if (in_range(car_start.row, car_start.col))
     {
@@ -252,8 +299,10 @@ int Test_get_positions(uint8 element_flag, Position *out_points, int max_points)
             {
                 if (out_points != 0 && count < max_points)
                 {
+                    int idx = grid_index(row, col);
                     out_points[count].row = row;
                     out_points[count].col = col;
+                    out_points[count].id = get_id_by_flag(element_flag, idx);
                 }
                 count++;
             }
@@ -303,6 +352,8 @@ Move_Result Move_car(char move_cmd)
     int next_col;
     int push_row;
     int push_col;
+    int next_idx;
+    int push_idx;
     uint8 next_cell;
     uint8 push_cell;
 
@@ -324,6 +375,7 @@ Move_Result Move_car(char move_cmd)
     }
 
     next_cell = s_grid[grid_index(next_row, next_col)];
+    next_idx = grid_index(next_row, next_col);
     if ((next_cell & CELL_OBSTACLE) != 0u)
     {
         return MOVE_BLOCKED;
@@ -339,22 +391,35 @@ Move_Result Move_car(char move_cmd)
             return MOVE_BLOCKED;
         }
 
-        push_cell = s_grid[grid_index(push_row, push_col)];
+        push_idx = grid_index(push_row, push_col);
+        push_cell = s_grid[push_idx];
         if ((push_cell & (CELL_OBSTACLE | CELL_BOX | CELL_BOMB)) != 0u)
         {
             return MOVE_BLOCKED;
         }
 
-        s_grid[grid_index(next_row, next_col)] &= (uint8)(~CELL_BOX);
+        s_grid[next_idx] &= (uint8)(~CELL_BOX);
         if ((push_cell & CELL_TARGET) != 0u)
         {
-            s_grid[grid_index(push_row, push_col)] &= (uint8)(~CELL_TARGET);
-            s_car.row = next_row;
-            s_car.col = next_col;
-            return MOVE_BOX_TARGET_CLEARED;
+            int box_id = s_box_id_map[next_idx];
+            int target_id = s_target_id_map[push_idx];
+            if (can_box_clear_target(box_id, target_id))
+            {
+                // 同ID(或任一方无ID)时，箱子和目标点消失
+                s_box_id_map[next_idx] = -1;
+                s_grid[push_idx] &= (uint8)(~CELL_TARGET);
+                s_target_id_map[push_idx] = -1;
+                s_car.row = next_row;
+                s_car.col = next_col;
+                return MOVE_BOX_TARGET_CLEARED;
+            }
+            // ID不同：目标点保留，箱子可穿过并停在该格
         }
 
-        s_grid[grid_index(push_row, push_col)] |= CELL_BOX;
+        // 普通推箱子：箱子ID随箱子移动
+        s_grid[push_idx] |= CELL_BOX;
+        s_box_id_map[push_idx] = s_box_id_map[next_idx];
+        s_box_id_map[next_idx] = -1;
         s_car.row = next_row;
         s_car.col = next_col;
         return MOVE_OK;
@@ -370,22 +435,25 @@ Move_Result Move_car(char move_cmd)
             return MOVE_BLOCKED;
         }
 
-        push_cell = s_grid[grid_index(push_row, push_col)];
+        push_idx = grid_index(push_row, push_col);
+        push_cell = s_grid[push_idx];
         if ((push_cell & (CELL_BOX | CELL_BOMB)) != 0u)
         {
             return MOVE_BLOCKED;
         }
 
-        s_grid[grid_index(next_row, next_col)] &= (uint8)(~CELL_BOMB);
+        s_grid[next_idx] &= (uint8)(~CELL_BOMB);
         if ((push_cell & CELL_OBSTACLE) != 0u)
         {
+            // 炸弹撞墙：炸弹消失，墙体爆炸清除
             clear_obstacles_3x3(push_row, push_col);
             s_car.row = next_row;
             s_car.col = next_col;
             return MOVE_BOMB_EXPLODED;
         }
 
-        s_grid[grid_index(push_row, push_col)] |= CELL_BOMB;
+        // 普通推炸弹
+        s_grid[push_idx] |= CELL_BOMB;
         s_car.row = next_row;
         s_car.col = next_col;
         return MOVE_OK;

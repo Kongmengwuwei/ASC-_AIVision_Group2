@@ -69,6 +69,24 @@ static int check_box_with_excluding(uint8_t *grid, int col_cnt, int row, int col
         return 0;
     return (BOX_EXCLUDING(grid, col_cnt, row, col, skip_index));
 }
+static int check_push_destination_blocked(uint8_t *grid, int row_cnt, int col_cnt,
+                                          const Position *boxes, int boxes_cnt,
+                                          int pushing_box_index,
+                                          int row, int col)
+{
+    if (row < 0 || row >= row_cnt || col < 0 || col >= col_cnt)
+        return 1;
+    if (check_obstacle(grid, col_cnt, row, col))
+        return 1;
+    for (int i = 0; i < boxes_cnt; i++)
+    {
+        if (i == pushing_box_index)
+            continue;
+        if (boxes[i].row == row && boxes[i].col == col)
+            return 1;
+    }
+    return 0;
+}
 // 限制边处理
 static const uint32_t *banned_edge_container = NULL;
 
@@ -198,6 +216,12 @@ static inline int diagonal_distance(Position p1, Position p2)
     int max_dif = dif_row > dif_col ? dif_row : dif_col;
     // 直走权重10，斜走权重14
     return 14 * min_dif + 10 * (max_dif - min_dif);
+}
+static inline int manhattan_distance_cells(Position p1, Position p2)
+{
+    int dif_row = p1.row > p2.row ? p1.row - p2.row : p2.row - p1.row;
+    int dif_col = p1.col > p2.col ? p1.col - p2.col : p2.col - p1.col;
+    return dif_row + dif_col;
 }
 
 // 路径推点提取函数
@@ -408,6 +432,8 @@ static inline int heap_compare_less_3d(const binary_heap_3d *heap, int i, int j)
     int index_j = heap->index[j];
     if (a_star_3d[index_i].f_cost != a_star_3d[index_j].f_cost)
         return a_star_3d[index_i].f_cost < a_star_3d[index_j].f_cost;
+    if (a_star_3d[index_i].g_cost != a_star_3d[index_j].g_cost)
+        return a_star_3d[index_i].g_cost < a_star_3d[index_j].g_cost;
 
     return a_star_3d[index_i].h_cost < a_star_3d[index_j].h_cost;
 }
@@ -499,6 +525,10 @@ int a_star_path_plan_3d(int row_cnt, int col_cnt,
                         Position *full_car_path,
                         Position *best_target_out)
 {
+    const int COST_WALK = 10;
+    const int COST_PUSH = 50;
+    const int COST_REORIENT_PENALTY = 30;
+
     Position local_boxes[MAX_BOXES + 4];
     for (int i = 0; i < boxes_cnt; i++)
         local_boxes[i] = boxes[i];
@@ -516,15 +546,31 @@ int a_star_path_plan_3d(int row_cnt, int col_cnt,
 
     const int dir_row_3d[] = {1, -1, 0, 0};
     const int dir_col_3d[] = {0, 0, 1, -1};
+    int min_target_distance_from_start = 999999;
+
+    for (int t = 0; t < targets_cnt; t++)
+    {
+        int h = manhattan_distance_cells(box_start, targets[t]);
+        if (h < min_target_distance_from_start)
+            min_target_distance_from_start = h;
+    }
 
     // 从4个方向中选择推向
     for (int f = 0; f < 4; f++)
     {
         int push_point_row = box_start.row - dir_row_3d[f];
         int push_point_col = box_start.col - dir_col_3d[f];
+        int first_push_row = box_start.row + dir_row_3d[f];
+        int first_push_col = box_start.col + dir_col_3d[f];
 
         local_boxes[box_index] = box_start;
         Position temp_path[grid_size];
+
+        if (check_push_destination_blocked(grid, row_cnt, col_cnt,
+                                           local_boxes, boxes_cnt,
+                                           box_index,
+                                           first_push_row, first_push_col))
+            continue;
 
         // 计算到达推点的路径
         int walk_len = a_star_path_plan(row_cnt, col_cnt,
@@ -540,16 +586,8 @@ int a_star_path_plan_3d(int row_cnt, int col_cnt,
             int state_index = (box_start.row * col_cnt + box_start.col) * 4 + f;
 
             // 计算到达目标点的距离
-            int min_h = 999999;
-            for (int t = 0; t < targets_cnt; t++)
-            {
-                int h = diagonal_distance(box_start, targets[t]);
-                if (h < min_h)
-                    min_h = h;
-            }
-
-            a_star_3d[state_index].g_cost = walk_len * 10;
-            a_star_3d[state_index].h_cost = min_h * 50; // 调整比例，优先考虑箱子终点
+            a_star_3d[state_index].g_cost = walk_len * COST_WALK;
+            a_star_3d[state_index].h_cost = min_target_distance_from_start * COST_PUSH; // 调整比例，优先考虑箱子终点
             a_star_3d[state_index].f_cost = a_star_3d[state_index].g_cost + a_star_3d[state_index].h_cost;
             a_star_3d[state_index].parent_index = -1;
             a_star_3d[state_index].open_or_close = 1;
@@ -592,59 +630,42 @@ int a_star_path_plan_3d(int row_cnt, int col_cnt,
         int next_row = row + dir_row_3d[face];
         int next_col = col + dir_col_3d[face];
 
-        if (next_row >= 0 && next_row < row_cnt && next_col >= 0 && next_col < col_cnt)
+        if (!check_push_destination_blocked(grid, row_cnt, col_cnt,
+                                            local_boxes, boxes_cnt,
+                                            box_index,
+                                            next_row, next_col))
         {
-            int next_idx = next_row * col_cnt + next_col;
+            int next_index = (next_row * col_cnt + next_col) * 4 + face; // face不变，没换推面
 
-            // 判定会不会卡墙或其他箱子
-            int is_wall = (grid[next_idx] & (OBSTACLE | BOMB | BLOCKED_BOMB));
-            int is_other_box = 0;
-
-            for (int b = 0; b < boxes_cnt; b++)
+            if (a_star_3d[next_index].open_or_close != 2)
             {
-                if (b == box_index)
-                    continue; // 排除当前箱子
-                if (local_boxes[b].row == next_row && local_boxes[b].col == next_col)
+                int tentative_g = a_star_3d[curr_index].g_cost + COST_PUSH; // 离开原路径，添加偏移代价
+
+                if (a_star_3d[next_index].open_or_close == 0 || tentative_g < a_star_3d[next_index].g_cost)
                 {
-                    is_other_box = 1;
-                    break;
-                }
-            }
+                    a_star_3d[next_index].parent_index = curr_index;
+                    a_star_3d[next_index].g_cost = tentative_g;
 
-            if (!is_wall && !is_other_box)
-            {                                                                // 可以继续推
-                int next_index = (next_row * col_cnt + next_col) * 4 + face; // face不变，没换推面
-
-                if (a_star_3d[next_index].open_or_close != 2)
-                {
-                    int tentative_g = a_star_3d[curr_index].g_cost + 50; // 离开原路径，添加偏移代价
-
-                    if (a_star_3d[next_index].open_or_close == 0 || tentative_g < a_star_3d[next_index].g_cost)
+                    int min_h = 999999;
+                    for (int t = 0; t < targets_cnt; t++)
                     {
-                        a_star_3d[next_index].parent_index = curr_index;
-                        a_star_3d[next_index].g_cost = tentative_g;
+                        int h = manhattan_distance_cells((Position){next_row, next_col}, targets[t]);
+                        if (h < min_h)
+                            min_h = h;
+                    }
 
-                        int min_h = 999999;
-                        for (int t = 0; t < targets_cnt; t++)
-                        {
-                            int h = diagonal_distance((Position){next_row, next_col}, targets[t]);
-                            if (h < min_h)
-                                min_h = h;
-                        }
+                    a_star_3d[next_index].h_cost = min_h * COST_PUSH;
+                    a_star_3d[next_index].f_cost = tentative_g + a_star_3d[next_index].h_cost;
+                    a_star_3d[next_index].is_push = 1; // 直走
 
-                        a_star_3d[next_index].h_cost = min_h * 50;
-                        a_star_3d[next_index].f_cost = tentative_g + a_star_3d[next_index].h_cost;
-                        a_star_3d[next_index].is_push = 1; // 直走
-
-                        if (a_star_3d[next_index].open_or_close == 0)
-                        {
-                            a_star_3d[next_index].open_or_close = 1;
-                            heap_push_3d(&open_set, next_index);
-                        }
-                        else
-                        {
-                            heap_update_3d(&open_set, next_index);
-                        }
+                    if (a_star_3d[next_index].open_or_close == 0)
+                    {
+                        a_star_3d[next_index].open_or_close = 1;
+                        heap_push_3d(&open_set, next_index);
+                    }
+                    else
+                    {
+                        heap_update_3d(&open_set, next_index);
                     }
                 }
             }
@@ -666,11 +687,14 @@ int a_star_path_plan_3d(int row_cnt, int col_cnt,
 
             if (target_face_row < 0 || target_face_row >= row_cnt || target_face_col < 0 || target_face_col >= col_cnt)
                 continue;
-            // 空地不能是墙或箱子
-            if (check_obstacle(grid, col_cnt, target_face_row, target_face_col) || (grid[target_face_row * col_cnt + target_face_col] & BOX))
+            local_boxes[box_index] = (Position){row, col}; // 将当前被推动对象放在实时位置
+            // 换向占位检查：只看障碍和“其他箱子”，不使用静态 grid 的 BOX 位
+            if (check_push_destination_blocked(grid, row_cnt, col_cnt,
+                                               local_boxes, boxes_cnt,
+                                               box_index,
+                                               target_face_row, target_face_col))
                 continue;
 
-            local_boxes[box_index] = (Position){row, col}; // 将箱子本身定为障碍
             Position car_from = {row - dir_row_3d[face], col - dir_col_3d[face]};
             Position temp_path[grid_size];
 
@@ -683,7 +707,7 @@ int a_star_path_plan_3d(int row_cnt, int col_cnt,
 
             if (walk_len >= 0)
             {
-                int tentative_g = a_star_3d[curr_index].g_cost + walk_len * 10;
+                int tentative_g = a_star_3d[curr_index].g_cost + walk_len * COST_WALK + COST_REORIENT_PENALTY;
                 if (a_star_3d[next_index].open_or_close == 0 || tentative_g < a_star_3d[next_index].g_cost)
                 {
                     a_star_3d[next_index].parent_index = curr_index;

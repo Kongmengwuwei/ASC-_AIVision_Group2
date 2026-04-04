@@ -26,7 +26,7 @@ void Test_Data_Load(void);
 // 将内部状态回写到全局数组
 void Test_Data_Save(void);
 
-// 执行一次小车移动（支持 W/A/S/D 与 Q/E/Z/C 斜向移动）
+// 执行一次小车移动（支持 W/A/S/D 与 Q/E/Z/C 斜向移动；箱子与目标点均有ID时需同ID才消除）
 Move_Result Move_car(char move_cmd);
 
 // 路径执行初始化：将小车对齐路径起点，准备执行路径。

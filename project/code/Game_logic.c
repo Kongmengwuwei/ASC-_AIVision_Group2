@@ -1,20 +1,26 @@
 #include "Game_logic.h"
 #include <string.h>
 
-/*
- * 工具函数：判断两个网格坐标是否相同。
- */
+#define LOOKAHEAD_FAIL_PENALTY 100000
+
+typedef struct
+{
+    Position obstacles_state[MAX_OBSTACLES];
+    Position bombs_state[MAX_BOMBS];
+    Position boxes_state[MAX_BOXES];
+    Position targets_state[MAX_TARGETS];
+    int obstacles_cnt;
+    int bombs_cnt;
+    int boxes_cnt;
+    int targets_cnt;
+    Position car_state;
+} planning_state_t;
+
 static int pos_equal(Position a, Position b)
 {
     return (a.row == b.row) && (a.col == b.col);
 }
-/*
- * 工具函数：从数组中按下标删除一个元素（后续元素前移）。
- * 参数说明：
- * - arr:      坐标数组
- * - cnt:      当前有效元素数量（输入输出）
- * - index:    要删除的下标
- */
+
 static void remove_position_at(Position *arr, int *cnt, int index)
 {
     int i;
@@ -33,21 +39,15 @@ static void remove_position_at(Position *arr, int *cnt, int index)
         arr[i] = arr[i + 1];
     }
 
-    /* 尾部补零，便于调试观察。 */
     arr[*cnt - 1].row = 0;
     arr[*cnt - 1].col = 0;
     (*cnt)--;
 }
-/*
- * 工具函数：在数组中查找坐标，找到返回下标，找不到返回 -1。
-* 参数说明：
- * - arr:      坐标数组
- * - cnt:      数组元素数量
- * - target:   要查找的坐标
- */
+
 static int find_position_index(const Position *arr, int cnt, Position target)
 {
     int i;
+
     for (i = 0; i < cnt; i++)
     {
         if (pos_equal(arr[i], target))
@@ -58,23 +58,60 @@ static int find_position_index(const Position *arr, int cnt, Position target)
     return -1;
 }
 
-/*
- * 将“单轮规划路径”拼接到总路径 merged_path。
- * 为避免段与段连接处出现重复点，会在“上一段终点 == 下一段起点”时自动跳过下一段首点。
- */
+static int find_position_index_by_id(const Position *arr, int cnt, int id)
+{
+    int i;
+
+    for (i = 0; i < cnt; i++)
+    {
+        if (arr[i].id == id)
+        {
+            return i;
+        }
+    }
+    return -1;
+}
+
 void append_segment_path(Position *merged_path, int *merged_len,
-                               const Position *segment_path, int segment_len)
+                         const Position *segment_path, int segment_len)
 {
     int start_index = 0;
     int copy_len;
+    int available;
 
-    //如果上一段终点和本段起点相同，则跳过本段第一个点
+    if (merged_path == 0 || merged_len == 0 || segment_path == 0 || segment_len <= 0)
+    {
+        return;
+    }
+    if (*merged_len < 0)
+    {
+        *merged_len = 0;
+    }
+    if (*merged_len >= MAX_CAR_PATH)
+    {
+        return;
+    }
+
     if (*merged_len > 0 && pos_equal(merged_path[*merged_len - 1], segment_path[0]))
     {
         start_index = 1;
     }
 
     copy_len = segment_len - start_index;
+    if (copy_len <= 0)
+    {
+        return;
+    }
+
+    available = MAX_CAR_PATH - *merged_len;
+    if (copy_len > available)
+    {
+        copy_len = available;
+    }
+    if (copy_len <= 0)
+    {
+        return;
+    }
 
     memcpy(&merged_path[*merged_len],
            &segment_path[start_index],
@@ -82,24 +119,21 @@ void append_segment_path(Position *merged_path, int *merged_len,
     *merged_len += copy_len;
 }
 
-/*
- * 应用一轮规划结果到“临时地图状态”：
- * 1) 若使用炸弹：删除被使用炸弹，并模拟爆炸清墙；
- * 2) 删除本轮被推进目标并消失的箱子；
- * 3) 删除对应目标点（箱子进目标后目标也消失）；
- * 4) 更新小车起点为该轮路径终点，供下一轮规划使用。
- */
 void apply_round_result(const path_plan_result *plan,
-                              int selected_box_index,
-                              Position *local_obstacles, int *local_obstacles_cnt,
-                              Position *local_bombs, int *local_bombs_cnt,
-                              Position *local_boxes, int *local_boxes_cnt,
-                              Position *local_targets, int *local_targets_cnt,
-                              Position *io_car)
+                        int selected_box_index,
+                        Position *local_obstacles, int *local_obstacles_cnt,
+                        Position *local_bombs, int *local_bombs_cnt,
+                        Position *local_boxes, int *local_boxes_cnt,
+                        Position *local_targets, int *local_targets_cnt,
+                        Position *io_car)
 {
     int target_index;
 
-    /* 1) 处理炸弹副作用：消耗炸弹并清除爆炸范围内障碍。 */
+    if (plan == 0 || io_car == 0 || plan->total_steps <= 0)
+    {
+        return;
+    }
+
     if (plan->used_bomb)
     {
         if (plan->bomb_index >= 0 && plan->bomb_index < *local_bombs_cnt)
@@ -113,10 +147,8 @@ void apply_round_result(const path_plan_result *plan,
         }
     }
 
-    /* 2) 移除本轮已完成的箱子。 */
     remove_position_at(local_boxes, local_boxes_cnt, selected_box_index);
 
-    /* 3) 移除被匹配到的目标点（规则：箱子进入目标后目标消失）。 */
     target_index = find_position_index(local_targets, *local_targets_cnt, plan->box_target);
     if (target_index >= 0)
     {
@@ -124,92 +156,231 @@ void apply_round_result(const path_plan_result *plan,
     }
     else if (*local_targets_cnt > 0)
     {
-        /*
-         * 正常情况下应能按坐标匹配到目标。
-         * 若受地图动态扰动导致未匹配到，保底移除一个目标，保持“完成一箱对应一目标”的计数一致。
-         */
         remove_position_at(local_targets, local_targets_cnt, 0);
     }
 
-    /* 4) 下一轮从当前轮路径末点继续规划。 */
     *io_car = plan->car_path[plan->total_steps - 1];
-
 }
 
 /*
- * 关卡一路径规划：无箱子目标点关联，寻找最短路径
- *
- * 内部核心：按“剩余箱子数量”连续规划直到全部推完。
- * 规划策略：
- * - 每一轮在“当前临时地图状态”下，尝试所有候选箱子；
- * - 选择本轮可行且路径最短的方案；
- * - 立刻应用该方案对地图状态的影响，再进入下一轮。
+ * 为指定箱子构造候选目标集合。
+ * mode1: 不区分 id，目标集合为全部剩余目标。
+ * mode2: 只保留与 box.id 相同的目标。
  */
-void Plan_path_Mode1(void)
+static int prepare_targets_for_box(const Position *targets_arr, int targets_cnt,
+                                   Position box,
+                                   int require_same_id,
+                                   Position *out_targets,
+                                   int *out_targets_cnt)
 {
-    // 为避免修改全局地图状态，先将全局地图元素复制到本地临时数组进行规划使用。
-    Position local_obstacles[MAX_OBSTACLES];
-    Position local_bombs[MAX_BOMBS];
-    Position local_boxes[MAX_BOXES];
-    Position local_targets[MAX_TARGETS];
-    int local_obstacles_cnt = Obstacles_count;
-    int local_bombs_cnt = Bombs_count;
-    int local_boxes_cnt = Boxes_count;
-    int local_targets_cnt = Targets_count;
-    memcpy(local_obstacles, obstacles, (size_t)local_obstacles_cnt * sizeof(Position));
-    memcpy(local_bombs, bombs, (size_t)local_bombs_cnt * sizeof(Position));
-    memcpy(local_boxes, boxes, (size_t)local_boxes_cnt * sizeof(Position));
-    memcpy(local_targets, targets, (size_t)local_targets_cnt * sizeof(Position));
-    // curr_car 记录每轮规划的起点，初始为全局 car。
-    Position curr_car = car;
-    // merged_path 用于拼接每轮规划的路径段，最终写回全局 car_path。
-    Position merged_path[MAX_CAR_PATH];
-    int merged_len = 0;
-    memset(merged_path, 0, sizeof(merged_path));
-
-    while (local_boxes_cnt > 0)
+    if (targets_arr == 0 || out_targets == 0 || out_targets_cnt == 0 || targets_cnt <= 0)
     {
-        // 每轮规划在当前地图状态下尝试所有箱子，选择最优可行方案。
-        int best_steps = -1;
-        int best_box_index = -1;
-        path_plan_result best_plan;
-        for (uint8 i = 0; i < local_boxes_cnt; i++)
+        return 0;
+    }
+
+    if (!require_same_id)
+    {
+        memcpy(out_targets, targets_arr, (size_t)targets_cnt * sizeof(Position));
+        *out_targets_cnt = targets_cnt;
+        return 1;
+    }
+    else
+    {
+        int idx = find_position_index_by_id(targets_arr, targets_cnt, box.id);
+        if (idx < 0)
         {
-            path_plan_result current_plan;
-            int steps = integrated_path_output(MAP_ROWS, MAP_COLS,
-                                               local_obstacles, local_obstacles_cnt,
-                                               local_bombs, local_bombs_cnt,
-                                               local_boxes, local_boxes_cnt,
-                                               local_targets, local_targets_cnt,
-                                               i,
-                                               curr_car,
-                                               &current_plan);
-            if (steps > 0 && (best_steps < 0 || steps < best_steps))
+            *out_targets_cnt = 0;
+            return 0;
+        }
+        out_targets[0] = targets_arr[idx];
+        *out_targets_cnt = 1;
+        return 1;
+    }
+}
+
+static int plan_single_box_in_state(const planning_state_t *state,
+                                    int box_index,
+                                    int require_same_id,
+                                    path_plan_result *out_plan)
+{
+    Position candidate_targets[MAX_TARGETS];
+    int candidate_targets_cnt = 0;
+    int steps;
+
+    if (state == 0 || out_plan == 0)
+    {
+        return -1;
+    }
+    if (box_index < 0 || box_index >= state->boxes_cnt)
+    {
+        return -1;
+    }
+
+    if (!prepare_targets_for_box(state->targets_state, state->targets_cnt,
+                                 state->boxes_state[box_index],
+                                 require_same_id,
+                                 candidate_targets, &candidate_targets_cnt))
+    {
+        return -1;
+    }
+
+    steps = integrated_path_output(MAP_ROWS, MAP_COLS,
+                                   state->obstacles_state, state->obstacles_cnt,
+                                   state->bombs_state, state->bombs_cnt,
+                                   state->boxes_state, state->boxes_cnt,
+                                   candidate_targets, candidate_targets_cnt,
+                                   box_index,
+                                   state->car_state,
+                                   out_plan);
+    return steps;
+}
+
+/*
+ * 评估当前状态下“下一轮”最短可行步数（用于两轮前瞻融合）。
+ */
+static int estimate_next_round_best_steps(const planning_state_t *state,
+                                          int require_same_id)
+{
+    int i;
+    int best_steps = -1;
+
+    for (i = 0; i < state->boxes_cnt; i++)
+    {
+        path_plan_result plan;
+        int steps = plan_single_box_in_state(state, i, require_same_id, &plan);
+        if (steps > 0 && (best_steps < 0 || steps < best_steps))
+        {
+            best_steps = steps;
+        }
+    }
+    return best_steps;
+}
+
+/*
+ * 融合策略：
+ * 不只看“当前这一个箱子的最短步数”，而是评估“当前 + 下一轮最优”的总成本。
+ * 这样会优先选择可与后续任务共享路段、减少来回折返的首个箱子。
+ */
+static int pick_best_round_plan(const planning_state_t *state,
+                                int require_same_id,
+                                int *out_box_index,
+                                path_plan_result *out_plan)
+{
+    int i;
+    int best_score = -1;
+    int best_steps = -1;
+    int best_idx = -1;
+    path_plan_result best_plan;
+
+    for (i = 0; i < state->boxes_cnt; i++)
+    {
+        path_plan_result first_plan;
+        int first_steps = plan_single_box_in_state(state, i, require_same_id, &first_plan);
+        int score;
+
+        if (first_steps <= 0)
+        {
+            continue;
+        }
+
+        score = first_steps;
+        if (state->boxes_cnt > 1)
+        {
+            planning_state_t sim = *state;
+            int second_steps;
+
+            apply_round_result(&first_plan,
+                               i,
+                               sim.obstacles_state, &sim.obstacles_cnt,
+                               sim.bombs_state, &sim.bombs_cnt,
+                               sim.boxes_state, &sim.boxes_cnt,
+                               sim.targets_state, &sim.targets_cnt,
+                               &sim.car_state);
+
+            second_steps = estimate_next_round_best_steps(&sim, require_same_id);
+            if (second_steps > 0)
             {
-                best_steps = steps;
-                best_box_index = i;
-                best_plan = current_plan;
+                score += second_steps;
+            }
+            else
+            {
+                /* 惩罚会让选择器更倾向于“第一步后仍容易继续推进”的方案。 */
+                score += LOOKAHEAD_FAIL_PENALTY;
             }
         }
 
-        // 将本轮最优方案路径段拼接到总路径，并更新总路径长度。
-        append_segment_path(merged_path, &merged_len, best_plan.car_path, best_plan.total_steps);
-
-        // 应用本轮规划结果到地图状态，准备下一轮使用。
-        apply_round_result(&best_plan,
-                            best_box_index,
-                            local_obstacles, &local_obstacles_cnt,
-                            local_bombs, &local_bombs_cnt,
-                            local_boxes, &local_boxes_cnt,
-                            local_targets, &local_targets_cnt,
-                            &curr_car);
+        if (best_score < 0 || score < best_score || (score == best_score && first_steps < best_steps))
+        {
+            best_score = score;
+            best_steps = first_steps;
+            best_idx = i;
+            best_plan = first_plan;
+        }
     }
 
-    // 全局输出最终拼接路径。
+    if (best_idx < 0)
+    {
+        return 0;
+    }
+
+    *out_box_index = best_idx;
+    *out_plan = best_plan;
+    return 1;
+}
+
+static void plan_path_with_policy(int require_same_id)
+{
+    planning_state_t state;
+    Position merged_path[MAX_CAR_PATH];
+    int merged_len = 0;
+
+    state.obstacles_cnt = (int)Obstacles_count;
+    state.bombs_cnt = (int)Bombs_count;
+    state.boxes_cnt = (int)Boxes_count;
+    state.targets_cnt = (int)Targets_count;
+    state.car_state = car;
+
+    memcpy(state.obstacles_state, obstacles, (size_t)state.obstacles_cnt * sizeof(Position));
+    memcpy(state.bombs_state, bombs, (size_t)state.bombs_cnt * sizeof(Position));
+    memcpy(state.boxes_state, boxes, (size_t)state.boxes_cnt * sizeof(Position));
+    memcpy(state.targets_state, targets, (size_t)state.targets_cnt * sizeof(Position));
+    memset(merged_path, 0, sizeof(merged_path));
+
+    while (state.boxes_cnt > 0)
+    {
+        int selected_box_index = -1;
+        path_plan_result selected_plan;
+
+        if (!pick_best_round_plan(&state, require_same_id, &selected_box_index, &selected_plan))
+        {
+            break;
+        }
+
+        append_segment_path(merged_path, &merged_len, selected_plan.car_path, selected_plan.total_steps);
+
+        apply_round_result(&selected_plan,
+                           selected_box_index,
+                           state.obstacles_state, &state.obstacles_cnt,
+                           state.bombs_state, &state.bombs_cnt,
+                           state.boxes_state, &state.boxes_cnt,
+                           state.targets_state, &state.targets_cnt,
+                           &state.car_state);
+    }
+
     memset(car_path, 0, sizeof(car_path));
     if (merged_len > 0)
     {
         memcpy(car_path, merged_path, (size_t)merged_len * sizeof(Position));
     }
     Car_path_count = (size_t)merged_len;
+}
+
+void Plan_path_Mode1(void)
+{
+    plan_path_with_policy(0);
+}
+
+void Plan_path_Mode2(void)
+{
+    plan_path_with_policy(1);
 }

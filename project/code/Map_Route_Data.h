@@ -18,11 +18,13 @@ typedef struct
 {
     int row; // 栅格行号
     int col; // 栅格列号
+    int id;  // 元素ID（箱子编号、目标编号）
 } Position;
 typedef struct
 {
     float row; // 车辆行坐标（可带小数）
     float col; // 车辆列坐标（可带小数）
+    float angle; // 车辆朝向角度
 } CarPosition;
 
 // 当前生效对象数量

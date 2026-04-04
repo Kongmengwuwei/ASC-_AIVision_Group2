@@ -4,7 +4,10 @@
 #include "Map_Route_Data.h"
 #include "Algorithm.h"
 
-//关卡一路径规划：
+// Mode1: plan all boxes without id constraint.
 void Plan_path_Mode1(void);
+
+// Mode2: each box must be pushed to target with the same id.
+void Plan_path_Mode2(void);
 
 #endif

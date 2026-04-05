@@ -35,6 +35,7 @@
 
 #include "zf_common_headfile.h"
 #include "Mymenu.h"
+#include "Attitude.h"
 
 // 打开新的工程或者工程移动了位置务必执行以下操作
 // 第一步 关闭上面所有打开的文件
@@ -47,22 +48,29 @@ int main(void)
 {
     clock_init(SYSTEM_CLOCK_600M);  // 不可删除
     debug_init();                   // 调试端口初始化
-
-    // 此处编写用户代码 例如外设初始化代码等
-		pit_ms_init(PIT_CH0, 20);                    // 初始化 PIT_CH0 为周期中断 20ms 周期
-    interrupt_set_priority(PIT_IRQn, 2);         // 设置 PIT0 对周期中断的中断优先级为 2
-    Menu_Init();
-	  interrupt_global_enable(0);
+	
+	//陀螺仪及其解算中断初始化
+	imu963ra_init();
+	Attitude_Init();
+	pit_ms_init(PIT_CH1, 2);
+	interrupt_set_priority(PIT_IRQn, 0);
 	
 
     // 此处编写用户代码 例如外设初始化代码等
+	pit_ms_init(PIT_CH0, 20);                    // 初始化 PIT_CH0 为周期中断 20ms 周期
+    interrupt_set_priority(PIT_IRQn, 2);         // 设置 PIT0 对周期中断的中断优先级为 2
+    Menu_Init();
+	interrupt_global_enable(0);
+	
+	printf("1");
+	
     while(1)
-    {
-        // 此处编写需要循环执行的代码
-				Menu_Switch();
+    {	
+	    Menu_Switch();
         Menu_Show();
+		printf("%.2f,%.2f,%.2f\r\n",eulerAngle.pitch,eulerAngle.roll,eulerAngle.yaw);
+		
 
-        // 此处编写需要循环执行的代码
     }
 }
 
@@ -70,5 +78,12 @@ void pit_0_handler (void)
 {
 	key_scanner();                                  // 周期中断触发标志位置位
 }
+
+
+void pit_1_handler(void)
+{
+	Attitude_Calculate();
+}
+
 
 

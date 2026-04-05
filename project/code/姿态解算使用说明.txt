@@ -1,0 +1,6 @@
+使用方法：
+
+先初始化imu然后调用Attitude_Init();初始化姿态解算
+然后定时调用Attitude_Calculate();解算周期可以通过Attitude.c里的宏定义修改
+再通过eulerAngle结构体读取角度
+所需文件都在这个文件夹里了

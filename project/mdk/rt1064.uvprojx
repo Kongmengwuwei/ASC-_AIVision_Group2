@@ -429,6 +429,56 @@
               <FileType>5</FileType>
               <FilePath>..\code\Mymenu.h</FilePath>
             </File>
+            <File>
+              <FileName>Attitude.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\code\Attitude.c</FilePath>
+            </File>
+            <File>
+              <FileName>Attitude.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\code\Attitude.h</FilePath>
+            </File>
+            <File>
+              <FileName>EKF_Platform.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\code\EKF_Platform.h</FilePath>
+            </File>
+            <File>
+              <FileName>kalman_filter.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\code\kalman_filter.c</FilePath>
+            </File>
+            <File>
+              <FileName>kalman_filter.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\code\kalman_filter.h</FilePath>
+            </File>
+            <File>
+              <FileName>matrix.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\code\matrix.c</FilePath>
+            </File>
+            <File>
+              <FileName>matrix.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\code\matrix.h</FilePath>
+            </File>
+            <File>
+              <FileName>QuaternionEKF.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\code\QuaternionEKF.c</FilePath>
+            </File>
+            <File>
+              <FileName>QuaternionEKF.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\code\QuaternionEKF.h</FilePath>
+            </File>
+            <File>
+              <FileName>姿态解算使用说明.txt</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\code\姿态解算使用说明.txt</FilePath>
+            </File>
           </Files>
         </Group>
         <Group>

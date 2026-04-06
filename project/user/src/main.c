@@ -47,7 +47,7 @@
 int main(void)
 {
     clock_init(SYSTEM_CLOCK_600M);  // 不可删除
-    debug_init();                   // 调试端口初始化
+    //debug_init();                   // 调试端口初始化
 	
 	//陀螺仪及其解算中断初始化
 	imu963ra_init();

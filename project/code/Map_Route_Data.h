@@ -14,11 +14,16 @@
 #define MAX_BOMBS 10
 #define MAX_CAR_PATH 250
 
+//路径特殊点ID定义
+#define BOMB_EXPLOSION 1
+#define IDENTIFICATION 2
+#define TURNING_POINT  3
+
 typedef struct
 {
-    int row; // 栅格行号
-    int col; // 栅格列号
-    int id;  // 元素ID（箱子编号、目标编号）
+    uint8 row; // 栅格行号
+    uint8 col; // 栅格列号
+    uint8 id;  // 元素ID（箱子编号，目标编号，路径特殊点）
 } Position;
 typedef struct
 {

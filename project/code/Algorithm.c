@@ -1,6 +1,34 @@
 #include "Algorithm.h"
+#include <string.h>
 
-// 网格构建
+/*
+ * Algorithm.c 负责“单个箱子”的底层路径规划，核心能力包括：
+ * 1) 2D A*：小车在静态障碍下寻路（可选 4/8 方向）。
+ * 2) 3D A*：在状态中加入“推箱朝向 face”，同时规划“推进行为 + 绕行换向”。
+ * 3) 炸弹策略：先推炸弹炸墙，再在新地形上推目标箱子。
+ * 4) 结果整合：比较“直接推箱”与“炸墙后推箱”，输出最短可行总路径。
+ *
+ * 约定：
+ * - 返回值 < 0 表示不可达/失败；>= 0 表示路径长度或步骤数。
+ * - Position 统一使用栅格坐标(row, col)。
+ * - 本文件多处函数为 static，仅供本模块内部组合使用。
+ */
+
+/*
+ * 性能优化说明：
+ * 1) 为 2D/3D A* 堆分别维护“节点在堆中的位置表”，将原本 O(N) 的 heap_update
+ *    降为 O(1) 定位 + O(logN) 上浮。
+ * 2) 2D A* 预计算“靠近箱子区域”标记，避免每次扩展都线性扫描全部箱子。
+ */
+static int heap_pos_2d[grid_size];
+static int heap_pos_3d[grid_size * 4];
+
+/*
+ * 将障碍物/炸弹/箱子写入一维 grid。
+ * grid 每个单元是位标记：
+ * - 低 4 位记录是否为障碍、炸弹、箱子等类别。
+ * - 高 4 位在箱子场景下记录“箱子索引”(0~15，超出截断到 15)。
+ */
 static void grid_build(int row_cnt, int col_cnt,
                        const Position *obstacles, int obstacles_cnt,
                        const Position *bombs, int bombs_cnt,
@@ -30,8 +58,6 @@ static void grid_build(int row_cnt, int col_cnt,
     for (int i = 0; i < boxes_cnt; i++)
     {
         int r = boxes[i].row, c = boxes[i].col;
-        if (r < 0 || c < 0)
-            continue;
         if (r >= 0 && r < row_cnt && c >= 0 && c < col_cnt)
         {
             int index = r * col_cnt + c;
@@ -40,19 +66,24 @@ static void grid_build(int row_cnt, int col_cnt,
         }
     }
 }
-// 检测网格元素
+/* 检查单元是否不可通行：障碍 / 炸弹 / 已封锁炸弹。 */
 static int check_obstacle(uint8_t *grid, int col_cnt, int row, int col)
 {
     if (row < 0 || col < 0)
         return 0;
     return ((grid[col_cnt * row + col] & (OBSTACLE | BOMB | BLOCKED_BOMB)) != 0);
 }
+/* 与 check_obstacle 类似，但把普通炸弹视为可通行（用于特殊策略场景）。 */
 static int check_obstacle_except_common_bomb(uint8_t *grid, int col_cnt, int row, int col)
 {
     if (row < 0 || col < 0)
         return 0;
     return ((grid[col_cnt * row + col] & (OBSTACLE | BLOCKED_BOMB)) != 0);
 }
+/*
+ * 判断某位置是否存在“除 skip_index 外的箱子”。
+ * 用于“正在推动第 skip_index 个箱子”时，忽略它自身占位，仅检查其他箱子碰撞。
+ */
 static inline int BOX_EXCLUDING(const uint8_t *grid, int col_cnt, int row, int col, size_t skip_index)
 {
     size_t index = (size_t)(row * col_cnt + col);
@@ -63,12 +94,19 @@ static inline int BOX_EXCLUDING(const uint8_t *grid, int col_cnt, int row, int c
         return 1;
     return (size_t)(cell >> 4) != skip_index;
 }
+/* BOX_EXCLUDING 的边界包装版本。 */
 static int check_box_with_excluding(uint8_t *grid, int col_cnt, int row, int col, size_t skip_index)
 {
     if (row < 0 || col < 0)
         return 0;
     return (BOX_EXCLUDING(grid, col_cnt, row, col, skip_index));
 }
+/*
+ * 判断“箱子下一步落点”是否被阻塞：
+ * - 越界阻塞
+ * - 网格障碍阻塞
+ * - 与其他箱子重叠阻塞（排除当前正在推动的箱子）
+ */
 static int check_push_destination_blocked(uint8_t *grid, int row_cnt, int col_cnt,
                                           const Position *boxes, int boxes_cnt,
                                           int pushing_box_index,
@@ -87,9 +125,13 @@ static int check_push_destination_blocked(uint8_t *grid, int row_cnt, int col_cn
     }
     return 0;
 }
-// 限制边处理
+/*
+ * 边限制位图（当前版本未在主流程启用）：
+ * 预留给“禁止某些转移边”类高级约束，例如人工禁行线/方向约束。
+ */
 static const uint32_t *banned_edge_container = NULL;
 
+/* 在边限制位图中标记某条边为“禁用”。 */
 static inline void banned_edge_set(uint32_t *banned_edge_container, int edge_index)
 {
     if (!banned_edge_container || edge_index < 0 || edge_index > banned_edge_cnt)
@@ -98,6 +140,7 @@ static inline void banned_edge_set(uint32_t *banned_edge_container, int edge_ind
     int bit_index = edge_index & 31;
     banned_edge_container[unit_index] |= (1u << bit_index);
 }
+/* 查询某条边是否被标记为“禁用”。 */
 static inline int banned_edge_check(const uint32_t *banned_edge_container, int edge_index)
 {
     if (!banned_edge_container || edge_index < 0 || edge_index > banned_edge_cnt)
@@ -107,15 +150,23 @@ static inline int banned_edge_check(const uint32_t *banned_edge_container, int e
     return (banned_edge_container[unit_index] & (1u << bit_index)) != 0;
 }
 
-// 二叉堆代码实现
-// 交换堆中两个节点的位置
+/*
+ * 以下是 2D A* 使用的最小堆工具：
+ * - 以 f_cost 为主排序键，h_cost 为次排序键（更接近终点者优先）。
+ * - 用数组实现二叉堆，降低 open 集合取最小代价节点的复杂度。
+ */
+
+/* 交换堆数组中的两个槽位。 */
 static inline void heap_swap(binary_heap *heap, int i, int j)
 {
-    int temp = heap->index[i];
-    heap->index[i] = heap->index[j];
-    heap->index[j] = temp;
+    int node_i = heap->index[i];
+    int node_j = heap->index[j];
+    heap->index[i] = node_j;
+    heap->index[j] = node_i;
+    heap_pos_2d[node_i] = j;
+    heap_pos_2d[node_j] = i;
 }
-// 比较堆中两个节点的优先级（f_cost 小的优先，相同的偏好 h_cost 较小/更接近终点的节点）
+/* 比较堆内两个节点优先级。 */
 static inline int heap_compare_less(const a_star_param *nodes, const binary_heap *heap, int i, int j)
 {
     int index_i = heap->index[i];
@@ -126,7 +177,7 @@ static inline int heap_compare_less(const a_star_param *nodes, const binary_heap
     return nodes[index_i].h_cost < nodes[index_j].h_cost;
 }
 
-// 上浮操作：当节点 f_cost 减小时，维护最小堆属性
+/* 堆上浮：用于新插入或代价下降后的重排。 */
 static inline void heap_sift_up(a_star_param *nodes, binary_heap *heap, int i)
 {
     while (i > 0)
@@ -141,7 +192,7 @@ static inline void heap_sift_up(a_star_param *nodes, binary_heap *heap, int i)
             break;
     }
 }
-// 下沉操作：当节点移除并被替换时，维护最小堆属性
+/* 堆下沉：用于弹出堆顶后把尾元素放到根并恢复堆序。 */
 static inline void heap_sift_down(a_star_param *nodes, binary_heap *heap, int i)
 {
     int size = heap->size;
@@ -168,46 +219,49 @@ static inline void heap_sift_down(a_star_param *nodes, binary_heap *heap, int i)
     }
 }
 
-// 压入元素并维持堆属性
+/* 压入 open 集合。 */
 static void heap_push(a_star_param *nodes, binary_heap *heap, int node_index)
 {
-    if (heap->size >= grid_size)
+    if (heap->size >= grid_size || node_index < 0 || node_index >= grid_size)
+        return;
+    if (heap_pos_2d[node_index] >= 0)
         return;
 
     int i = heap->size++;
     heap->index[i] = node_index;
+    heap_pos_2d[node_index] = i;
     heap_sift_up(nodes, heap, i);
 }
-// 弹出堆顶（具有最小 f_cost）的元素
+/* 弹出 open 集合中最优节点。 */
 static int heap_pop(a_star_param *nodes, binary_heap *heap)
 {
     if (heap->size == 0)
         return -1;
 
     int top = heap->index[0];
+    heap_pos_2d[top] = -1;
     heap->size--;
     if (heap->size > 0)
     {
-        heap->index[0] = heap->index[heap->size];
+        int moved = heap->index[heap->size];
+        heap->index[0] = moved;
+        heap_pos_2d[moved] = 0;
         heap_sift_down(nodes, heap, 0);
     }
     return top;
 }
 
-// 更新堆中已存在的节点位置（通常是因为 g_cost 减小导致需要上浮）
+/* 节点已有更优 g_cost 时，触发堆内位置更新。 */
 static void heap_update(a_star_param *nodes, binary_heap *heap, int node_index)
 {
-    for (int i = 0; i < heap->size; i++)
-    {
-        if (heap->index[i] == node_index)
-        {
-            heap_sift_up(nodes, heap, i);
-            break;
-        }
-    }
+    if (node_index < 0 || node_index >= grid_size)
+        return;
+    if (heap_pos_2d[node_index] < 0)
+        return;
+    heap_sift_up(nodes, heap, heap_pos_2d[node_index]);
 }
 
-// 8向启发函数计算
+/* 八方向近似启发：直移代价 10，斜移代价 14。 */
 static inline int diagonal_distance(Position p1, Position p2)
 {
     int dif_row = p1.row > p2.row ? p1.row - p2.row : p2.row - p1.row;
@@ -217,6 +271,7 @@ static inline int diagonal_distance(Position p1, Position p2)
     // 直走权重10，斜走权重14
     return 14 * min_dif + 10 * (max_dif - min_dif);
 }
+/* 曼哈顿距离：用于箱子推送阶段的启发估计。 */
 static inline int manhattan_distance_cells(Position p1, Position p2)
 {
     int dif_row = p1.row > p2.row ? p1.row - p2.row : p2.row - p1.row;
@@ -224,7 +279,11 @@ static inline int manhattan_distance_cells(Position p1, Position p2)
     return dif_row + dif_col;
 }
 
-// 路径推点提取函数
+/*
+ * 从箱子轨迹中提取“推点”序列（当前流程未直接调用，作为策略扩展保留）：
+ * - 每次方向变化意味着小车必须重定位到新的推面。
+ * - 输出的小车推点可用于分段执行或动作控制。
+ */
 static int extract_push_points_from_path(const Position *box_path, int path_len,
                                          Position *push_points, int *push_points_cnt)
 {
@@ -266,9 +325,15 @@ static int extract_push_points_from_path(const Position *box_path, int path_len,
     return 1;
 }
 
-// A*算法路径规划
+/* 2D A* 节点池。 */
 a_star_param a_star[grid_size];
 
+/*
+ * 2D A*：小车从 start 到 target 的行走路径规划。
+ * allow_diagonal 语义：
+ * - 1：空车可 8 向移动，但靠近箱子时自动降级为 4 向防碰撞。
+ * - 0：强制 4 向（典型用于推箱时更稳定的栅格动作）。
+ */
 static int a_star_path_plan(int row_cnt, int col_cnt,
                             const Position *obstacles, int obstacles_cnt,
                             const Position *bombs, int bombs_cnt,
@@ -278,9 +343,9 @@ static int a_star_path_plan(int row_cnt, int col_cnt,
                             Position *out_path)
 {
     // 起点终点合法性判断
-    if (start.row < 0 || start.row >= row_cnt || start.col < 0 || start.col >= col_cnt)
+    if (start.row >= row_cnt || start.col >= col_cnt)
         return -1;
-    if (target.row < 0 || target.row >= row_cnt || target.col < 0 || target.col >= col_cnt)
+    if (target.row >= row_cnt || target.col >= col_cnt)
         return -1;
 
     // 构建网格状态
@@ -292,6 +357,10 @@ static int a_star_path_plan(int row_cnt, int col_cnt,
 
     binary_heap open_set;
     open_set.size = 0;
+    for (int i = 0; i < grid_size; i++)
+    {
+        heap_pos_2d[i] = -1;
+    }
 
     int start_index = start.row * col_cnt + start.col;
     int target_index = target.row * col_cnt + target.col;
@@ -308,6 +377,31 @@ static int a_star_path_plan(int row_cnt, int col_cnt,
     const int dir_row[] = {-1, 1, 0, 0, -1, -1, 1, 1};
     const int dir_col[] = {0, 0, -1, 1, -1, 1, -1, 1};
     const int move_cost[] = {10, 10, 10, 10, 14, 14, 14, 14};
+    uint8_t near_box_map[grid_size];
+    memset(near_box_map, 0, sizeof(near_box_map));
+
+    if (allow_diagonal)
+    {
+        for (int b = 0; b < boxes_cnt; b++)
+        {
+            int br = boxes[b].row;
+            int bc = boxes[b].col;
+            if (br >= row_cnt || bc >= col_cnt)
+                continue;
+            for (int dr = -1; dr <= 1; dr++)
+            {
+                for (int dc = -1; dc <= 1; dc++)
+                {
+                    int rr = br + dr;
+                    int cc = bc + dc;
+                    if (rr >= 0 && rr < row_cnt && cc >= 0 && cc < col_cnt)
+                    {
+                        near_box_map[rr * col_cnt + cc] = 1;
+                    }
+                }
+            }
+        }
+    }
 
     while (open_set.size > 0)
     {
@@ -342,25 +436,8 @@ static int a_star_path_plan(int row_cnt, int col_cnt,
             return path_len; // 正常返回路径步数
         }
 
-        // 检测当前扩展格子是否在任何箱子的临近区域内
-        int is_near_box = 0;
-
-        // 如果允许斜跑(即空车模式)，才需要去探测靠近箱子
-        if (allow_diagonal)
-        {
-            for (int b = 0; b < boxes_cnt; b++)
-            {
-                if (boxes[b].row < 0 || boxes[b].col < 0)
-                    continue; // 忽略无效箱子坐标
-                int dr_box = r - boxes[b].row;
-                int dc_box = c - boxes[b].col;
-                if (dr_box >= -1 && dr_box <= 1 && dc_box >= -1 && dc_box <= 1)
-                {
-                    is_near_box = 1;
-                    break;
-                }
-            }
-        }
+        // 当前格是否靠近箱子（预计算查表，避免循环内重复扫描全部箱子）
+        int is_near_box = allow_diagonal ? near_box_map[current_index] : 0;
 
         // 当周边有箱子时，或不允许斜穿(推箱模式)时，强制降级为 4 向移动防碰；在空旷地带则全开 8 向以加快寻路和移动速度
         int dir_count = (!allow_diagonal || is_near_box) ? 4 : 8;
@@ -417,15 +494,25 @@ static int a_star_path_plan(int row_cnt, int col_cnt,
     return -1; // 寻找不到路径
 }
 
-// 二叉堆代码(添加推面状态)
+/*
+ * 3D A* 状态定义：
+ * state = (box_row, box_col, face)
+ * - face 表示小车站在箱子哪一侧并准备向哪个方向推。
+ * - 同一个箱子格子有 4 个朝向状态，因此容量是 grid_size * 4。
+ */
 a_star_3d_param a_star_3d[grid_size * 4];
 
+/* 3D A* 的堆交换。 */
 static inline void heap_swap_3d(binary_heap_3d *heap, int i, int j)
 {
-    int temp = heap->index[i];
-    heap->index[i] = heap->index[j];
-    heap->index[j] = temp;
+    int node_i = heap->index[i];
+    int node_j = heap->index[j];
+    heap->index[i] = node_j;
+    heap->index[j] = node_i;
+    heap_pos_3d[node_i] = j;
+    heap_pos_3d[node_j] = i;
 }
+/* 3D A* 的优先级比较：f 为主，g 和 h 为辅。 */
 static inline int heap_compare_less_3d(const binary_heap_3d *heap, int i, int j)
 {
     int index_i = heap->index[i];
@@ -438,6 +525,7 @@ static inline int heap_compare_less_3d(const binary_heap_3d *heap, int i, int j)
     return a_star_3d[index_i].h_cost < a_star_3d[index_j].h_cost;
 }
 
+/* 3D A* 堆上浮。 */
 static inline void heap_sift_up_3d(binary_heap_3d *heap, int i)
 {
     while (i > 0)
@@ -452,6 +540,7 @@ static inline void heap_sift_up_3d(binary_heap_3d *heap, int i)
             break;
     }
 }
+/* 3D A* 堆下沉。 */
 static inline void heap_sift_down_3d(binary_heap_3d *heap, int i)
 {
     int size = heap->size;
@@ -478,43 +567,59 @@ static inline void heap_sift_down_3d(binary_heap_3d *heap, int i)
     }
 }
 
+/* 3D A* 入堆。 */
 static void heap_push_3d(binary_heap_3d *heap, int node_index)
 {
-    if (heap->size >= grid_size * 4)
+    if (heap->size >= grid_size * 4 || node_index < 0 || node_index >= (grid_size * 4))
+        return;
+    if (heap_pos_3d[node_index] >= 0)
         return;
 
     int i = heap->size++;
     heap->index[i] = node_index;
+    heap_pos_3d[node_index] = i;
     heap_sift_up_3d(heap, i);
 }
+/* 3D A* 出堆。 */
 static int heap_pop_3d(binary_heap_3d *heap)
 {
     if (heap->size == 0)
         return -1;
 
     int top = heap->index[0];
+    heap_pos_3d[top] = -1;
     heap->size--;
     if (heap->size > 0)
     {
-        heap->index[0] = heap->index[heap->size];
+        int moved = heap->index[heap->size];
+        heap->index[0] = moved;
+        heap_pos_3d[moved] = 0;
         heap_sift_down_3d(heap, 0);
     }
     return top;
 }
 
+/* 3D A* 节点代价改进后的重排。 */
 static void heap_update_3d(binary_heap_3d *heap, int node_index)
 {
-    for (int i = 0; i < heap->size; i++)
-    {
-        if (heap->index[i] == node_index)
-        {
-            heap_sift_up_3d(heap, i);
-            break;
-        }
-    }
+    if (node_index < 0 || node_index >= (grid_size * 4))
+        return;
+    if (heap_pos_3d[node_index] < 0)
+        return;
+    heap_sift_up_3d(heap, heap_pos_3d[node_index]);
 }
 
-// A*(添加推面状态)
+/*
+ * 3D A*（推箱主算法）：
+ * - 起点：先枚举 4 个可能推面，筛出小车可到达的入推姿态。
+ * - 扩展：
+ *   1) 同向直推：箱子前进一步，face 不变。
+ *   2) 绕行换向：箱子不动，小车绕到另一侧，face 改变。
+ * - 代价设计：
+ *   COST_PUSH > COST_WALK，鼓励减少无效走动；
+ *   COST_REORIENT_PENALTY 约束频繁换向。
+ * - 输出：返回完整“小车路径”，不是仅箱子轨迹。
+ */
 int a_star_path_plan_3d(int row_cnt, int col_cnt,
                         const Position *obstacles, int obstacles_cnt,
                         const Position *bombs, int bombs_cnt,
@@ -541,6 +646,10 @@ int a_star_path_plan_3d(int row_cnt, int col_cnt,
 
     binary_heap_3d open_set;
     open_set.size = 0;
+    for (int i = 0; i < (grid_size * 4); i++)
+    {
+        heap_pos_3d[i] = -1;
+    }
 
     int target_3d_index = -1;
 
@@ -813,7 +922,10 @@ int a_star_path_plan_3d(int row_cnt, int col_cnt,
     return total_car_len;
 }
 
-// 模拟炸弹爆炸，抹除 3x3 范围内残存的所有障碍物
+/*
+ * 模拟炸弹爆炸：清除 bomb_target 为中心 3x3 范围内的障碍物。
+ * 用于“第一阶段推炸弹后”更新第二阶段推箱的地图。
+ */
 void simulate_bomb_explosion(Position *obstacles, int *obstacles_cnt, Position bomb_target)
 {
     int new_cnt = 0;
@@ -835,7 +947,10 @@ void simulate_bomb_explosion(Position *obstacles, int *obstacles_cnt, Position b
     *obstacles_cnt = new_cnt;
 }
 
-// 寻找 必须炸/值得炸 的墙壁
+/*
+ * 选择“值得尝试炸掉”的候选墙：
+ * 仅在箱子起点与目标点包围盒外扩 1 格区域内筛选，减少组合爆炸搜索量。
+ */
 int get_candidate_walls(const Position *obstacles, int obstacles_cnt,
                         Position box_start, Position target,
                         Position *out_candidate_walls)
@@ -864,6 +979,69 @@ int get_candidate_walls(const Position *obstacles, int obstacles_cnt,
     return cnt;
 }
 
+/*
+ * 路径特殊点标记策略（写入 Position.id）：
+ * - IDENTIFICATION : 路径起点（建议在该点做一次姿态/视觉确认）
+ * - TURNING_POINT  : 行进方向发生变化的拐点
+ * - BOMB_EXPLOSION : 炸弹爆炸对应的事件点（优先级最高）
+ */
+static int marker_priority(uint8_t marker_id)
+{
+    if (marker_id == BOMB_EXPLOSION)
+        return 3;
+    if (marker_id == IDENTIFICATION)
+        return 2;
+    if (marker_id == TURNING_POINT)
+        return 1;
+    return 0;
+}
+
+static void mark_path_id(Position *path, int path_len, int index, uint8_t marker_id)
+{
+    if (!path || index < 0 || index >= path_len)
+        return;
+    if (marker_priority(marker_id) >= marker_priority(path[index].id))
+    {
+        path[index].id = marker_id;
+    }
+}
+
+static void annotate_path_special_ids(Position *path, int path_len, int bomb_event_index)
+{
+    if (!path || path_len <= 0)
+        return;
+
+    for (int i = 0; i < path_len; i++)
+    {
+        path[i].id = 0;
+    }
+
+    mark_path_id(path, path_len, 0, IDENTIFICATION);
+
+    for (int i = 1; i < path_len - 1; i++)
+    {
+        int dr1 = (int)path[i].row - (int)path[i - 1].row;
+        int dc1 = (int)path[i].col - (int)path[i - 1].col;
+        int dr2 = (int)path[i + 1].row - (int)path[i].row;
+        int dc2 = (int)path[i + 1].col - (int)path[i].col;
+        if (dr1 != dr2 || dc1 != dc2)
+        {
+            mark_path_id(path, path_len, i, TURNING_POINT);
+        }
+    }
+
+    if (bomb_event_index >= 0 && bomb_event_index < path_len)
+    {
+        mark_path_id(path, path_len, bomb_event_index, BOMB_EXPLOSION);
+    }
+}
+
+/*
+ * 评估单个“炸弹 + 墙”组合：
+ * Phase1: 把炸弹当作“可推动物体”推到 wall_target。
+ * Phase2: 在炸后地形上推动目标箱子到目标点。
+ * 成功返回两阶段总步数，并输出拼接后的完整小车路径。
+ */
 int evaluate_bomb_shortcut(int row_cnt, int col_cnt,
                            const Position *obstacles, int obstacles_cnt,
                            const Position *bombs, int bombs_cnt,
@@ -875,7 +1053,8 @@ int evaluate_bomb_shortcut(int row_cnt, int col_cnt,
                            Position car_start,
                            Position *out_full_path,
                            Position *out_bomb_target,
-                           Position *out_box_target)
+                           Position *out_box_target,
+                           int *out_bomb_event_index)
 {
     // 把炸弹加入箱子数组进行A*计算
     Position temp_boxes[MAX_BOXES + 1];
@@ -949,11 +1128,18 @@ int evaluate_bomb_shortcut(int row_cnt, int col_cnt,
 
     if (out_bomb_target)
         *out_bomb_target = best_bomb_target;
+    if (out_bomb_event_index)
+        *out_bomb_event_index = phase1_steps - 1;
 
     return phase1_steps + phase2_steps;
 }
 
-// 综合路径输出
+/*
+ * 统一对外的单箱规划入口：
+ * 1) 先求“直接推箱”路径。
+ * 2) 若存在炸弹，则枚举炸弹与候选墙，评估“先炸后推”。
+ * 3) 在所有可行方案中取最短路径，回填 path_plan_result。
+ */
 int integrated_path_output(int row_cnt, int col_cnt,
                            const Position *obstacles, int obstacles_cnt,
                            const Position *bombs, int bombs_cnt,
@@ -967,14 +1153,15 @@ int integrated_path_output(int row_cnt, int col_cnt,
         return -1;
 
     // 初始化结果
+    memset(result, 0, sizeof(*result));
     result->total_steps = -1;
-    result->used_bomb = 0;
     result->bomb_index = -1;
-    result->bomb_target = (Position){-1, -1};
-    result->wall_target = (Position){-1, -1};
-    result->box_target = (Position){-1, -1};
+    result->bomb_target = (Position){255, 255, 0};
+    result->wall_target = (Position){255, 255, 0};
+    result->box_target = (Position){255, 255, 0};
 
     int best_len = -1;
+    int best_bomb_event_index = -1;
 
     Position simple_path[grid_size * 4];
     Position simple_target;
@@ -995,10 +1182,8 @@ int integrated_path_output(int row_cnt, int col_cnt,
         result->total_steps = simple_len;
         result->used_bomb = 0;
         result->box_target = simple_target;
-        for (int i = 0; i < simple_len; i++)
-        {
-            result->car_path[i] = simple_path[i];
-        }
+        memcpy(result->car_path, simple_path, (size_t)simple_len * sizeof(Position));
+        best_bomb_event_index = -1;
     }
 
     if (bombs_cnt > 0)
@@ -1030,6 +1215,7 @@ int integrated_path_output(int row_cnt, int col_cnt,
                 Position temp_path[grid_size * 8];
                 Position actual_bomb_target;
                 Position actual_box_target;
+                int bomb_event_index = -1;
                 int bomb_steps = evaluate_bomb_shortcut(row_cnt, col_cnt,
                                                         obstacles, obstacles_cnt,
                                                         bombs, bombs_cnt,
@@ -1040,7 +1226,8 @@ int integrated_path_output(int row_cnt, int col_cnt,
                                                         car_start,
                                                         temp_path,
                                                         &actual_bomb_target,
-                                                        &actual_box_target);
+                                                        &actual_box_target,
+                                                        &bomb_event_index);
 
                 if (bomb_steps > 0 && (best_len < 0 || bomb_steps < best_len))
                 {
@@ -1051,13 +1238,16 @@ int integrated_path_output(int row_cnt, int col_cnt,
                     result->wall_target = candidate_walls[w];
                     result->bomb_target = actual_bomb_target;
                     result->box_target = actual_box_target;
-                    for (int i = 0; i < bomb_steps; i++)
-                    {
-                        result->car_path[i] = temp_path[i];
-                    }
+                    memcpy(result->car_path, temp_path, (size_t)bomb_steps * sizeof(Position));
+                    best_bomb_event_index = bomb_event_index;
                 }
             }
         }
+    }
+
+    if (result->total_steps > 0)
+    {
+        annotate_path_special_ids(result->car_path, result->total_steps, best_bomb_event_index);
     }
 
     return result->total_steps;

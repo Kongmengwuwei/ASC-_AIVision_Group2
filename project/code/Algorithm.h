@@ -55,7 +55,18 @@ typedef struct
     Position box_target;
 } path_plan_result;
 
+/*
+ * 模拟炸弹爆炸后的地形变化：
+ * 以 bomb_target 为中心，清除 3x3 邻域内障碍物。
+ */
 void simulate_bomb_explosion(Position *obstacles, int *obstacles_cnt, Position bomb_target);
+
+/*
+ * 单箱子综合规划入口（Algorithm 模块对外主接口）：
+ * - 输入当前地图、炸弹、箱子、目标和起始车位；
+ * - 在“直接推箱”与“炸墙后推箱”方案中择优；
+ * - 结果写入 result（含完整小车路径与是否用炸弹等信息）。
+ */
 int integrated_path_output(int row_cnt, int col_cnt,
                            const Position *obstacles, int obstacles_cnt,
                            const Position *bombs, int bombs_cnt,

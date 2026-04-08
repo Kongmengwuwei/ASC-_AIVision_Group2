@@ -4,10 +4,10 @@
 #include "Map_Route_Data.h"
 #include "Algorithm.h"
 
-// Mode1: plan all boxes without id constraint.
+// 模式1：不区分 id，按全局最优策略规划所有箱子。
 void Plan_path_Mode1(void);
 
-// Mode2: each box must be pushed to target with the same id.
+// 模式2：每个箱子必须对应推到相同 id 的目标点。
 void Plan_path_Mode2(void);
 
 #endif

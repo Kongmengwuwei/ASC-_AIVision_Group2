@@ -43,13 +43,13 @@
 
 // 本例程是开源库移植用空工程
 
-
+ 
 int main(void)
 {
     clock_init(SYSTEM_CLOCK_600M);  // 不可删除
     //debug_init();                   // 调试端口初始化
 	
-	//陀螺仪及其解算中断初始化
+	//陀螺仪及解算中断初始化
 	imu963ra_init();
 	Attitude_Init();
 	pit_ms_init(PIT_CH1, 2);

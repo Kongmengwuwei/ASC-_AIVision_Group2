@@ -80,8 +80,8 @@ void LPUART1_IRQHandler(void)
     if(kLPUART_RxDataRegFullFlag & LPUART_GetStatusFlags(LPUART1))
     {
 	
-		extern void uart1_rx_interrupt_handler();
-		uart1_rx_interrupt_handler();
+		extern void uart_blob_rx_interrupt_handler();
+		uart_blob_rx_interrupt_handler();
 		
         // 接收中断
     #if DEBUG_UART_USE_INTERRUPT                        // 如果开启 debug 串口中断
@@ -120,8 +120,7 @@ void LPUART4_IRQHandler(void)
     if(kLPUART_RxDataRegFullFlag & LPUART_GetStatusFlags(LPUART4))
     {
         // 接收中断 
-		extern void uart2_rx_interrupt_handler();
-		uart2_rx_interrupt_handler();
+		
     }
         
     LPUART_ClearStatusFlags(LPUART4, kLPUART_RxOverrunFlag);    // 不允许删除

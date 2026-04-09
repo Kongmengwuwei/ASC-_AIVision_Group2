@@ -480,14 +480,14 @@
               <FilePath>..\code\姿态解算使用说明.txt</FilePath>
             </File>
             <File>
-              <FileName>Serial.c</FileName>
+              <FileName>data_handle.c</FileName>
               <FileType>1</FileType>
-              <FilePath>..\code\Serial.c</FilePath>
+              <FilePath>..\code\data_handle.c</FilePath>
             </File>
             <File>
-              <FileName>Serial.h</FileName>
+              <FileName>data_handle.h</FileName>
               <FileType>5</FileType>
-              <FilePath>..\code\Serial.h</FilePath>
+              <FilePath>..\code\data_handle.h</FilePath>
             </File>
           </Files>
         </Group>

@@ -2,17 +2,17 @@
 #define _ALGORITHM_H
 
 #include "Map_Route_Data.h"
-#include "Camera_handler.h"
 
-#define grid_size       140 // 不含墙的有效区域
+/* 不含外墙的有效规划栅格总数。 */
+#define grid_size 140
 
-/*方格识别码*/
+/* 网格位标记。 */
 #define OBSTACLE        0x01
 #define BOMB            0x02
 #define BLOCKED_BOMB    0x04
 #define BOX             0x08
 
-/*限制边参数*/
+/* A* 边约束位图参数（预留）。 */
 #define banned_edge_cnt     (4 * grid_size)
 #define banned_edge_volume  ((banned_edge_cnt + 31) / 32)
 
@@ -24,6 +24,7 @@ typedef struct
     int parent_index;
     uint8_t open_or_close;
 } a_star_param;
+
 typedef struct
 {
     int f_cost;
@@ -33,17 +34,20 @@ typedef struct
     uint8_t open_or_close;
     uint8_t is_push;
 } a_star_3d_param;
+
 typedef struct
 {
     int index[grid_size];
     int size;
 } binary_heap;
+
 typedef struct
 {
     int index[grid_size * 4];
     int size;
 } binary_heap_3d;
 
+/* 单次规划输出：完整小车路径 + 是否使用炸弹 + 关键事件点。 */
 typedef struct
 {
     int total_steps;
@@ -55,18 +59,10 @@ typedef struct
     Position box_target;
 } path_plan_result;
 
-/*
- * 模拟炸弹爆炸后的地形变化：
- * 以 bomb_target 为中心，清除 3x3 邻域内障碍物。
- */
+/* 模拟炸弹爆炸后的地形变化（清除 3x3 范围内障碍）。 */
 void simulate_bomb_explosion(Position *obstacles, int *obstacles_cnt, Position bomb_target);
 
-/*
- * 单箱子综合规划入口（Algorithm 模块对外主接口）：
- * - 输入当前地图、炸弹、箱子、目标和起始车位；
- * - 在“直接推箱”与“炸墙后推箱”方案中择优；
- * - 结果写入 result（含完整小车路径与是否用炸弹等信息）。
- */
+/* 单箱子综合规划入口：在“直推”与“先炸后推”方案中选最优。 */
 int integrated_path_output(int row_cnt, int col_cnt,
                            const Position *obstacles, int obstacles_cnt,
                            const Position *bombs, int bombs_cnt,
@@ -76,6 +72,4 @@ int integrated_path_output(int row_cnt, int col_cnt,
                            Position car_start,
                            path_plan_result *result);
 
-
-                           
 #endif

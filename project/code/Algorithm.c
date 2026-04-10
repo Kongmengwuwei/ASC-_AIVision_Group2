@@ -1,48 +1,187 @@
-#include "Algorithm.h"
+﻿#include "Algorithm.h"
 #include <string.h>
 
 /*
- * Algorithm.c 负责“单个箱子”的底层路径规划，核心能力包括：
- * 1) 2D A*：小车在静态障碍下寻路（可选 4/8 方向）。
- * 2) 3D A*：在状态中加入“推箱朝向 face”，同时规划“推进行为 + 绕行换向”。
- * 3) 炸弹策略：先推炸弹炸墙，再在新地形上推目标箱子。
- * 4) 结果整合：比较“直接推箱”与“炸墙后推箱”，输出最短可行总路径。
+ * Algorithm.c：底层路径搜索模块
+ * 1) 2D A*：用于小车在静态地图中的最短路；
+ * 2) 3D A*：把“箱子位置 + 推箱朝向”纳入状态，规划完整推箱过程；
+ * 3) 炸弹捷径评估：评估“先推炸弹炸墙，再推箱”是否更优；
+ * 4) 综合输出：统一比较直推与炸墙方案，输出最优完整路径。
  *
  * 约定：
- * - 返回值 < 0 表示不可达/失败；>= 0 表示路径长度或步骤数。
- * - Position 统一使用栅格坐标(row, col)。
- * - 本文件多处函数为 static，仅供本模块内部组合使用。
+ * - 返回值 <= 0 表示失败或不可达，> 0 表示路径步数；
+ * - Position 使用 (row, col, id) 网格坐标；
+ * - 大部分函数为 static，仅供本文件内部组合调用。
  */
 
 /*
- * 性能优化说明：
- * 1) 为 2D/3D A* 堆分别维护“节点在堆中的位置表”，将原本 O(N) 的 heap_update
- *    降为 O(1) 定位 + O(logN) 上浮。
- * 2) 2D A* 预计算“靠近箱子区域”标记，避免每次扩展都线性扫描全部箱子。
+ * 性能优化要点：
+ * 1) 2D/3D 堆结构维护“节点在堆内位置”，把 update 从 O(N) 降到 O(logN)；
+ * 2) 炸弹评估采用多层候选筛选与曼哈顿下界剪枝，减少高代价搜索次数。
  */
 static int heap_pos_2d[grid_size];
 static int heap_pos_3d[grid_size * 4];
 
+/* 快速炸弹评估参数：用于限制“炸弹捷径”搜索规模，降低总计算量。 */
+#define FAST_BOMB_SHORTCUT_TRIGGER_STEPS      26
+#define FAST_BOMB_MAX_BOMBS_WHEN_REACHABLE    3
+#define FAST_BOMB_MAX_WALLS_WHEN_REACHABLE    8
+#define FAST_BOMB_MAX_WALLS_WHEN_BLOCKED      18
+
+static int abs_i(int x)
+{
+    return (x < 0) ? -x : x;
+}
+
+static int manhattan_dist(Position a, Position b)
+{
+    return abs_i((int)a.row - (int)b.row) + abs_i((int)a.col - (int)b.col);
+}
+
+static int min_target_dist(Position from, const Position *targets, int targets_cnt)
+{
+    int i;
+    int best = 0x3fffffff;
+    if (!targets || targets_cnt <= 0)
+        return 0;
+
+    for (i = 0; i < targets_cnt; i++)
+    {
+        int d = manhattan_dist(from, targets[i]);
+        if (d < best)
+            best = d;
+    }
+    return (best == 0x3fffffff) ? 0 : best;
+}
+
+static int wall_priority_score(Position wall,
+                               Position box,
+                               const Position *targets,
+                               int targets_cnt,
+                               Position car_start)
+{
+    int i;
+    int best_target = 0x3fffffff;
+
+    for (i = 0; i < targets_cnt; i++)
+    {
+        int d = manhattan_dist(wall, targets[i]);
+        if (d < best_target)
+            best_target = d;
+    }
+    if (targets_cnt <= 0)
+        best_target = 0;
+
+    return manhattan_dist(wall, box) + best_target + (manhattan_dist(wall, car_start) >> 1);
+}
+
+static int select_top_walls_by_score(const Position *walls,
+                                     int wall_cnt,
+                                     int limit,
+                                     Position box,
+                                     const Position *targets,
+                                     int targets_cnt,
+                                     Position car_start,
+                                     Position *out_walls)
+{
+    uint8_t used[grid_size];
+    int picked = 0;
+    int k, i;
+
+    if (!walls || !out_walls || wall_cnt <= 0 || limit <= 0)
+        return 0;
+    if (wall_cnt > grid_size)
+        wall_cnt = grid_size;
+    if (limit > wall_cnt)
+        limit = wall_cnt;
+
+    memset(used, 0, sizeof(used));
+
+    for (k = 0; k < limit; k++)
+    {
+        int best_idx = -1;
+        int best_score = 0x3fffffff;
+        for (i = 0; i < wall_cnt; i++)
+        {
+            int score;
+            if (used[i])
+                continue;
+            score = wall_priority_score(walls[i], box, targets, targets_cnt, car_start);
+            if (score < best_score)
+            {
+                best_score = score;
+                best_idx = i;
+            }
+        }
+        if (best_idx < 0)
+            break;
+        used[best_idx] = 1;
+        out_walls[picked++] = walls[best_idx];
+    }
+
+    return picked;
+}
+
+static int select_top_bomb_indices_by_score(const Position *bombs,
+                                            int bombs_cnt,
+                                            int limit,
+                                            Position box,
+                                            Position car_start,
+                                            int *out_indices)
+{
+    uint8_t used[MAX_BOMBS];
+    int picked = 0;
+    int k, i;
+
+    if (!bombs || !out_indices || bombs_cnt <= 0 || limit <= 0)
+        return 0;
+    if (bombs_cnt > MAX_BOMBS)
+        bombs_cnt = MAX_BOMBS;
+    if (limit > bombs_cnt)
+        limit = bombs_cnt;
+
+    memset(used, 0, sizeof(used));
+
+    for (k = 0; k < limit; k++)
+    {
+        int best_idx = -1;
+        int best_score = 0x3fffffff;
+        for (i = 0; i < bombs_cnt; i++)
+        {
+            int score;
+            if (used[i])
+                continue;
+            score = manhattan_dist(bombs[i], box) + (manhattan_dist(bombs[i], car_start) >> 1);
+            if (score < best_score)
+            {
+                best_score = score;
+                best_idx = i;
+            }
+        }
+        if (best_idx < 0)
+            break;
+        used[best_idx] = 1;
+        out_indices[picked++] = best_idx;
+    }
+
+    return picked;
+}
+
 /*
- * 将障碍物/炸弹/箱子写入一维 grid。
- * grid 每个单元是位标记：
- * - 低 4 位记录是否为障碍、炸弹、箱子等类别。
- * - 高 4 位在箱子场景下记录“箱子索引”(0~15，超出截断到 15)。
- */
+ * 灏嗛殰纰嶇墿/鐐稿脊/绠卞瓙鍐欏叆涓€缁?grid銆? * grid 姣忎釜鍗曞厓鏄綅鏍囪锛? * - 浣?4 浣嶈褰曟槸鍚︿负闅滅銆佺偢寮广€佺瀛愮瓑绫诲埆銆? * - 楂?4 浣嶅湪绠卞瓙鍦烘櫙涓嬭褰曗€滅瀛愮储寮曗€?0~15锛岃秴鍑烘埅鏂埌 15)銆? */
 static void grid_build(int row_cnt, int col_cnt,
                        const Position *obstacles, int obstacles_cnt,
                        const Position *bombs, int bombs_cnt,
                        const Position *boxes, int boxes_cnt,
-                       int use_blocked_bombs,
                        uint8_t *grid)
 {
-    // 确定网格大小
+    // 纭畾缃戞牸澶у皬
     int n = row_cnt * col_cnt;
     if (n > grid_size)
         n = grid_size;
-    // 清空网格
+    // 娓呯┖缃戞牸
     memset(grid, 0, n);
-    // 标记各块
+    // 鏍囪鍚勫潡
     for (int i = 0; i < obstacles_cnt; i++)
     {
         int r = obstacles[i].row, c = obstacles[i].col;
@@ -66,24 +205,15 @@ static void grid_build(int row_cnt, int col_cnt,
         }
     }
 }
-/* 检查单元是否不可通行：障碍 / 炸弹 / 已封锁炸弹。 */
+/* 妫€鏌ュ崟鍏冩槸鍚︿笉鍙€氳锛氶殰纰?/ 鐐稿脊 / 宸插皝閿佺偢寮广€?*/
 static int check_obstacle(uint8_t *grid, int col_cnt, int row, int col)
 {
     if (row < 0 || col < 0)
         return 0;
     return ((grid[col_cnt * row + col] & (OBSTACLE | BOMB | BLOCKED_BOMB)) != 0);
 }
-/* 与 check_obstacle 类似，但把普通炸弹视为可通行（用于特殊策略场景）。 */
-static int check_obstacle_except_common_bomb(uint8_t *grid, int col_cnt, int row, int col)
-{
-    if (row < 0 || col < 0)
-        return 0;
-    return ((grid[col_cnt * row + col] & (OBSTACLE | BLOCKED_BOMB)) != 0);
-}
 /*
- * 判断某位置是否存在“除 skip_index 外的箱子”。
- * 用于“正在推动第 skip_index 个箱子”时，忽略它自身占位，仅检查其他箱子碰撞。
- */
+ * 鍒ゆ柇鏌愪綅缃槸鍚﹀瓨鍦ㄢ€滈櫎 skip_index 澶栫殑绠卞瓙鈥濄€? * 鐢ㄤ簬鈥滄鍦ㄦ帹鍔ㄧ skip_index 涓瀛愨€濇椂锛屽拷鐣ュ畠鑷韩鍗犱綅锛屼粎妫€鏌ュ叾浠栫瀛愮鎾炪€? */
 static inline int BOX_EXCLUDING(const uint8_t *grid, int col_cnt, int row, int col, size_t skip_index)
 {
     size_t index = (size_t)(row * col_cnt + col);
@@ -94,7 +224,7 @@ static inline int BOX_EXCLUDING(const uint8_t *grid, int col_cnt, int row, int c
         return 1;
     return (size_t)(cell >> 4) != skip_index;
 }
-/* BOX_EXCLUDING 的边界包装版本。 */
+/* BOX_EXCLUDING 鐨勮竟鐣屽寘瑁呯増鏈€?*/
 static int check_box_with_excluding(uint8_t *grid, int col_cnt, int row, int col, size_t skip_index)
 {
     if (row < 0 || col < 0)
@@ -102,10 +232,9 @@ static int check_box_with_excluding(uint8_t *grid, int col_cnt, int row, int col
     return (BOX_EXCLUDING(grid, col_cnt, row, col, skip_index));
 }
 /*
- * 判断“箱子下一步落点”是否被阻塞：
- * - 越界阻塞
- * - 网格障碍阻塞
- * - 与其他箱子重叠阻塞（排除当前正在推动的箱子）
+ * 鍒ゆ柇鈥滅瀛愪笅涓€姝ヨ惤鐐光€濇槸鍚﹁闃诲锛? * - 瓒婄晫闃诲
+ * - 缃戞牸闅滅闃诲
+ * - 涓庡叾浠栫瀛愰噸鍙犻樆濉烇紙鎺掗櫎褰撳墠姝ｅ湪鎺ㄥ姩鐨勭瀛愶級
  */
 static int check_push_destination_blocked(uint8_t *grid, int row_cnt, int col_cnt,
                                           const Position *boxes, int boxes_cnt,
@@ -126,37 +255,9 @@ static int check_push_destination_blocked(uint8_t *grid, int row_cnt, int col_cn
     return 0;
 }
 /*
- * 边限制位图（当前版本未在主流程启用）：
- * 预留给“禁止某些转移边”类高级约束，例如人工禁行线/方向约束。
- */
-static const uint32_t *banned_edge_container = NULL;
+ * 浠ヤ笅鏄?2D A* 浣跨敤鐨勬渶灏忓爢宸ュ叿锛? * - 浠?f_cost 涓轰富鎺掑簭閿紝h_cost 涓烘鎺掑簭閿紙鏇存帴杩戠粓鐐硅€呬紭鍏堬級銆? * - 鐢ㄦ暟缁勫疄鐜颁簩鍙夊爢锛岄檷浣?open 闆嗗悎鍙栨渶灏忎唬浠疯妭鐐圭殑澶嶆潅搴︺€? */
 
-/* 在边限制位图中标记某条边为“禁用”。 */
-static inline void banned_edge_set(uint32_t *banned_edge_container, int edge_index)
-{
-    if (!banned_edge_container || edge_index < 0 || edge_index > banned_edge_cnt)
-        return;
-    int unit_index = edge_index >> 5;
-    int bit_index = edge_index & 31;
-    banned_edge_container[unit_index] |= (1u << bit_index);
-}
-/* 查询某条边是否被标记为“禁用”。 */
-static inline int banned_edge_check(const uint32_t *banned_edge_container, int edge_index)
-{
-    if (!banned_edge_container || edge_index < 0 || edge_index > banned_edge_cnt)
-        return 0;
-    int unit_index = edge_index >> 5;
-    int bit_index = edge_index & 31;
-    return (banned_edge_container[unit_index] & (1u << bit_index)) != 0;
-}
-
-/*
- * 以下是 2D A* 使用的最小堆工具：
- * - 以 f_cost 为主排序键，h_cost 为次排序键（更接近终点者优先）。
- * - 用数组实现二叉堆，降低 open 集合取最小代价节点的复杂度。
- */
-
-/* 交换堆数组中的两个槽位。 */
+/* 浜ゆ崲鍫嗘暟缁勪腑鐨勪袱涓Ы浣嶃€?*/
 static inline void heap_swap(binary_heap *heap, int i, int j)
 {
     int node_i = heap->index[i];
@@ -166,7 +267,7 @@ static inline void heap_swap(binary_heap *heap, int i, int j)
     heap_pos_2d[node_i] = j;
     heap_pos_2d[node_j] = i;
 }
-/* 比较堆内两个节点优先级。 */
+/* 姣旇緝鍫嗗唴涓や釜鑺傜偣浼樺厛绾с€?*/
 static inline int heap_compare_less(const a_star_param *nodes, const binary_heap *heap, int i, int j)
 {
     int index_i = heap->index[i];
@@ -177,7 +278,7 @@ static inline int heap_compare_less(const a_star_param *nodes, const binary_heap
     return nodes[index_i].h_cost < nodes[index_j].h_cost;
 }
 
-/* 堆上浮：用于新插入或代价下降后的重排。 */
+/* 鍫嗕笂娴細鐢ㄤ簬鏂版彃鍏ユ垨浠ｄ环涓嬮檷鍚庣殑閲嶆帓銆?*/
 static inline void heap_sift_up(a_star_param *nodes, binary_heap *heap, int i)
 {
     while (i > 0)
@@ -192,7 +293,7 @@ static inline void heap_sift_up(a_star_param *nodes, binary_heap *heap, int i)
             break;
     }
 }
-/* 堆下沉：用于弹出堆顶后把尾元素放到根并恢复堆序。 */
+/* 鍫嗕笅娌夛細鐢ㄤ簬寮瑰嚭鍫嗛《鍚庢妸灏惧厓绱犳斁鍒版牴骞舵仮澶嶅爢搴忋€?*/
 static inline void heap_sift_down(a_star_param *nodes, binary_heap *heap, int i)
 {
     int size = heap->size;
@@ -219,7 +320,7 @@ static inline void heap_sift_down(a_star_param *nodes, binary_heap *heap, int i)
     }
 }
 
-/* 压入 open 集合。 */
+/* 鍘嬪叆 open 闆嗗悎銆?*/
 static void heap_push(a_star_param *nodes, binary_heap *heap, int node_index)
 {
     if (heap->size >= grid_size || node_index < 0 || node_index >= grid_size)
@@ -232,7 +333,7 @@ static void heap_push(a_star_param *nodes, binary_heap *heap, int node_index)
     heap_pos_2d[node_index] = i;
     heap_sift_up(nodes, heap, i);
 }
-/* 弹出 open 集合中最优节点。 */
+/* 寮瑰嚭 open 闆嗗悎涓渶浼樿妭鐐广€?*/
 static int heap_pop(a_star_param *nodes, binary_heap *heap)
 {
     if (heap->size == 0)
@@ -251,7 +352,7 @@ static int heap_pop(a_star_param *nodes, binary_heap *heap)
     return top;
 }
 
-/* 节点已有更优 g_cost 时，触发堆内位置更新。 */
+/* 鑺傜偣宸叉湁鏇翠紭 g_cost 鏃讹紝瑙﹀彂鍫嗗唴浣嶇疆鏇存柊銆?*/
 static void heap_update(a_star_param *nodes, binary_heap *heap, int node_index)
 {
     if (node_index < 0 || node_index >= grid_size)
@@ -261,17 +362,17 @@ static void heap_update(a_star_param *nodes, binary_heap *heap, int node_index)
     heap_sift_up(nodes, heap, heap_pos_2d[node_index]);
 }
 
-/* 八方向近似启发：直移代价 10，斜移代价 14。 */
+/* 鍏柟鍚戣繎浼煎惎鍙戯細鐩寸Щ浠ｄ环 10锛屾枩绉讳唬浠?14銆?*/
 static inline int diagonal_distance(Position p1, Position p2)
 {
     int dif_row = p1.row > p2.row ? p1.row - p2.row : p2.row - p1.row;
     int dif_col = p1.col > p2.col ? p1.col - p2.col : p2.col - p1.col;
     int min_dif = dif_row < dif_col ? dif_row : dif_col;
     int max_dif = dif_row > dif_col ? dif_row : dif_col;
-    // 直走权重10，斜走权重14
+    // 鐩磋蛋鏉冮噸10锛屾枩璧版潈閲?4
     return 14 * min_dif + 10 * (max_dif - min_dif);
 }
-/* 曼哈顿距离：用于箱子推送阶段的启发估计。 */
+/* 鏇煎搱椤胯窛绂伙細鐢ㄤ簬绠卞瓙鎺ㄩ€侀樁娈电殑鍚彂浼拌銆?*/
 static inline int manhattan_distance_cells(Position p1, Position p2)
 {
     int dif_row = p1.row > p2.row ? p1.row - p2.row : p2.row - p1.row;
@@ -279,61 +380,11 @@ static inline int manhattan_distance_cells(Position p1, Position p2)
     return dif_row + dif_col;
 }
 
-/*
- * 从箱子轨迹中提取“推点”序列（当前流程未直接调用，作为策略扩展保留）：
- * - 每次方向变化意味着小车必须重定位到新的推面。
- * - 输出的小车推点可用于分段执行或动作控制。
- */
-static int extract_push_points_from_path(const Position *box_path, int path_len,
-                                         Position *push_points, int *push_points_cnt)
-{
-    // 如果无法构成一条线段，则不存在推点
-    if (path_len < 2 || !box_path || !push_points || !push_points_cnt)
-    {
-        if (push_points_cnt)
-            *push_points_cnt = 0;
-        return 0;
-    }
-    int cnt = 0;
-
-    // 获取起步时第一段直道的推动方向
-    int current_dir_row = box_path[1].row - box_path[0].row;
-    int current_dir_col = box_path[1].col - box_path[0].col;
-    // 根据初始方向，计算出起步时的首个推点
-    push_points[cnt].row = (int8_t)(box_path[0].row - current_dir_row);
-    push_points[cnt].col = (int8_t)(box_path[0].col - current_dir_col);
-    cnt++;
-    // 顺着箱子的后续轨迹按顺序遍历，寻找方向变化的拐角
-    for (int i = 1; i < path_len - 1; i++)
-    {
-        int next_dir_row = box_path[i + 1].row - box_path[i].row;
-        int next_dir_col = box_path[i + 1].col - box_path[i].col;
-        // 如果前进的方向发生了变化，说明箱子在方格(i)遇到了必须转弯的拐点
-        if (next_dir_row != current_dir_row || next_dir_col != current_dir_col)
-        {
-            // 小车在这里结束推进，重新绕去箱子当前(i)位置新的推点
-            push_points[cnt].row = (int8_t)(box_path[i].row - next_dir_row);
-            push_points[cnt].col = (int8_t)(box_path[i].col - next_dir_col);
-            cnt++;
-
-            // 切换比对基准给刚发现的新直道，为下一个拐角做准备
-            current_dir_row = next_dir_row;
-            current_dir_col = next_dir_col;
-        }
-    }
-    *push_points_cnt = cnt;
-    return 1;
-}
-
-/* 2D A* 节点池。 */
+/* 2D A* 鑺傜偣姹犮€?*/
 a_star_param a_star[grid_size];
 
 /*
- * 2D A*：小车从 start 到 target 的行走路径规划。
- * allow_diagonal 语义：
- * - 1：空车可 8 向移动，但靠近箱子时自动降级为 4 向防碰撞。
- * - 0：强制 4 向（典型用于推箱时更稳定的栅格动作）。
- */
+ * 2D A*锛氬皬杞︿粠 start 鍒?target 鐨勮璧拌矾寰勮鍒掋€? * allow_diagonal 璇箟锛? * - 1锛氱┖杞﹀彲 8 鍚戠Щ鍔紝浣嗛潬杩戠瀛愭椂鑷姩闄嶇骇涓?4 鍚戦槻纰版挒銆? * - 0锛氬己鍒?4 鍚戯紙鍏稿瀷鐢ㄤ簬鎺ㄧ鏃舵洿绋冲畾鐨勬爡鏍煎姩浣滐級銆? */
 static int a_star_path_plan(int row_cnt, int col_cnt,
                             const Position *obstacles, int obstacles_cnt,
                             const Position *bombs, int bombs_cnt,
@@ -342,17 +393,16 @@ static int a_star_path_plan(int row_cnt, int col_cnt,
                             int allow_diagonal,
                             Position *out_path)
 {
-    // 起点终点合法性判断
+    // Validate start/target.
     if (start.row >= row_cnt || start.col >= col_cnt)
         return -1;
     if (target.row >= row_cnt || target.col >= col_cnt)
         return -1;
-
-    // 构建网格状态
+    // Build occupancy grid.
     uint8_t grid[grid_size];
-    grid_build(row_cnt, col_cnt, obstacles, obstacles_cnt, bombs, bombs_cnt, boxes, boxes_cnt, 0, grid);
+    grid_build(row_cnt, col_cnt, obstacles, obstacles_cnt, bombs, bombs_cnt, boxes, boxes_cnt, grid);
 
-    // 初始化 A* 的节点访问组标识
+    // 鍒濆鍖?A* 鐨勮妭鐐硅闂粍鏍囪瘑
     memset(a_star, 0, sizeof(a_star));
 
     binary_heap open_set;
@@ -373,7 +423,7 @@ static int a_star_path_plan(int row_cnt, int col_cnt,
 
     heap_push(a_star, &open_set, start_index);
 
-    // 8向移动方向 (0-3: 直行正交向, 4-7: 对角斜向)
+    // 8鍚戠Щ鍔ㄦ柟鍚?(0-3: 鐩磋姝ｄ氦鍚? 4-7: 瀵硅鏂滃悜)
     const int dir_row[] = {-1, 1, 0, 0, -1, -1, 1, 1};
     const int dir_col[] = {0, 0, -1, 1, -1, 1, -1, 1};
     const int move_cost[] = {10, 10, 10, 10, 14, 14, 14, 14};
@@ -416,7 +466,7 @@ static int a_star_path_plan(int row_cnt, int col_cnt,
 
         if (current_index == target_index)
         {
-            // 已找到路径，向外回溯
+            // 宸叉壘鍒拌矾寰勶紝鍚戝鍥炴函
             int path_len = 0;
             int curr = target_index;
             while (curr != -1)
@@ -426,23 +476,22 @@ static int a_star_path_plan(int row_cnt, int col_cnt,
                 path_len++;
                 curr = a_star[curr].parent_index;
             }
-            // 反转路径（由于回溯的方向是从终点向起点追溯的）
+            // Reverse path because backtracking is from target to start.
             for (int i = 0; i < path_len / 2; i++)
             {
                 Position temp = out_path[i];
                 out_path[i] = out_path[path_len - 1 - i];
                 out_path[path_len - 1 - i] = temp;
             }
-            return path_len; // 正常返回路径步数
+            return path_len; // 姝ｅ父杩斿洖璺緞姝ユ暟
         }
 
-        // 当前格是否靠近箱子（预计算查表，避免循环内重复扫描全部箱子）
+        // 褰撳墠鏍兼槸鍚﹂潬杩戠瀛愶紙棰勮绠楁煡琛紝閬垮厤寰幆鍐呴噸澶嶆壂鎻忓叏閮ㄧ瀛愶級
         int is_near_box = allow_diagonal ? near_box_map[current_index] : 0;
 
-        // 当周边有箱子时，或不允许斜穿(推箱模式)时，强制降级为 4 向移动防碰；在空旷地带则全开 8 向以加快寻路和移动速度
+        // 褰撳懆杈规湁绠卞瓙鏃讹紝鎴栦笉鍏佽鏂滅┛(鎺ㄧ妯″紡)鏃讹紝寮哄埗闄嶇骇涓?4 鍚戠Щ鍔ㄩ槻纰帮紱鍦ㄧ┖鏃峰湴甯﹀垯鍏ㄥ紑 8 鍚戜互鍔犲揩瀵昏矾鍜岀Щ鍔ㄩ€熷害
         int dir_count = (!allow_diagonal || is_near_box) ? 4 : 8;
-
-        // 检查周围邻居节点
+        // Expand neighbors.
         for (int i = 0; i < dir_count; i++)
         {
             int nr = r + dir_row[i];
@@ -450,11 +499,11 @@ static int a_star_path_plan(int row_cnt, int col_cnt,
 
             if (nr >= 0 && nr < row_cnt && nc >= 0 && nc < col_cnt)
             {
-                // 如果是对角线移动(i >= 4)，则强制进行"禁止切角"验证
+                // 濡傛灉鏄瑙掔嚎绉诲姩(i >= 4)锛屽垯寮哄埗杩涜"绂佹鍒囪"楠岃瘉
                 if (i >= 4)
                 {
-                    // 正交两边分别为 (r + dr[i], c) 和 (r, c + dc[i])
-                    // 确保上方/下方 和 左方/右方 都是空路，防止斜穿墙角 or 箱子
+                    // 姝ｄ氦涓よ竟鍒嗗埆涓?(r + dr[i], c) 鍜?(r, c + dc[i])
+                    // 纭繚涓婃柟/涓嬫柟 鍜?宸︽柟/鍙虫柟 閮芥槸绌鸿矾锛岄槻姝㈡枩绌垮瑙?or 绠卞瓙
                     if (check_obstacle(grid, col_cnt, nr, c) || (grid[nr * col_cnt + c] & BOX) ||
                         check_obstacle(grid, col_cnt, r, nc) || (grid[r * col_cnt + nc] & BOX))
                         continue;
@@ -462,18 +511,18 @@ static int a_star_path_plan(int row_cnt, int col_cnt,
 
                 int neighbor_index = nr * col_cnt + nc;
 
-                // 利用已有方法检测目标格本身是否可通过网格 (包括墙和箱子)
+                // 鍒╃敤宸叉湁鏂规硶妫€娴嬬洰鏍囨牸鏈韩鏄惁鍙€氳繃缃戞牸 (鍖呮嫭澧欏拰绠卞瓙)
                 if (check_obstacle(grid, col_cnt, nr, nc) || (grid[neighbor_index] & BOX))
                     continue;
 
-                // 如果已经加入了 close 集合
+                // 濡傛灉宸茬粡鍔犲叆浜?close 闆嗗悎
                 if (a_star[neighbor_index].open_or_close == 2)
                     continue;
 
-                int tentative_g_cost = a_star[current_index].g_cost + move_cost[i]; // 累加移动代价值 10 或 14
+                int tentative_g_cost = a_star[current_index].g_cost + move_cost[i]; // 绱姞绉诲姩浠ｄ环鍊?10 鎴?14
 
                 if (a_star[neighbor_index].open_or_close == 0)
-                { // unvisited (此前未被访问过)
+                { // unvisited (姝ゅ墠鏈璁块棶杩?
                     a_star[neighbor_index].parent_index = current_index;
                     a_star[neighbor_index].g_cost = tentative_g_cost;
                     a_star[neighbor_index].h_cost = diagonal_distance((Position){nr, nc}, target);
@@ -482,27 +531,26 @@ static int a_star_path_plan(int row_cnt, int col_cnt,
                     heap_push(a_star, &open_set, neighbor_index);
                 }
                 else if (tentative_g_cost < a_star[neighbor_index].g_cost)
-                { // 已在 open 集合中，但找到了开销更优的路径
+                {
+                    // Already in open set, but found a better route.
                     a_star[neighbor_index].parent_index = current_index;
                     a_star[neighbor_index].g_cost = tentative_g_cost;
                     a_star[neighbor_index].f_cost = a_star[neighbor_index].g_cost + a_star[neighbor_index].h_cost;
-                    heap_update(a_star, &open_set, neighbor_index); // 更新使得在二叉堆内上浮
+                                        heap_update(a_star, &open_set, neighbor_index);
                 }
             }
         }
     }
-    return -1; // 寻找不到路径
+    return -1; // 瀵绘壘涓嶅埌璺緞
 }
 
 /*
- * 3D A* 状态定义：
+ * 3D A* 鐘舵€佸畾涔夛細
  * state = (box_row, box_col, face)
- * - face 表示小车站在箱子哪一侧并准备向哪个方向推。
- * - 同一个箱子格子有 4 个朝向状态，因此容量是 grid_size * 4。
- */
+ * - face 琛ㄧず灏忚溅绔欏湪绠卞瓙鍝竴渚у苟鍑嗗鍚戝摢涓柟鍚戞帹銆? * - 鍚屼竴涓瀛愭牸瀛愭湁 4 涓湞鍚戠姸鎬侊紝鍥犳瀹归噺鏄?grid_size * 4銆? */
 a_star_3d_param a_star_3d[grid_size * 4];
 
-/* 3D A* 的堆交换。 */
+/* 3D A* 鐨勫爢浜ゆ崲銆?*/
 static inline void heap_swap_3d(binary_heap_3d *heap, int i, int j)
 {
     int node_i = heap->index[i];
@@ -512,7 +560,7 @@ static inline void heap_swap_3d(binary_heap_3d *heap, int i, int j)
     heap_pos_3d[node_i] = j;
     heap_pos_3d[node_j] = i;
 }
-/* 3D A* 的优先级比较：f 为主，g 和 h 为辅。 */
+/* 3D A* 鐨勪紭鍏堢骇姣旇緝锛歠 涓轰富锛実 鍜?h 涓鸿緟銆?*/
 static inline int heap_compare_less_3d(const binary_heap_3d *heap, int i, int j)
 {
     int index_i = heap->index[i];
@@ -525,7 +573,7 @@ static inline int heap_compare_less_3d(const binary_heap_3d *heap, int i, int j)
     return a_star_3d[index_i].h_cost < a_star_3d[index_j].h_cost;
 }
 
-/* 3D A* 堆上浮。 */
+/* 3D A* 鍫嗕笂娴€?*/
 static inline void heap_sift_up_3d(binary_heap_3d *heap, int i)
 {
     while (i > 0)
@@ -540,7 +588,7 @@ static inline void heap_sift_up_3d(binary_heap_3d *heap, int i)
             break;
     }
 }
-/* 3D A* 堆下沉。 */
+/* 3D A* 鍫嗕笅娌夈€?*/
 static inline void heap_sift_down_3d(binary_heap_3d *heap, int i)
 {
     int size = heap->size;
@@ -567,7 +615,7 @@ static inline void heap_sift_down_3d(binary_heap_3d *heap, int i)
     }
 }
 
-/* 3D A* 入堆。 */
+/* 3D A* 鍏ュ爢銆?*/
 static void heap_push_3d(binary_heap_3d *heap, int node_index)
 {
     if (heap->size >= grid_size * 4 || node_index < 0 || node_index >= (grid_size * 4))
@@ -580,7 +628,7 @@ static void heap_push_3d(binary_heap_3d *heap, int node_index)
     heap_pos_3d[node_index] = i;
     heap_sift_up_3d(heap, i);
 }
-/* 3D A* 出堆。 */
+/* 3D A* 鍑哄爢銆?*/
 static int heap_pop_3d(binary_heap_3d *heap)
 {
     if (heap->size == 0)
@@ -599,7 +647,7 @@ static int heap_pop_3d(binary_heap_3d *heap)
     return top;
 }
 
-/* 3D A* 节点代价改进后的重排。 */
+/* 3D A* 鑺傜偣浠ｄ环鏀硅繘鍚庣殑閲嶆帓銆?*/
 static void heap_update_3d(binary_heap_3d *heap, int node_index)
 {
     if (node_index < 0 || node_index >= (grid_size * 4))
@@ -610,16 +658,9 @@ static void heap_update_3d(binary_heap_3d *heap, int node_index)
 }
 
 /*
- * 3D A*（推箱主算法）：
- * - 起点：先枚举 4 个可能推面，筛出小车可到达的入推姿态。
- * - 扩展：
- *   1) 同向直推：箱子前进一步，face 不变。
- *   2) 绕行换向：箱子不动，小车绕到另一侧，face 改变。
- * - 代价设计：
- *   COST_PUSH > COST_WALK，鼓励减少无效走动；
- *   COST_REORIENT_PENALTY 约束频繁换向。
- * - 输出：返回完整“小车路径”，不是仅箱子轨迹。
- */
+ * 3D A*锛堟帹绠变富绠楁硶锛夛細
+ * - 璧风偣锛氬厛鏋氫妇 4 涓彲鑳芥帹闈紝绛涘嚭灏忚溅鍙埌杈剧殑鍏ユ帹濮挎€併€? * - 鎵╁睍锛? *   1) 鍚屽悜鐩存帹锛氱瀛愬墠杩涗竴姝ワ紝face 涓嶅彉銆? *   2) 缁曡鎹㈠悜锛氱瀛愪笉鍔紝灏忚溅缁曞埌鍙︿竴渚э紝face 鏀瑰彉銆? * - 浠ｄ环璁捐锛? *   COST_PUSH > COST_WALK锛岄紦鍔卞噺灏戞棤鏁堣蛋鍔紱
+ *   COST_REORIENT_PENALTY 绾︽潫棰戠箒鎹㈠悜銆? * - 杈撳嚭锛氳繑鍥炲畬鏁粹€滃皬杞﹁矾寰勨€濓紝涓嶆槸浠呯瀛愯建杩广€? */
 int a_star_path_plan_3d(int row_cnt, int col_cnt,
                         const Position *obstacles, int obstacles_cnt,
                         const Position *bombs, int bombs_cnt,
@@ -640,7 +681,7 @@ int a_star_path_plan_3d(int row_cnt, int col_cnt,
     Position box_start = local_boxes[box_index];
 
     uint8_t grid[grid_size];
-    grid_build(row_cnt, col_cnt, obstacles, obstacles_cnt, bombs, bombs_cnt, local_boxes, boxes_cnt, 0, grid);
+    grid_build(row_cnt, col_cnt, obstacles, obstacles_cnt, bombs, bombs_cnt, local_boxes, boxes_cnt, grid);
 
     memset(a_star_3d, 0, sizeof(a_star_3d));
 
@@ -664,7 +705,7 @@ int a_star_path_plan_3d(int row_cnt, int col_cnt,
             min_target_distance_from_start = h;
     }
 
-    // 从4个方向中选择推向
+    // 浠?涓柟鍚戜腑閫夋嫨鎺ㄥ悜
     for (int f = 0; f < 4; f++)
     {
         int push_point_row = box_start.row - dir_row_3d[f];
@@ -680,8 +721,7 @@ int a_star_path_plan_3d(int row_cnt, int col_cnt,
                                            box_index,
                                            first_push_row, first_push_col))
             continue;
-
-        // 计算到达推点的路径
+        // Compute path from car to push point.
         int walk_len = a_star_path_plan(row_cnt, col_cnt,
                                         obstacles, obstacles_cnt, bombs, bombs_cnt,
                                         local_boxes, boxes_cnt,
@@ -690,17 +730,17 @@ int a_star_path_plan_3d(int row_cnt, int col_cnt,
                                         temp_path);
 
         if (walk_len >= 0)
-        { // 如果小车能顺利绕到这一面
-            // 设置带有推向的索引
+        {
+            // If car can reach this push face, initialize that state.
             int state_index = (box_start.row * col_cnt + box_start.col) * 4 + f;
 
-            // 计算到达目标点的距离
+            // 璁＄畻鍒拌揪鐩爣鐐圭殑璺濈
             a_star_3d[state_index].g_cost = walk_len * COST_WALK;
-            a_star_3d[state_index].h_cost = min_target_distance_from_start * COST_PUSH; // 调整比例，优先考虑箱子终点
+            a_star_3d[state_index].h_cost = min_target_distance_from_start * COST_PUSH; // 璋冩暣姣斾緥锛屼紭鍏堣€冭檻绠卞瓙缁堢偣
             a_star_3d[state_index].f_cost = a_star_3d[state_index].g_cost + a_star_3d[state_index].h_cost;
             a_star_3d[state_index].parent_index = -1;
             a_star_3d[state_index].open_or_close = 1;
-            a_star_3d[state_index].is_push = 0; // 没推过，刚转移到推位
+            a_star_3d[state_index].is_push = 0; // 娌℃帹杩囷紝鍒氳浆绉诲埌鎺ㄤ綅
 
             heap_push_3d(&open_set, state_index);
         }
@@ -713,11 +753,9 @@ int a_star_path_plan_3d(int row_cnt, int col_cnt,
             break;
 
         a_star_3d[curr_index].open_or_close = 2; // Close
-
-        int row = (curr_index / 4) / col_cnt; // 箱子真实行
-        int col = (curr_index / 4) % col_cnt; // 箱子真实列
-        int face = curr_index % 4;            // 小车所在的面
-
+        int row = (curr_index / 4) / col_cnt; // box row
+        int col = (curr_index / 4) % col_cnt; // box col
+        int face = curr_index % 4;            // push face
         int reached = 0;
         for (int t = 0; t < targets_cnt; t++)
         {
@@ -733,9 +771,8 @@ int a_star_path_plan_3d(int row_cnt, int col_cnt,
         {
             target_3d_index = curr_index;
             break;
-        } // 推完跳出
-
-        // 同向推箱子
+        } // 鎺ㄥ畬璺冲嚭
+        // Push box forward with same face.
         int next_row = row + dir_row_3d[face];
         int next_col = col + dir_col_3d[face];
 
@@ -744,11 +781,10 @@ int a_star_path_plan_3d(int row_cnt, int col_cnt,
                                             box_index,
                                             next_row, next_col))
         {
-            int next_index = (next_row * col_cnt + next_col) * 4 + face; // face不变，没换推面
-
+            int next_index = (next_row * col_cnt + next_col) * 4 + face; // face涓嶅彉锛屾病鎹㈡帹闈?
             if (a_star_3d[next_index].open_or_close != 2)
             {
-                int tentative_g = a_star_3d[curr_index].g_cost + COST_PUSH; // 离开原路径，添加偏移代价
+                int tentative_g = a_star_3d[curr_index].g_cost + COST_PUSH; // 绂诲紑鍘熻矾寰勶紝娣诲姞鍋忕Щ浠ｄ环
 
                 if (a_star_3d[next_index].open_or_close == 0 || tentative_g < a_star_3d[next_index].g_cost)
                 {
@@ -765,7 +801,7 @@ int a_star_path_plan_3d(int row_cnt, int col_cnt,
 
                     a_star_3d[next_index].h_cost = min_h * COST_PUSH;
                     a_star_3d[next_index].f_cost = tentative_g + a_star_3d[next_index].h_cost;
-                    a_star_3d[next_index].is_push = 1; // 直走
+                    a_star_3d[next_index].is_push = 1; // 鐩磋蛋
 
                     if (a_star_3d[next_index].open_or_close == 0)
                     {
@@ -779,25 +815,24 @@ int a_star_path_plan_3d(int row_cnt, int col_cnt,
                 }
             }
         }
-
-        // 绕路推箱子
+        // Reposition car to another push face without moving box.
         for (int next_face = 0; next_face < 4; next_face++)
         {
             if (next_face == face)
-                continue; // 跳过相同方向
+                continue; // 璺宠繃鐩稿悓鏂瑰悜
 
-            int next_index = (row * col_cnt + col) * 4 + next_face; // 只改变了推向
+            int next_index = (row * col_cnt + col) * 4 + next_face; // 鍙敼鍙樹簡鎺ㄥ悜
             if (a_star_3d[next_index].open_or_close == 2)
-                continue; // 跳过已关闭的路径
+                continue; // 璺宠繃宸插叧闂殑璺緞
 
-            // 计算小车需要绕到的位置
+            // 璁＄畻灏忚溅闇€瑕佺粫鍒扮殑浣嶇疆
             int target_face_row = row - dir_row_3d[next_face];
             int target_face_col = col - dir_col_3d[next_face];
 
             if (target_face_row < 0 || target_face_row >= row_cnt || target_face_col < 0 || target_face_col >= col_cnt)
                 continue;
-            local_boxes[box_index] = (Position){row, col}; // 将当前被推动对象放在实时位置
-            // 换向占位检查：只看障碍和“其他箱子”，不使用静态 grid 的 BOX 位
+            local_boxes[box_index] = (Position){row, col}; // 灏嗗綋鍓嶈鎺ㄥ姩瀵硅薄鏀惧湪瀹炴椂浣嶇疆
+            // Reorientation occupancy check.
             if (check_push_destination_blocked(grid, row_cnt, col_cnt,
                                                local_boxes, boxes_cnt,
                                                box_index,
@@ -821,10 +856,9 @@ int a_star_path_plan_3d(int row_cnt, int col_cnt,
                 {
                     a_star_3d[next_index].parent_index = curr_index;
                     a_star_3d[next_index].g_cost = tentative_g;
-                    a_star_3d[next_index].h_cost = a_star_3d[curr_index].h_cost; // 箱子没动
+                    a_star_3d[next_index].h_cost = a_star_3d[curr_index].h_cost; // 绠卞瓙娌″姩
                     a_star_3d[next_index].f_cost = tentative_g + a_star_3d[next_index].h_cost;
-                    a_star_3d[next_index].is_push = 0; // 换向推
-
+                    a_star_3d[next_index].is_push = 0; // 鎹㈠悜鎺?
                     if (a_star_3d[next_index].open_or_close == 0)
                     {
                         a_star_3d[next_index].open_or_close = 1;
@@ -861,7 +895,7 @@ int a_star_path_plan_3d(int row_cnt, int col_cnt,
 
     int total_car_len = 0;
 
-    // 先让小车跑到推点
+    // 鍏堣灏忚溅璺戝埌鎺ㄧ偣
     int start_index = sp_path[0];
     int start_row = (start_index / 4) / col_cnt;
     int start_col = (start_index / 4) % col_cnt;
@@ -890,18 +924,16 @@ int a_star_path_plan_3d(int row_cnt, int col_cnt,
         int prev_c = (prev_index / 4) % col_cnt;
         int prev_f = prev_index % 4;
 
-        int curr_r = (curr_index / 4) / col_cnt;
-        int curr_c = (curr_index / 4) % col_cnt;
         int curr_f = curr_index % 4;
 
         if (a_star_3d[curr_index].is_push == 1)
         {
-            // 直推
+            // 鐩存帹
             full_car_path[total_car_len++] = (Position){prev_r, prev_c};
         }
         else
         {
-            // 绕路推
+            // Walk around for reorientation.
             Position c_from = {prev_r - dir_row_3d[prev_f], prev_c - dir_col_3d[prev_f]};
             Position c_to = {prev_r - dir_row_3d[curr_f], prev_c - dir_col_3d[curr_f]};
 
@@ -923,9 +955,8 @@ int a_star_path_plan_3d(int row_cnt, int col_cnt,
 }
 
 /*
- * 模拟炸弹爆炸：清除 bomb_target 为中心 3x3 范围内的障碍物。
- * 用于“第一阶段推炸弹后”更新第二阶段推箱的地图。
- */
+ * 模拟炸弹爆炸：
+ * 以 bomb_target 为中心，清除 3x3 范围内障碍物。 */
 void simulate_bomb_explosion(Position *obstacles, int *obstacles_cnt, Position bomb_target)
 {
     int new_cnt = 0;
@@ -933,12 +964,12 @@ void simulate_bomb_explosion(Position *obstacles, int *obstacles_cnt, Position b
     {
         int dr = obstacles[i].row - bomb_target.row;
         int dc = obstacles[i].col - bomb_target.col;
-        // 如果在 3x3 九宫格内，墙壁被炸毁
+        // 濡傛灉鍦?3x3 涔濆鏍煎唴锛屽澹佽鐐告瘉
         if (dr >= -1 && dr <= 1 && dc >= -1 && dc <= 1)
             continue;
         obstacles[new_cnt++] = obstacles[i];
     }
-    // 将多余位置置空
+    // Clear remaining slots.
     for (int i = new_cnt; i < *obstacles_cnt; i++)
     {
         obstacles[i].row = -1;
@@ -948,9 +979,9 @@ void simulate_bomb_explosion(Position *obstacles, int *obstacles_cnt, Position b
 }
 
 /*
- * 选择“值得尝试炸掉”的候选墙：
- * 仅在箱子起点与目标点包围盒外扩 1 格区域内筛选，减少组合爆炸搜索量。
- */
+ * 筛选“可能值得炸”的候选墙：
+ * 仅在箱子起点与目标点围成的局部窗口（外扩 1 格）中取墙，
+ * 用于降低炸弹组合搜索规模。 */
 int get_candidate_walls(const Position *obstacles, int obstacles_cnt,
                         Position box_start, Position target,
                         Position *out_candidate_walls)
@@ -960,8 +991,7 @@ int get_candidate_walls(const Position *obstacles, int obstacles_cnt,
     int max_row = box_start.row > target.row ? box_start.row : target.row;
     int min_col = box_start.col < target.col ? box_start.col : target.col;
     int max_col = box_start.col > target.col ? box_start.col : target.col;
-
-    // 向外扩张搜索圈
+    // Expand search window outward by 1 cell.
     min_row -= 1;
     max_row += 1;
     min_col -= 1;
@@ -981,10 +1011,9 @@ int get_candidate_walls(const Position *obstacles, int obstacles_cnt,
 
 /*
  * 路径特殊点标记策略（写入 Position.id）：
- * - IDENTIFICATION : 路径起点（建议在该点做一次姿态/视觉确认）
- * - TURNING_POINT  : 行进方向发生变化的拐点
- * - BOMB_EXPLOSION : 炸弹爆炸对应的事件点（优先级最高）
- */
+ * - IDENTIFICATION：路径起点；
+ * - TURNING_POINT：发生转向的关键点；
+ * - BOMB_EXPLOSION：炸弹爆破事件点（优先级最高）。 */
 static int marker_priority(uint8_t marker_id)
 {
     if (marker_id == BOMB_EXPLOSION)
@@ -1037,11 +1066,10 @@ static void annotate_path_special_ids(Position *path, int path_len, int bomb_eve
 }
 
 /*
- * 评估单个“炸弹 + 墙”组合：
- * Phase1: 把炸弹当作“可推动物体”推到 wall_target。
- * Phase2: 在炸后地形上推动目标箱子到目标点。
- * 成功返回两阶段总步数，并输出拼接后的完整小车路径。
- */
+ * 评估一个“炸弹 + 墙点”组合的总代价：
+ * Phase1：把 bomb_index 对应炸弹当作可推对象，推到 wall_target；
+ * Phase2：在爆破后的新地图上继续推目标箱子到目标点；
+ * 成功时返回两阶段总步数，并输出拼接后的完整小车路径。 */
 int evaluate_bomb_shortcut(int row_cnt, int col_cnt,
                            const Position *obstacles, int obstacles_cnt,
                            const Position *bombs, int bombs_cnt,
@@ -1050,13 +1078,14 @@ int evaluate_bomb_shortcut(int row_cnt, int col_cnt,
                            int box_index,
                            int bomb_index,
                            Position wall_target,
+                           int max_total_steps,
                            Position car_start,
                            Position *out_full_path,
                            Position *out_bomb_target,
                            Position *out_box_target,
                            int *out_bomb_event_index)
 {
-    // 把炸弹加入箱子数组进行A*计算
+    // 鎶婄偢寮瑰姞鍏ョ瀛愭暟缁勮繘琛孉*璁＄畻
     Position temp_boxes[MAX_BOXES + 1];
     for (int i = 0; i < boxes_cnt; i++)
         temp_boxes[i] = boxes[i];
@@ -1065,7 +1094,7 @@ int evaluate_bomb_shortcut(int row_cnt, int col_cnt,
     temp_boxes[virtual_bomb_box_index] = bombs[bomb_index];
     int temp_boxes_cnt = boxes_cnt + 1;
 
-    // 剔除这颗炸弹
+    // 鍓旈櫎杩欓鐐稿脊
     Position temp_bombs[MAX_BOMBS + 2];
     int temp_bombs_cnt = 0;
     for (int i = 0; i < bombs_cnt; i++)
@@ -1074,7 +1103,7 @@ int evaluate_bomb_shortcut(int row_cnt, int col_cnt,
             temp_bombs[temp_bombs_cnt++] = bombs[i];
     }
 
-    // 剔除目标墙壁，以便可以将炸弹直接推入墙壁的坐标内爆破
+    // 鍓旈櫎鐩爣澧欏锛屼互渚垮彲浠ュ皢鐐稿脊鐩存帴鎺ㄥ叆澧欏鐨勫潗鏍囧唴鐖嗙牬
     Position phase1_obs[grid_size];
     int phase1_obs_cnt = 0;
     for (int i = 0; i < obstacles_cnt; i++)
@@ -1087,8 +1116,7 @@ int evaluate_bomb_shortcut(int row_cnt, int col_cnt,
     actual_targets[0] = wall_target;
 
     Position best_bomb_target;
-
-    // 推炸弹
+    // Phase 1: push bomb to the chosen wall.
     int phase1_steps = a_star_path_plan_3d(row_cnt, col_cnt,
                                            phase1_obs, phase1_obs_cnt,
                                            temp_bombs, temp_bombs_cnt,
@@ -1101,18 +1129,19 @@ int evaluate_bomb_shortcut(int row_cnt, int col_cnt,
 
     if (phase1_steps < 0)
         return -1;
+    if (max_total_steps > 0 && phase1_steps >= max_total_steps)
+        return -1;
 
-    // 修改地形
+    // 淇敼鍦板舰
     Position temp_obstacles[grid_size];
     for (int i = 0; i < obstacles_cnt; i++)
         temp_obstacles[i] = obstacles[i];
     int temp_obs_cnt = obstacles_cnt;
     simulate_bomb_explosion(temp_obstacles, &temp_obs_cnt, best_bomb_target);
 
-    // 交接小车坐标
+    // 浜ゆ帴灏忚溅鍧愭爣
     Position new_car_start = out_full_path[phase1_steps - 1];
-
-    // 推箱子
+    // Phase 2: push target box on updated terrain.
     int phase2_steps = a_star_path_plan_3d(row_cnt, col_cnt,
                                            temp_obstacles, temp_obs_cnt,
                                            temp_bombs, temp_bombs_cnt,
@@ -1125,6 +1154,8 @@ int evaluate_bomb_shortcut(int row_cnt, int col_cnt,
 
     if (phase2_steps < 0)
         return -1;
+    if (max_total_steps > 0 && (phase1_steps + phase2_steps) >= max_total_steps)
+        return -1;
 
     if (out_bomb_target)
         *out_bomb_target = best_bomb_target;
@@ -1135,11 +1166,10 @@ int evaluate_bomb_shortcut(int row_cnt, int col_cnt,
 }
 
 /*
- * 统一对外的单箱规划入口：
- * 1) 先求“直接推箱”路径。
- * 2) 若存在炸弹，则枚举炸弹与候选墙，评估“先炸后推”。
- * 3) 在所有可行方案中取最短路径，回填 path_plan_result。
- */
+ * 对外统一入口：单箱子综合规划
+ * 1) 先求直推方案；
+ * 2) 若存在炸弹，再评估“先炸后推”方案；
+ * 3) 返回所有可行方案中的最短路径。 */
 int integrated_path_output(int row_cnt, int col_cnt,
                            const Position *obstacles, int obstacles_cnt,
                            const Position *bombs, int bombs_cnt,
@@ -1151,8 +1181,7 @@ int integrated_path_output(int row_cnt, int col_cnt,
 {
     if (!result)
         return -1;
-
-    // 初始化结果
+    /* 初始化输出结构体，默认不可达。 */
     memset(result, 0, sizeof(*result));
     result->total_steps = -1;
     result->bomb_index = -1;
@@ -1185,61 +1214,232 @@ int integrated_path_output(int row_cnt, int col_cnt,
         memcpy(result->car_path, simple_path, (size_t)simple_len * sizeof(Position));
         best_bomb_event_index = -1;
     }
-
     if (bombs_cnt > 0)
     {
         Position candidate_walls[grid_size];
+        Position eval_walls[grid_size];
+        int eval_bomb_indices[MAX_BOMBS];
+        int box_to_target_lb = min_target_dist(boxes[box_index], targets, targets_cnt);
         int wall_cnt;
+        int eval_wall_cnt = 0;
+        int eval_bomb_cnt = 0;
+        int enable_bomb_search = 1;
 
         if (simple_len < 0)
         {
-            // 直接推失败 → 搜索所有墙壁
-            wall_cnt = obstacles_cnt;
-            for (int i = 0; i < obstacles_cnt; i++)
+            /* 直推失败：先用“箱子-最近目标”的局部墙候选，避免全图暴力枚举。 */
+            Position nearest_target = targets[0];
+            int nearest_dist = 0x3fffffff;
+            for (int ti = 0; ti < targets_cnt; ti++)
             {
-                candidate_walls[i] = obstacles[i];
+                int d = manhattan_dist(boxes[box_index], targets[ti]);
+                if (d < nearest_dist)
+                {
+                    nearest_dist = d;
+                    nearest_target = targets[ti];
+                }
+            }
+            wall_cnt = get_candidate_walls(obstacles, obstacles_cnt,
+                                           boxes[box_index], nearest_target,
+                                           candidate_walls);
+            if (wall_cnt <= 0)
+            {
+                wall_cnt = obstacles_cnt;
+                if (wall_cnt > grid_size)
+                    wall_cnt = grid_size;
+                for (int i = 0; i < wall_cnt; i++)
+                {
+                    candidate_walls[i] = obstacles[i];
+                }
             }
         }
         else
         {
-            // 直接推成功 → 只搜索路径区间内的墙
             wall_cnt = get_candidate_walls(obstacles, obstacles_cnt,
                                            boxes[box_index], simple_target,
                                            candidate_walls);
+            if (simple_len <= FAST_BOMB_SHORTCUT_TRIGGER_STEPS)
+            {
+                /* 直推已经很短时，跳过炸弹搜索以节省算力。 */
+                enable_bomb_search = 0;
+            }
         }
 
-        for (int b = 0; b < bombs_cnt; b++)
+        if (enable_bomb_search && wall_cnt > 0)
         {
-            for (int w = 0; w < wall_cnt; w++)
-            {
-                Position temp_path[grid_size * 8];
-                Position actual_bomb_target;
-                Position actual_box_target;
-                int bomb_event_index = -1;
-                int bomb_steps = evaluate_bomb_shortcut(row_cnt, col_cnt,
-                                                        obstacles, obstacles_cnt,
-                                                        bombs, bombs_cnt,
-                                                        boxes, boxes_cnt,
-                                                        targets, targets_cnt,
-                                                        box_index, b,
-                                                        candidate_walls[w],
-                                                        car_start,
-                                                        temp_path,
-                                                        &actual_bomb_target,
-                                                        &actual_box_target,
-                                                        &bomb_event_index);
+            int wall_limit = (simple_len < 0) ? FAST_BOMB_MAX_WALLS_WHEN_BLOCKED
+                                              : FAST_BOMB_MAX_WALLS_WHEN_REACHABLE;
+            int bomb_limit = (simple_len < 0) ? bombs_cnt
+                                              : FAST_BOMB_MAX_BOMBS_WHEN_REACHABLE;
 
-                if (bomb_steps > 0 && (best_len < 0 || bomb_steps < best_len))
+            eval_wall_cnt = select_top_walls_by_score(candidate_walls,
+                                                      wall_cnt,
+                                                      wall_limit,
+                                                      boxes[box_index],
+                                                      targets,
+                                                      targets_cnt,
+                                                      car_start,
+                                                      eval_walls);
+            if (eval_wall_cnt <= 0)
+                eval_wall_cnt = wall_cnt;
+            if (eval_wall_cnt == wall_cnt)
+            {
+                memcpy(eval_walls, candidate_walls, (size_t)wall_cnt * sizeof(Position));
+            }
+
+            eval_bomb_cnt = select_top_bomb_indices_by_score(bombs,
+                                                             bombs_cnt,
+                                                             bomb_limit,
+                                                             boxes[box_index],
+                                                             car_start,
+                                                             eval_bomb_indices);
+            if (eval_bomb_cnt <= 0)
+            {
+                for (int i = 0; i < bombs_cnt; i++)
+                    eval_bomb_indices[i] = i;
+                eval_bomb_cnt = bombs_cnt;
+            }
+
+            for (int bi = 0; bi < eval_bomb_cnt; bi++)
+            {
+                int b = eval_bomb_indices[bi];
+                for (int w = 0; w < eval_wall_cnt; w++)
                 {
-                    best_len = bomb_steps;
-                    result->total_steps = bomb_steps;
-                    result->used_bomb = 1;
-                    result->bomb_index = b;
-                    result->wall_target = candidate_walls[w];
-                    result->bomb_target = actual_bomb_target;
-                    result->box_target = actual_box_target;
-                    memcpy(result->car_path, temp_path, (size_t)bomb_steps * sizeof(Position));
-                    best_bomb_event_index = bomb_event_index;
+                    int car_to_bomb_lb = manhattan_dist(car_start, bombs[b]);
+                    int bomb_to_wall_lb = manhattan_dist(bombs[b], eval_walls[w]);
+                    int shortcut_lb;
+
+                    if (car_to_bomb_lb > 0)
+                        car_to_bomb_lb -= 1;
+                    shortcut_lb = car_to_bomb_lb + bomb_to_wall_lb + box_to_target_lb;
+                    if (best_len > 0 && shortcut_lb >= best_len)
+                        continue;
+
+                    Position temp_path[grid_size * 8];
+                    Position actual_bomb_target;
+                    Position actual_box_target;
+                    int bomb_event_index = -1;
+                    int bomb_steps = evaluate_bomb_shortcut(row_cnt, col_cnt,
+                                                            obstacles, obstacles_cnt,
+                                                            bombs, bombs_cnt,
+                                                            boxes, boxes_cnt,
+                                                            targets, targets_cnt,
+                                                            box_index, b,
+                                                            eval_walls[w],
+                                                            best_len,
+                                                            car_start,
+                                                            temp_path,
+                                                            &actual_bomb_target,
+                                                            &actual_box_target,
+                                                            &bomb_event_index);
+
+                    if (bomb_steps > 0 && (best_len < 0 || bomb_steps < best_len))
+                    {
+                        best_len = bomb_steps;
+                        result->total_steps = bomb_steps;
+                        result->used_bomb = 1;
+                        result->bomb_index = b;
+                        result->wall_target = eval_walls[w];
+                        result->bomb_target = actual_bomb_target;
+                        result->box_target = actual_box_target;
+                        memcpy(result->car_path, temp_path, (size_t)bomb_steps * sizeof(Position));
+                        best_bomb_event_index = bomb_event_index;
+                    }
+                }
+            }
+
+            /* 保底：若快速筛选失败，再做一次受限扩展枚举，兼顾可达性与耗时。 */
+            if (simple_len < 0 && best_len < 0 &&
+                (eval_wall_cnt < wall_cnt || eval_bomb_cnt < bombs_cnt))
+            {
+                Position fallback_walls[grid_size];
+                int fallback_bomb_indices[MAX_BOMBS];
+                int fallback_wall_cnt = wall_cnt;
+                int fallback_bomb_cnt = bombs_cnt;
+                int full_combo = bombs_cnt * wall_cnt;
+
+                if (full_combo > 72)
+                {
+                    fallback_wall_cnt = select_top_walls_by_score(candidate_walls,
+                                                                  wall_cnt,
+                                                                  24,
+                                                                  boxes[box_index],
+                                                                  targets,
+                                                                  targets_cnt,
+                                                                  car_start,
+                                                                  fallback_walls);
+                    if (fallback_wall_cnt <= 0 || fallback_wall_cnt > wall_cnt)
+                    {
+                        fallback_wall_cnt = wall_cnt;
+                        memcpy(fallback_walls, candidate_walls, (size_t)wall_cnt * sizeof(Position));
+                    }
+
+                    fallback_bomb_cnt = select_top_bomb_indices_by_score(bombs,
+                                                                          bombs_cnt,
+                                                                          6,
+                                                                          boxes[box_index],
+                                                                          car_start,
+                                                                          fallback_bomb_indices);
+                    if (fallback_bomb_cnt <= 0 || fallback_bomb_cnt > bombs_cnt)
+                    {
+                        fallback_bomb_cnt = bombs_cnt;
+                        for (int i = 0; i < bombs_cnt; i++)
+                            fallback_bomb_indices[i] = i;
+                    }
+                }
+                else
+                {
+                    memcpy(fallback_walls, candidate_walls, (size_t)wall_cnt * sizeof(Position));
+                    for (int i = 0; i < bombs_cnt; i++)
+                        fallback_bomb_indices[i] = i;
+                }
+
+                for (int bi = 0; bi < fallback_bomb_cnt; bi++)
+                {
+                    int b = fallback_bomb_indices[bi];
+                    for (int w = 0; w < fallback_wall_cnt; w++)
+                    {
+                        int car_to_bomb_lb = manhattan_dist(car_start, bombs[b]);
+                        int bomb_to_wall_lb = manhattan_dist(bombs[b], fallback_walls[w]);
+                        int shortcut_lb;
+
+                        if (car_to_bomb_lb > 0)
+                            car_to_bomb_lb -= 1;
+                        shortcut_lb = car_to_bomb_lb + bomb_to_wall_lb + box_to_target_lb;
+                        if (best_len > 0 && shortcut_lb >= best_len)
+                            continue;
+
+                        Position temp_path[grid_size * 8];
+                        Position actual_bomb_target;
+                        Position actual_box_target;
+                        int bomb_event_index = -1;
+                        int bomb_steps = evaluate_bomb_shortcut(row_cnt, col_cnt,
+                                                                obstacles, obstacles_cnt,
+                                                                bombs, bombs_cnt,
+                                                                boxes, boxes_cnt,
+                                                                targets, targets_cnt,
+                                                                box_index, b,
+                                                                fallback_walls[w],
+                                                                best_len,
+                                                                car_start,
+                                                                temp_path,
+                                                                &actual_bomb_target,
+                                                                &actual_box_target,
+                                                                &bomb_event_index);
+
+                        if (bomb_steps > 0 && (best_len < 0 || bomb_steps < best_len))
+                        {
+                            best_len = bomb_steps;
+                            result->total_steps = bomb_steps;
+                            result->used_bomb = 1;
+                            result->bomb_index = b;
+                            result->wall_target = fallback_walls[w];
+                            result->bomb_target = actual_bomb_target;
+                            result->box_target = actual_box_target;
+                            memcpy(result->car_path, temp_path, (size_t)bomb_steps * sizeof(Position));
+                            best_bomb_event_index = bomb_event_index;
+                        }
+                    }
                 }
             }
         }
@@ -1252,3 +1452,4 @@ int integrated_path_output(int row_cnt, int col_cnt,
 
     return result->total_steps;
 }
+

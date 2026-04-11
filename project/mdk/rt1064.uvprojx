@@ -515,16 +515,6 @@
               <FilePath>..\code\PID.h</FilePath>
             </File>
             <File>
-              <FileName>Camera_handler.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>..\code\Camera_handler.c</FilePath>
-            </File>
-            <File>
-              <FileName>Camera_handler.h</FileName>
-              <FileType>5</FileType>
-              <FilePath>..\code\Camera_handler.h</FilePath>
-            </File>
-            <File>
               <FileName>Algorithm.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\code\Algorithm.c</FilePath>
@@ -573,6 +563,16 @@
               <FileName>Game_logic.h</FileName>
               <FileType>5</FileType>
               <FilePath>..\code\Game_logic.h</FilePath>
+            </File>
+            <File>
+              <FileName>data_handle.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\code\data_handle.c</FilePath>
+            </File>
+            <File>
+              <FileName>data_handle.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\code\data_handle.h</FilePath>
             </File>
           </Files>
         </Group>

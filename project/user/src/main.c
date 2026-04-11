@@ -40,6 +40,7 @@
 #include "Algorithm.h"
 #include "Algorithm_Test.h"
 #include "Game_logic.h"
+#include "data_handle.h"
 #include "Camera_handler.h"
 #include <string.h>
 
@@ -59,6 +60,7 @@ int main(void)
   uart_blob_init();     // 摄像头串口接收与解析模块初始化
   flash_init();         // Flash模块初始化
   Menu_Init();          // 菜单系统初始化(包含按键，显示屏等相关初始化)
+  imu963ra_init();      // IMU块初始化
   //  Attitude_Init();      // 姿态解算模块初始化
 
   // 中断初始化
@@ -117,12 +119,12 @@ int main(void)
 
   parse_map_from_string(map_text);
 
- boxes[0].id = 0;
- boxes[1].id = 1;
- boxes[2].id = 2 ;
- targets[0].id = 0;
- targets[1].id = 1;
- targets[2].id = 2;
+  boxes[0].id = 0;
+  boxes[1].id = 1;
+  boxes[2].id = 2 ;
+  targets[0].id = 0;
+  targets[1].id = 1;
+  targets[2].id = 2;
 
   Test_Data_Load(); // 数据加载到内部测试地图
   Plan_path_Mode2(); // 关卡一路径规划
@@ -137,9 +139,32 @@ int main(void)
     Test_Data_Save(); // 将内部测试地图数据保存回全局数组
     /*以上为算法测试*/
 
-    process_blob_data(); // 处理摄像头串口数据
     Menu_Switch();
     Menu_Show();
+
+    // 地图获取调试
+    static uint8_t map_req_sent = 0;
+    uint8_t row = 0;
+
+    if (!map_req_sent)
+    {
+      uart_send_map_request(); // 向上位机发送 "MAP"
+      map_req_sent = 1;
+    }
+    process_blob_data();
+
+    if (map_data_updated)
+    {
+      uart_write_string(UART_INDEX, "$MAP\r\n");
+      for (row = 0; row < MAP_ROWS; row++)
+      {
+        uart_write_buffer(UART_INDEX, (const uint8_t *)map_data[row], MAP_COLS);
+        uart_write_string(UART_INDEX, "\r\n");
+      }
+      uart_write_string(UART_INDEX, "$END\r\n");
+      map_data_updated = false;
+    }
+
   }
 }
 
@@ -180,15 +205,4 @@ void pit_1_handler(void)
 void pit_2_handler(void)
 {
   //  Attitude_Calculate();
-}
-
-// 串口接收中断：摄像头数据接收
-void uart_rx_interrupt_handler(void)
-{
-  // 查询式读取1字节（无数据则直接退出，确保中断快速执行）
-  if (uart_query_byte(UART_INDEX, &get_data))
-  {
-    // 用fifo_write_buffer写入1字节（length=1，地址为get_data的地址）
-    fifo_write_buffer(&uart_data_fifo, &get_data, 1);
-  }
 }

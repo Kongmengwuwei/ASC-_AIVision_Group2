@@ -14,5 +14,5 @@ Position targets[MAX_TARGETS] = {{0}};     // 当前目标点坐标列表
 Position bombs[MAX_BOMBS] = {{0}};         // 当前炸弹坐标列表
 Position car = {1, 2};                     // 车辆整数栅格位置
 Position car_path[MAX_CAR_PATH] = {{0}};   // 预留路径坐标列表
-CarPosition car_position = {0.0f, 0.0f};   // 车辆浮点栅格位置
-CarPosition car_position_m = {0.0f, 0.0f}; // 车辆米制坐标
+CarPose car_position = {0.0f, 0.0f};   // 车辆浮点栅格位置
+CarPose car_position_m = {0.0f, 0.0f}; // 车辆米制坐标

@@ -191,11 +191,20 @@ static void compact_stream_buffer(void)
 static bool parse_map_payload(const uint8_t *payload, uint16_t payload_len)
 {
     char new_map[MAP_ROWS][MAP_COLS] = {{0}};
+    Position new_obstacles[MAX_OBSTACLES] = {{0}};
+    Position new_boxes[MAX_BOXES] = {{0}};
+    Position new_targets[MAX_TARGETS] = {{0}};
+    Position new_bombs[MAX_BOMBS] = {{0}};
+    Position new_car = {0};
+    size_t new_obstacles_count = 0U;
+    size_t new_boxes_count = 0U;
+    size_t new_targets_count = 0U;
+    size_t new_bombs_count = 0U;
+    bool car_found = false;
     uint16_t idx = 0U;
-    uint16_t line_begin = 0U;
-    uint16_t line_end = 0U;
-    uint16_t line_len = 0U;
     size_t row = 0U;
+    size_t col = 0U;
+    char cell = 0;
 
     if (payload == NULL) {
         return false;
@@ -204,31 +213,122 @@ static bool parse_map_payload(const uint8_t *payload, uint16_t payload_len)
     idx = skip_line_break_prefix(payload, payload_len, idx);
 
     for (row = 0U; row < MAP_ROWS; row++) {
-        line_begin = idx;
-
-        while (idx < payload_len && '\r' != payload[idx] && '\n' != payload[idx]) {
+        /* 与旧版一致：允许每行前后带空格/Tab */
+        while (idx < payload_len && (' ' == payload[idx] || '\t' == payload[idx])) {
             idx++;
         }
 
-        line_end = trim_line_break_suffix(payload, line_begin, idx);
-        line_len = (uint16_t)(line_end - line_begin);
-        if (MAP_COLS != line_len) {
+        if (((uint32_t)idx + MAP_COLS) > payload_len) {
             return false;
         }
 
-        memcpy(new_map[row], payload + line_begin, MAP_COLS);
+        for (col = 0U; col < MAP_COLS; col++) {
+            cell = (char)payload[idx++];
+            switch (cell) {
+                case MAP_SYMBOL_OBSTACLE:
+                    if (new_obstacles_count >= MAX_OBSTACLES) {
+                        return false;
+                    }
+                    new_obstacles[new_obstacles_count].row = (uint8)row;
+                    new_obstacles[new_obstacles_count].col = (uint8)col;
+                    new_obstacles[new_obstacles_count].id = 0U;
+                    new_obstacles_count++;
+                    break;
+
+                case MAP_SYMBOL_BOX:
+                    if (new_boxes_count >= MAX_BOXES) {
+                        return false;
+                    }
+                    new_boxes[new_boxes_count].row = (uint8)row;
+                    new_boxes[new_boxes_count].col = (uint8)col;
+                    new_boxes[new_boxes_count].id = 0U;
+                    new_boxes_count++;
+                    break;
+
+                case MAP_SYMBOL_TARGET:
+                    if (new_targets_count >= MAX_TARGETS) {
+                        return false;
+                    }
+                    new_targets[new_targets_count].row = (uint8)row;
+                    new_targets[new_targets_count].col = (uint8)col;
+                    new_targets[new_targets_count].id = 0U;
+                    new_targets_count++;
+                    break;
+
+                case MAP_SYMBOL_BOMB:
+                    if (new_bombs_count >= MAX_BOMBS) {
+                        return false;
+                    }
+                    new_bombs[new_bombs_count].row = (uint8)row;
+                    new_bombs[new_bombs_count].col = (uint8)col;
+                    new_bombs[new_bombs_count].id = 0U;
+                    new_bombs_count++;
+                    break;
+
+                case MAP_SYMBOL_CAR:
+                    if (car_found) {
+                        return false;
+                    }
+                    new_car.row = (uint8)row;
+                    new_car.col = (uint8)col;
+                    new_car.id = 0U;
+                    car_found = true;
+                    break;
+
+                case MAP_SYMBOL_EMPTY:
+                    break;
+
+                default:
+                    return false;
+            }
+
+            new_map[row][col] = cell;
+        }
+
+        while (idx < payload_len && (' ' == payload[idx] || '\t' == payload[idx])) {
+            idx++;
+        }
 
         if (row < (MAP_ROWS - 1U)) {
             if (!consume_one_line_break(payload, payload_len, &idx)) {
                 return false;
             }
+        } else {
+            /* 最后一行换行可有可无 */
+            consume_one_line_break(payload, payload_len, &idx);
         }
     }
 
+    while (idx < payload_len && (' ' == payload[idx] || '\t' == payload[idx])) {
+        idx++;
+    }
     idx = skip_line_break_prefix(payload, payload_len, idx);
-    if (idx != payload_len) {
+    if (idx != payload_len || !car_found) {
         return false;
     }
+
+    memset(obstacles, 0, sizeof(obstacles));
+    memset(boxes, 0, sizeof(boxes));
+    memset(targets, 0, sizeof(targets));
+    memset(bombs, 0, sizeof(bombs));
+
+    if (new_obstacles_count > 0U) {
+        memcpy(obstacles, new_obstacles, new_obstacles_count * sizeof(Position));
+    }
+    if (new_boxes_count > 0U) {
+        memcpy(boxes, new_boxes, new_boxes_count * sizeof(Position));
+    }
+    if (new_targets_count > 0U) {
+        memcpy(targets, new_targets, new_targets_count * sizeof(Position));
+    }
+    if (new_bombs_count > 0U) {
+        memcpy(bombs, new_bombs, new_bombs_count * sizeof(Position));
+    }
+    Obstacles_count = new_obstacles_count;
+    Boxes_count = new_boxes_count;
+    Targets_count = new_targets_count;
+    Bombs_count = new_bombs_count;
+    car = new_car;
 
     memcpy(map_data, new_map, sizeof(map_data));
     map_data_ready = true;

@@ -41,14 +41,11 @@
 #include "Algorithm_Test.h"
 #include "Game_logic.h"
 #include "data_handle.h"
-#include "Camera_handler.h"
 #include <string.h>
 
 // 打开新的工程或者工程移动了位置务必执行以下操作
 // 第一步 关闭上面所有打开的文件
 // 第二步 project->clean  等 待下方进度条走完
-
-uint8_t get_data = 0;
 
 int main(void)
 {
@@ -60,8 +57,8 @@ int main(void)
   uart_blob_init();     // 摄像头串口接收与解析模块初始化
   flash_init();         // Flash模块初始化
   Menu_Init();          // 菜单系统初始化(包含按键，显示屏等相关初始化)
-  imu963ra_init();      // IMU块初始化
-  //  Attitude_Init();      // 姿态解算模块初始化
+  // imu963ra_init();      // IMU块初始化
+  // Attitude_Init();      // 姿态解算模块初始化
 
   // 中断初始化
   pit_ms_init(PIT_CH0, 20);                // 初始化 PIT_CH0 为周期中断 20ms 周期
@@ -142,28 +139,28 @@ int main(void)
     Menu_Switch();
     Menu_Show();
 
-    // 地图获取调试
-    static uint8_t map_req_sent = 0;
-    uint8_t row = 0;
+    // // 地图获取调试
+    // static uint8_t map_req_sent = 0;
+    // uint8_t row = 0;
 
-    if (!map_req_sent)
-    {
-      uart_send_map_request(); // 向上位机发送 "MAP"
-      map_req_sent = 1;
-    }
-    process_blob_data();
+    // if (!map_req_sent)
+    // {
+    //   uart_send_map_request(); // 向上位机发送 "MAP"
+    //   map_req_sent = 1;
+    // }
+    // process_blob_data();
 
-    if (map_data_updated)
-    {
-      uart_write_string(UART_INDEX, "$MAP\r\n");
-      for (row = 0; row < MAP_ROWS; row++)
-      {
-        uart_write_buffer(UART_INDEX, (const uint8_t *)map_data[row], MAP_COLS);
-        uart_write_string(UART_INDEX, "\r\n");
-      }
-      uart_write_string(UART_INDEX, "$END\r\n");
-      map_data_updated = false;
-    }
+    // if (map_data_updated)
+    // {
+    //   uart_write_string(UART_INDEX, "$MAP\r\n");
+    //   for (row = 0; row < MAP_ROWS; row++)
+    //   {
+    //     uart_write_buffer(UART_INDEX, (const uint8_t *)map_data[row], MAP_COLS);
+    //     uart_write_string(UART_INDEX, "\r\n");
+    //   }
+    //   uart_write_string(UART_INDEX, "$END\r\n");
+    //   map_data_updated = false;
+    // }
 
   }
 }
@@ -177,28 +174,7 @@ void pit_0_handler(void)
 // 10ms中断：运动控制
 void pit_1_handler(void)
 {
-  // encoder_get();
-  // distance_speed_strategy();
-  // // speed_encoder[0]=25;
-  // if (car_go_flag == 1 && car_stop_flag == 0)
-  // {
-  //   if (wait_stop == 1)
-  //   {
-  //     motor_control(car_stop_array);
-  //   }
-  //   else
-  //   {
-  //     motor_control(speed_encoder);
-  //   }
-  // }
-  // else if (car_go_flag == 1 && car_stop_flag == 1)
-  // {
-  //   motor_control(car_stop_array);
-  // }
-  // else
-  // {
-  //   motor_pwm(0, 0, 0, 0);
-  // }
+
 }
 
 // 2ms中断：姿态解算

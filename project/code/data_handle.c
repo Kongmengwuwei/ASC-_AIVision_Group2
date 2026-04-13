@@ -1,4 +1,4 @@
-﻿#include "data_handle.h"
+#include "data_handle.h"
 #include <stdlib.h>
 #include <string.h>
 

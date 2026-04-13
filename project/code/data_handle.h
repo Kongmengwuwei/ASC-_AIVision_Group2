@@ -24,6 +24,15 @@
 #define UART_CMD_MAP            "MAP"
 #define UART_CMD_CAR            "CAR"
 
+#define MAP_SYMBOL_OBSTACLE     '#'
+#define MAP_SYMBOL_EMPTY        '.'
+#define MAP_SYMBOL_CAR          'C'
+#define MAP_SYMBOL_BOX          'B'
+#define MAP_SYMBOL_TARGET       'T'
+#define MAP_SYMBOL_BOMB         'D'
+
+
+
 typedef struct {
     int32 x_raw;
     int32 y_raw;

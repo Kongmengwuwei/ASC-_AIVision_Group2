@@ -7,7 +7,7 @@
 int main(void)
 {
     clock_init(SYSTEM_CLOCK_600M);  
-    //debug_init();                  
+    //debug_init();  这里Debug没有初始化但是UART_1的printf仍然可用                
 	
 	//陀螺仪及解算中断初始化
 	imu963ra_init();
@@ -25,22 +25,23 @@ int main(void)
     Menu_Init();
 	interrupt_global_enable(0);
 	
-	printf("1");
-	
-    while(1)
-    {	
-	    Menu_Switch();
-        Menu_Show();
-		
-		
-		//地图获取调试
+	while (1)
+	{
 		static uint8_t map_req_sent = 0;
+		static uint8_t car_req_sent = 0;
 		uint8_t row = 0;
+		char car_buf[32];
 
 		if (!map_req_sent)
 		{
-			uart_send_map_request();   // 向上位机发送 "MAP"
+			uart_send_map_request();
 			map_req_sent = 1;
+		}
+
+		if (!car_req_sent)
+		{
+			uart_send_car_request();
+			car_req_sent = 1;
 		}
 
 		process_blob_data();
@@ -56,12 +57,27 @@ int main(void)
 			}
 
 			uart_write_string(UART_INDEX, "$END\r\n");
-
 			map_data_updated = false;
 		}
-			
 
+		if (car_pose_updated)
+		{
+			uart_write_string(UART_INDEX, "$CAR\r\n");
+
+			sprintf(car_buf, "%ld\r\n", (long)car_pose.x_raw);
+			uart_write_string(UART_INDEX, car_buf);
+
+			sprintf(car_buf, "%ld\r\n", (long)car_pose.y_raw);
+			uart_write_string(UART_INDEX, car_buf);
+
+			sprintf(car_buf, "%ld\r\n", (long)car_pose.yaw_raw);
+			uart_write_string(UART_INDEX, car_buf);
+
+			uart_write_string(UART_INDEX, "$END\r\n");
+			car_pose_updated = false;
+		}
 	}
+    
 }
 
 void pit_0_handler (void)

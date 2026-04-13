@@ -489,6 +489,11 @@
               <FileType>5</FileType>
               <FilePath>..\code\data_handle.h</FilePath>
             </File>
+            <File>
+              <FileName>串口数据处理使用说明.txt</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\code\串口数据处理使用说明.txt</FilePath>
+            </File>
           </Files>
         </Group>
         <Group>

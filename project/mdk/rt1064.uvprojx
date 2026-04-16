@@ -574,6 +574,16 @@
               <FileType>5</FileType>
               <FilePath>..\code\data_handle.h</FilePath>
             </File>
+            <File>
+              <FileName>BlueSerial.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\code\BlueSerial.c</FilePath>
+            </File>
+            <File>
+              <FileName>BlueSerial.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\code\BlueSerial.h</FilePath>
+            </File>
           </Files>
         </Group>
         <Group>

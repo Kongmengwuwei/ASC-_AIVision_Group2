@@ -51,6 +51,11 @@ extern Position bombs[MAX_BOMBS];         // 炸弹坐标列表
 extern Position car;                      // 车辆整数栅格位置
 extern Position car_path[MAX_CAR_PATH];   // 规划路径坐标列表
 extern CarPose car_position;              // 车辆浮点栅格位置
-extern CarPose car_position_m;            // 车辆米制位置（row/col * GRID_SIZE_M）
+
+extern const char *map_text1; // 预设地图文本1
+extern const char *map_text2; // 预设地图文本2
+extern const char *map_text3; // 预设地图文本3
+extern const char *map_text4; // 预设地图文本4
+extern const char *map_text5; // 预设地图文本5
 
 #endif 

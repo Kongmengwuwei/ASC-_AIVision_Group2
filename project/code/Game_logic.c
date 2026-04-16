@@ -2022,6 +2022,171 @@ static void apply_bomb_action_result(planning_state_t *state,
     }
 }
 
+/* 判断返场路径上的某格是否可通行（障碍/炸弹/箱子均视为阻塞）。 */
+static int is_blocked_for_return(const planning_state_t *state, int row, int col)
+{
+    Position p;
+    if (!state)
+        return 1;
+    if (row < 0 || row >= MAP_ROWS || col < 0 || col >= MAP_COLS)
+        return 1;
+
+    p.row = (uint8)row;
+    p.col = (uint8)col;
+    p.id = 0;
+
+    if (find_position_index(state->obstacles_state, state->obstacles_cnt, p) >= 0)
+        return 1;
+    if (find_position_index(state->bombs_state, state->bombs_cnt, p) >= 0)
+        return 1;
+    if (find_position_index(state->boxes_state, state->boxes_cnt, p) >= 0)
+        return 1;
+    return 0;
+}
+
+/* 规划“返回发车点”的最短车行路径：
+ * 发车点按用户坐标定义为 (x,y) = (0,4),(0,5),(13,4),(13,5)，
+ * 转换到 Position(row,col) 为 (4,0),(5,0),(4,13),(5,13)。 */
+static int build_shortest_return_path_to_depot(const planning_state_t *state,
+                                                Position *out_path,
+                                                int max_path,
+                                                Position *out_depot)
+{
+    const Position depots[4] = {
+        {4, 0, 0},
+        {5, 0, 0},
+        {4, 13, 0},
+        {5, 13, 0}
+    };
+    const int dr[4] = {-1, 1, 0, 0};
+    const int dc[4] = {0, 0, -1, 1};
+    int dist[MAP_ROWS * MAP_COLS];
+    int prev[MAP_ROWS * MAP_COLS];
+    int queue[MAP_ROWS * MAP_COLS];
+    int qh = 0;
+    int qt = 0;
+    int start_idx;
+    int i;
+    int best_depot_idx = -1;
+    int best_dist = INT_MAX;
+    int path_len;
+    int cur;
+    Position reverse_path[MAP_ROWS * MAP_COLS];
+
+    if (!state || !out_path || max_path <= 0)
+        return 0;
+    if (state->car_state.row >= MAP_ROWS || state->car_state.col >= MAP_COLS)
+        return 0;
+
+    for (i = 0; i < MAP_ROWS * MAP_COLS; i++)
+    {
+        dist[i] = -1;
+        prev[i] = -1;
+    }
+
+    start_idx = (int)state->car_state.row * MAP_COLS + (int)state->car_state.col;
+    dist[start_idx] = 0;
+    queue[qt++] = start_idx;
+
+    while (qh < qt)
+    {
+        int idx = queue[qh++];
+        int row = idx / MAP_COLS;
+        int col = idx % MAP_COLS;
+        int k;
+
+        for (k = 0; k < 4; k++)
+        {
+            int nr = row + dr[k];
+            int nc = col + dc[k];
+            int nidx;
+            if (nr < 0 || nr >= MAP_ROWS || nc < 0 || nc >= MAP_COLS)
+                continue;
+            if (is_blocked_for_return(state, nr, nc))
+                continue;
+
+            nidx = nr * MAP_COLS + nc;
+            if (dist[nidx] >= 0)
+                continue;
+            dist[nidx] = dist[idx] + 1;
+            prev[nidx] = idx;
+            queue[qt++] = nidx;
+        }
+    }
+
+    for (i = 0; i < 4; i++)
+    {
+        int drow = (int)depots[i].row;
+        int dcol = (int)depots[i].col;
+        int didx;
+        if (drow < 0 || drow >= MAP_ROWS || dcol < 0 || dcol >= MAP_COLS)
+            continue;
+        if (is_blocked_for_return(state, drow, dcol))
+            continue;
+        didx = drow * MAP_COLS + dcol;
+        if (dist[didx] < 0)
+            continue;
+        if (dist[didx] < best_dist)
+        {
+            best_dist = dist[didx];
+            best_depot_idx = i;
+        }
+    }
+
+    if (best_depot_idx < 0)
+        return 0;
+
+    if (out_depot)
+        *out_depot = depots[best_depot_idx];
+
+    cur = ((int)depots[best_depot_idx].row) * MAP_COLS + (int)depots[best_depot_idx].col;
+    path_len = 0;
+    while (cur >= 0 && path_len < MAP_ROWS * MAP_COLS)
+    {
+        reverse_path[path_len].row = (uint8)(cur / MAP_COLS);
+        reverse_path[path_len].col = (uint8)(cur % MAP_COLS);
+        reverse_path[path_len].id = 0;
+        path_len++;
+        if (cur == start_idx)
+            break;
+        cur = prev[cur];
+    }
+
+    if (path_len <= 0 || reverse_path[path_len - 1].row != state->car_state.row ||
+        reverse_path[path_len - 1].col != state->car_state.col)
+    {
+        return 0;
+    }
+
+    if (path_len > max_path)
+        path_len = max_path;
+    for (i = 0; i < path_len; i++)
+    {
+        out_path[i] = reverse_path[path_len - 1 - i];
+    }
+    return path_len;
+}
+
+/* 在现有规划末尾追加“返回最近发车点”路径。 */
+static void append_return_to_depot(planning_state_t *state,
+                                   Position *merged_path,
+                                   int *merged_len)
+{
+    Position ret_path[MAP_ROWS * MAP_COLS];
+    Position depot;
+    int ret_len;
+
+    if (!state || !merged_path || !merged_len)
+        return;
+
+    ret_len = build_shortest_return_path_to_depot(state, ret_path, MAP_ROWS * MAP_COLS, &depot);
+    if (ret_len <= 0)
+        return;
+
+    append_segment_path(merged_path, merged_len, ret_path, ret_len);
+    state->car_state = depot;
+}
+
 /* 模式1（不按 ID 配对）：
  * 每轮在所有箱子中选择当前总代价最小的可执行任务。 */
 static void plan_mode1_simple(void)
@@ -2104,6 +2269,7 @@ static void plan_mode1_simple(void)
         safety_round++;
     }
 
+    append_return_to_depot(&state, merged_path, &merged_len);
     save_state_to_globals(&state);
     save_path_to_globals(merged_path, merged_len);
 }
@@ -2151,6 +2317,7 @@ static void plan_mode2_pair_first(void)
         safety_round++;
     }
 
+    append_return_to_depot(&state, merged_path, &merged_len);
     save_state_to_globals(&state);
     save_path_to_globals(merged_path, merged_len);
 }
@@ -2165,3 +2332,7 @@ void Plan_path_Mode2(void)
     plan_mode2_pair_first();
 }
 
+void Plan_path_Identify(void)
+{
+
+}

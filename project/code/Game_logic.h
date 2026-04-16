@@ -10,4 +10,7 @@ void Plan_path_Mode1(void);
 /* 模式2：按 ID 一一配对（箱子必须推到同 ID 目标点）。 */
 void Plan_path_Mode2(void);
 
+/* 模式3：识别模式 */
+void Plan_path_Identify(void);
+
 #endif

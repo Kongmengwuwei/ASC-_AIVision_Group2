@@ -424,6 +424,8 @@ static bool parse_car_payload(const uint8_t *payload, uint16_t payload_len)
     int32 raw_value[CAR_LINE_COUNT] = {0};
     uint16_t idx = 0U;
     uint16_t value_index = 0U;
+    int32 row_rounded = 0;
+    int32 col_rounded = 0;
 
     if (payload == NULL) {
         return false;
@@ -446,6 +448,25 @@ static bool parse_car_payload(const uint8_t *payload, uint16_t payload_len)
     car_pose.x = (float)raw_value[0] * 0.01f;
     car_pose.y = (float)raw_value[1] * 0.01f;
     car_pose.yaw = (float)raw_value[2] * 0.01f;
+
+    /* 将车姿浮点坐标(y/x)按四舍五入更新到栅格坐标(row/col) */
+    row_rounded = (car_pose.y >= 0.0f) ? (int32)(car_pose.y + 0.5f) : (int32)(car_pose.y - 0.5f);
+    col_rounded = (car_pose.x >= 0.0f) ? (int32)(car_pose.x + 0.5f) : (int32)(car_pose.x - 0.5f);
+
+    if (row_rounded < 0) {
+        row_rounded = 0;
+    } else if (row_rounded > 255) {
+        row_rounded = 255;
+    }
+
+    if (col_rounded < 0) {
+        col_rounded = 0;
+    } else if (col_rounded > 255) {
+        col_rounded = 255;
+    }
+
+    car.row = (uint8)row_rounded;
+    car.col = (uint8)col_rounded;
 
     car_pose_ready = true;
     car_pose_updated = true;

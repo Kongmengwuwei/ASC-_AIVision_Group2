@@ -19,7 +19,7 @@ void Menu_Create(void)
 {
     // 在此动态创建文件夹 //
     Menu_Item *Folder1 = Create_Menu_Folder_dynamic(&Root, "Mode");
-    Menu_Item *Folder2 = Create_Menu_Folder_dynamic(&Root, "Folder2");
+    Menu_Item *Folder2 = Create_Menu_Folder_dynamic(&Root, "Data");
     Menu_Item *Folder3 = Create_Menu_Folder_dynamic(&Root, "Folder3");
     Menu_Item *Folder4 = Create_Menu_Folder_dynamic(&Root, "Folder4");
     Menu_Item *Folder5 = Create_Menu_Folder_dynamic(&Root, "Folder5");

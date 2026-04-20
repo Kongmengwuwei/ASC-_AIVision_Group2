@@ -485,16 +485,6 @@
               <FilePath>..\code\Flash.h</FilePath>
             </File>
             <File>
-              <FileName>Path.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>..\code\Path.c</FilePath>
-            </File>
-            <File>
-              <FileName>Path.h</FileName>
-              <FileType>5</FileType>
-              <FilePath>..\code\Path.h</FilePath>
-            </File>
-            <File>
               <FileName>Motor.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\code\Motor.c</FilePath>
@@ -545,16 +535,6 @@
               <FilePath>..\code\PID_config.h</FilePath>
             </File>
             <File>
-              <FileName>Map_Route_Data.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>..\code\Map_Route_Data.c</FilePath>
-            </File>
-            <File>
-              <FileName>Map_Route_Data.h</FileName>
-              <FileType>5</FileType>
-              <FilePath>..\code\Map_Route_Data.h</FilePath>
-            </File>
-            <File>
               <FileName>Game_logic.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\code\Game_logic.c</FilePath>
@@ -573,6 +553,56 @@
               <FileName>data_handle.h</FileName>
               <FileType>5</FileType>
               <FilePath>..\code\data_handle.h</FilePath>
+            </File>
+            <File>
+              <FileName>Map_Path_Data.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\code\Map_Path_Data.c</FilePath>
+            </File>
+            <File>
+              <FileName>Map_Path_Data.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\code\Map_Path_Data.h</FilePath>
+            </File>
+            <File>
+              <FileName>path_follow.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\code\path_follow.c</FilePath>
+            </File>
+            <File>
+              <FileName>path_follow.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\code\path_follow.h</FilePath>
+            </File>
+            <File>
+              <FileName>程序文件说明.txt</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\code\程序文件说明.txt</FilePath>
+            </File>
+            <File>
+              <FileName>串口数据处理使用说明.txt</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\code\串口数据处理使用说明.txt</FilePath>
+            </File>
+            <File>
+              <FileName>算法说明.txt</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\code\算法说明.txt</FilePath>
+            </File>
+            <File>
+              <FileName>姿态解算使用说明.txt</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\code\姿态解算使用说明.txt</FilePath>
+            </File>
+            <File>
+              <FileName>Control.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\code\Control.c</FilePath>
+            </File>
+            <File>
+              <FileName>Control.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\code\Control.h</FilePath>
             </File>
           </Files>
         </Group>

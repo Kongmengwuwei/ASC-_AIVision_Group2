@@ -1,0 +1,731 @@
+#include "Control.h"
+#include "Game_logic.h"
+#include "Mymenu.h"
+#include <string.h>
+
+/* ========================= 参数配置区 ========================= */
+
+/**
+ * @brief 地图请求发送周期（单位：control_process 调用次数）。
+ *
+ * 含义：每调用 CONTROL_REQ_MAP_PERIOD_LOOPS 次 control_process，
+ * 发送一次 "MAP" 请求，避免每圈都发导致串口拥塞。
+ */
+#define CONTROL_REQ_MAP_PERIOD_LOOPS 40U
+
+/**
+ * @brief 非执行阶段车位姿请求发送周期（单位：control_process 调用次数）。
+ *
+ * 用于初始定位和等待地图阶段，采样频率较低即可满足需求。
+ */
+#define CONTROL_REQ_CAR_PERIOD_WAIT 20U
+
+/**
+ * @brief 执行阶段车位姿请求发送周期（单位：control_process 调用次数）。
+ *
+ * 执行阶段需要更高频率位姿用于动态校正，因此周期更短。
+ */
+#define CONTROL_REQ_CAR_PERIOD_EXEC 6U
+
+/**
+ * @brief 初始定位最少采样帧数。
+ *
+ * 使用简单平均抑制单帧抖动。达到该采样数后才完成初始定位。
+ */
+#define CONTROL_LOCALIZE_MIN_SAMPLES 2U
+
+/**
+ * @brief 动态校正死区阈值（米）。
+ *
+ * 位姿误差小于该阈值时不做修正，避免高频微调抖动。
+ */
+#define CONTROL_CORR_DEADBAND_M 0.03f
+
+/**
+ * @brief 动态校正“强修正”阈值（米）。
+ *
+ * 超过该阈值时认为误差较大，直接做 100% 对齐（硬修正）。
+ */
+#define CONTROL_CORR_STRONG_RESET_M 0.15f
+
+/**
+ * @brief 动态校正“软修正”融合系数。
+ *
+ * 当误差位于死区与强修正阈值之间时，按该比例向视觉位姿靠拢。
+ */
+#define CONTROL_CORR_BLEND 0.40f
+
+/* ========================= 内部数据结构 ========================= */
+
+/**
+ * @brief 地图运行时快照。
+ *
+ * Game_logic 规划函数会在内部模拟执行并改写全局地图对象，
+ * 为了避免影响实时显示与后续逻辑，规划前先快照，规划后再恢复。
+ */
+typedef struct
+{
+    size_t obstacles_count;                    /**< 快照时障碍物数量。 */
+    size_t boxes_count;                        /**< 快照时箱子数量。 */
+    size_t targets_count;                      /**< 快照时目标点数量。 */
+    size_t bombs_count;                        /**< 快照时炸弹数量。 */
+    Position obstacles_buf[MAX_OBSTACLES];     /**< 快照时障碍物数组。 */
+    Position boxes_buf[MAX_BOXES];             /**< 快照时箱子数组。 */
+    Position targets_buf[MAX_TARGETS];         /**< 快照时目标点数组。 */
+    Position bombs_buf[MAX_BOMBS];             /**< 快照时炸弹数组。 */
+    Position car_pose_grid;                    /**< 快照时小车栅格位置。 */
+} map_runtime_snapshot_t;
+
+/* ========================= 内部状态变量 ========================= */
+
+/**
+ * @brief 控制状态机当前阶段。
+ */
+static control_stage_t g_control_stage = CONTROL_STAGE_IDLE;
+
+/**
+ * @brief 路径规划保护期标志。
+ *
+ * - 1：处于保护期（规划/切换路径中）
+ * - 0：正常执行
+ *
+ * 该变量在主循环和中断中都会被读取，因此使用 volatile。
+ */
+static volatile uint8 g_path_plan_paused = 0U;
+
+/**
+ * @brief 执行层路径缓存（最终下发给 path_follow）。
+ */
+static Position g_exec_path[MAX_CAR_PATH] = {{0}};
+
+/**
+ * @brief 执行层路径有效点数。
+ */
+static size_t g_exec_steps = 0U;
+
+/**
+ * @brief 当前是否已经得到可执行路径。
+ *
+ * - 1：已规划并生成执行路径
+ * - 0：尚未得到有效路径
+ */
+static uint8 g_plan_ready = 0U;
+
+/**
+ * @brief 初始定位累计样本数。
+ */
+static uint8 g_localize_sample_count = 0U;
+
+/**
+ * @brief 初始定位阶段累计的视觉 X 坐标和（米）。
+ */
+static float g_localize_sum_x_m = 0.0f;
+
+/**
+ * @brief 初始定位阶段累计的视觉 Y 坐标和（米）。
+ */
+static float g_localize_sum_y_m = 0.0f;
+
+/**
+ * @brief 初始定位阶段累计的视觉航向角和（度）。
+ */
+static float g_localize_sum_yaw_deg = 0.0f;
+
+/**
+ * @brief 地图请求分频计数器。
+ */
+static uint16 g_map_req_loop_cnt = 0U;
+
+/**
+ * @brief 车位姿请求分频计数器。
+ */
+static uint16 g_car_req_loop_cnt = 0U;
+
+/* ========================= 内部工具函数 ========================= */
+
+/**
+ * @brief 本地绝对值函数（float 版本）。
+ *
+ * @param v 输入值。
+ * @return float 绝对值。
+ */
+static float absf_local(float v)
+{
+    return (v >= 0.0f) ? v : (-v);
+}
+
+/**
+ * @brief 本地限幅函数。
+ *
+ * @param v 输入值。
+ * @param min_v 下限。
+ * @param max_v 上限。
+ * @return float 限幅后的值。
+ */
+static float clampf_local(float v, float min_v, float max_v)
+{
+    if (v < min_v)
+    {
+        return min_v;
+    }
+    if (v > max_v)
+    {
+        return max_v;
+    }
+    return v;
+}
+
+/**
+ * @brief 将视觉位姿转换为 path_follow 需要的米制坐标。
+ *
+ * 当前工程坐标约定：
+ * - data_handle 中 `car_pose.x/y` 为“列/行”浮点栅格值
+ * - path_follow 使用 x 对应行，y 对应列，且单位为米
+ * - 因此转换为：x_m = row * GRID_SIZE_M, y_m = col * GRID_SIZE_M
+ *
+ * @param[out] x_m 转换后的 x 坐标（米）。
+ * @param[out] y_m 转换后的 y 坐标（米）。
+ * @param[out] yaw_deg 视觉航向角（度）。
+ * @return uint8
+ * - 1：转换成功
+ * - 0：输入参数无效或视觉位姿尚未就绪
+ */
+static uint8 get_camera_pose_meter(float *x_m, float *y_m, float *yaw_deg)
+{
+    float row_f = 0.0f;
+    float col_f = 0.0f;
+
+    if (x_m == NULL || y_m == NULL || yaw_deg == NULL)
+    {
+        return 0U;
+    }
+    if (!car_pose_ready)
+    {
+        return 0U;
+    }
+
+    row_f = car_pose.y;
+    col_f = car_pose.x;
+
+    *x_m = row_f * GRID_SIZE_M;
+    *y_m = col_f * GRID_SIZE_M;
+    *yaw_deg = car_pose.yaw;
+    return 1U;
+}
+
+/**
+ * @brief 按固定节拍发送地图请求命令。
+ */
+static void request_map_periodic(void)
+{
+    g_map_req_loop_cnt++;
+    if (g_map_req_loop_cnt >= CONTROL_REQ_MAP_PERIOD_LOOPS)
+    {
+        uart_send_map_request();
+        g_map_req_loop_cnt = 0U;
+    }
+}
+
+/**
+ * @brief 按固定节拍发送车位姿请求命令。
+ *
+ * @param period_loops 请求周期（单位：control_process 调用次数）。
+ */
+static void request_car_periodic(uint16 period_loops)
+{
+    g_car_req_loop_cnt++;
+    if (g_car_req_loop_cnt >= period_loops)
+    {
+        uart_send_car_request();
+        g_car_req_loop_cnt = 0U;
+    }
+}
+
+/**
+ * @brief 进入路径规划保护期。
+ */
+static void begin_path_plan_pause(void)
+{
+    g_path_plan_paused = 1U;
+}
+
+/**
+ * @brief 退出路径规划保护期。
+ */
+static void end_path_plan_pause(void)
+{
+    g_path_plan_paused = 0U;
+}
+
+/**
+ * @brief 采集当前全局地图状态快照。
+ *
+ * @param[out] snap 快照输出结构体指针。
+ */
+static void snapshot_take(map_runtime_snapshot_t *snap)
+{
+    if (snap == NULL)
+    {
+        return;
+    }
+
+    snap->obstacles_count = Obstacles_count;
+    snap->boxes_count = Boxes_count;
+    snap->targets_count = Targets_count;
+    snap->bombs_count = Bombs_count;
+    snap->car_pose_grid = car;
+
+    memset(snap->obstacles_buf, 0, sizeof(snap->obstacles_buf));
+    memset(snap->boxes_buf, 0, sizeof(snap->boxes_buf));
+    memset(snap->targets_buf, 0, sizeof(snap->targets_buf));
+    memset(snap->bombs_buf, 0, sizeof(snap->bombs_buf));
+
+    if (snap->obstacles_count > 0U)
+    {
+        memcpy(snap->obstacles_buf,
+               obstacles,
+               snap->obstacles_count * sizeof(Position));
+    }
+    if (snap->boxes_count > 0U)
+    {
+        memcpy(snap->boxes_buf,
+               boxes,
+               snap->boxes_count * sizeof(Position));
+    }
+    if (snap->targets_count > 0U)
+    {
+        memcpy(snap->targets_buf,
+               targets,
+               snap->targets_count * sizeof(Position));
+    }
+    if (snap->bombs_count > 0U)
+    {
+        memcpy(snap->bombs_buf,
+               bombs,
+               snap->bombs_count * sizeof(Position));
+    }
+}
+
+/**
+ * @brief 恢复全局地图状态到快照时刻。
+ *
+ * 注意：
+ * - 只恢复地图对象（障碍/箱子/目标/炸弹/车）
+ * - 不恢复 car_path / Car_path_count，保留最新规划结果给执行层使用
+ *
+ * @param[in] snap 快照输入结构体指针。
+ */
+static void snapshot_restore(const map_runtime_snapshot_t *snap)
+{
+    if (snap == NULL)
+    {
+        return;
+    }
+
+    Obstacles_count = snap->obstacles_count;
+    Boxes_count = snap->boxes_count;
+    Targets_count = snap->targets_count;
+    Bombs_count = snap->bombs_count;
+    car = snap->car_pose_grid;
+
+    memset(obstacles, 0, sizeof(obstacles));
+    memset(boxes, 0, sizeof(boxes));
+    memset(targets, 0, sizeof(targets));
+    memset(bombs, 0, sizeof(bombs));
+
+    if (Obstacles_count > 0U)
+    {
+        memcpy(obstacles,
+               snap->obstacles_buf,
+               Obstacles_count * sizeof(Position));
+    }
+    if (Boxes_count > 0U)
+    {
+        memcpy(boxes,
+               snap->boxes_buf,
+               Boxes_count * sizeof(Position));
+    }
+    if (Targets_count > 0U)
+    {
+        memcpy(targets,
+               snap->targets_buf,
+               Targets_count * sizeof(Position));
+    }
+    if (Bombs_count > 0U)
+    {
+        memcpy(bombs,
+               snap->bombs_buf,
+               Bombs_count * sizeof(Position));
+    }
+}
+
+/**
+ * @brief 从规划路径中构建执行层路径。
+ *
+ * 处理策略：
+ * - 优先提取拐点路径（降低执行点数，便于跟踪）
+ * - 若拐点提取失败，则回退使用完整规划路径
+ *
+ * @return uint8
+ * - 1：成功生成执行路径
+ * - 0：规划路径无效
+ */
+static uint8 build_exec_path_from_planner(void)
+{
+    size_t corner_steps = 0U;
+
+    g_exec_steps = 0U;
+    memset(g_exec_path, 0, sizeof(g_exec_path));
+
+    if (Car_path_count < 2U || Car_path_count > MAX_CAR_PATH)
+    {
+        return 0U;
+    }
+
+    corner_steps = path_follow_extract_corners(car_path,
+                                               Car_path_count,
+                                               g_exec_path,
+                                               MAX_CAR_PATH);
+
+    if (corner_steps >= 2U && corner_steps <= MAX_CAR_PATH)
+    {
+        g_exec_steps = corner_steps;
+        return 1U;
+    }
+
+    memcpy(g_exec_path, car_path, Car_path_count * sizeof(Position));
+    g_exec_steps = Car_path_count;
+    return 1U;
+}
+
+/**
+ * @brief 完成一次路径规划并构建执行路径。
+ *
+ * 规划策略：
+ * - 先尝试 Mode2（按 ID 配对）
+ * - 若失败，回退到 Mode1（全局贪心）
+ *
+ * @return uint8
+ * - 1：规划成功且可执行路径已准备好
+ * - 0：规划失败
+ */
+static uint8 control_plan_path(void)
+{
+    map_runtime_snapshot_t map_snapshot;
+
+    g_plan_ready = 0U;
+    memset(&map_snapshot, 0, sizeof(map_snapshot));
+    snapshot_take(&map_snapshot);
+
+    Plan_path_Mode2();
+    if (Car_path_count < 2U)
+    {
+        snapshot_restore(&map_snapshot);
+        Plan_path_Mode1();
+    }
+
+    if (Car_path_count < 2U)
+    {
+        snapshot_restore(&map_snapshot);
+        return 0U;
+    }
+
+    if (!build_exec_path_from_planner())
+    {
+        snapshot_restore(&map_snapshot);
+        return 0U;
+    }
+
+    snapshot_restore(&map_snapshot);
+    g_plan_ready = 1U;
+    return 1U;
+}
+
+/**
+ * @brief 处理“初始定位”阶段。
+ *
+ * 核心逻辑：
+ * - 周期请求视觉车位姿
+ * - 采集多帧后取平均
+ * - 一次性重置里程计位姿到平均值
+ */
+static void handle_startup_localization(void)
+{
+    uint8 accept_sample = 0U;
+    float cam_x_m = 0.0f;
+    float cam_y_m = 0.0f;
+    float cam_yaw_deg = 0.0f;
+
+    request_car_periodic(CONTROL_REQ_CAR_PERIOD_WAIT);
+
+    if (car_pose_updated)
+    {
+        car_pose_updated = false;
+        accept_sample = 1U;
+    }
+    else if (g_localize_sample_count == 0U && car_pose_ready)
+    {
+        /* 启动初期若已有缓存帧，允许先吃一帧，避免死等 updated 标志。 */
+        accept_sample = 1U;
+    }
+
+    if (!accept_sample)
+    {
+        return;
+    }
+    if (!get_camera_pose_meter(&cam_x_m, &cam_y_m, &cam_yaw_deg))
+    {
+        return;
+    }
+
+    g_localize_sum_x_m += cam_x_m;
+    g_localize_sum_y_m += cam_y_m;
+    g_localize_sum_yaw_deg += cam_yaw_deg;
+    g_localize_sample_count++;
+
+    if (g_localize_sample_count < CONTROL_LOCALIZE_MIN_SAMPLES)
+    {
+        return;
+    }
+
+    path_follow_reset_pose(g_localize_sum_x_m / (float)g_localize_sample_count,
+                           g_localize_sum_y_m / (float)g_localize_sample_count,
+                           g_localize_sum_yaw_deg / (float)g_localize_sample_count);
+    path_follow_hold_current_yaw();
+
+    g_control_stage = CONTROL_STAGE_WAIT_CAMERA_DATA;
+}
+
+/**
+ * @brief 处理“等待地图”阶段。
+ *
+ * 阶段目标：
+ * - 周期请求地图与车位姿
+ * - 收到有效地图后切换到规划阶段
+ */
+static void handle_wait_camera_data(void)
+{
+    float cam_x_m = 0.0f;
+    float cam_y_m = 0.0f;
+    float cam_yaw_deg = 0.0f;
+
+    request_map_periodic();
+    request_car_periodic(CONTROL_REQ_CAR_PERIOD_WAIT);
+
+    if (car_pose_updated)
+    {
+        car_pose_updated = false;
+        if (get_camera_pose_meter(&cam_x_m, &cam_y_m, &cam_yaw_deg))
+        {
+            /* 等地图阶段若拿到新位姿，顺带轻量同步一次里程计。 */
+            path_follow_reset_pose(cam_x_m, cam_y_m, cam_yaw_deg);
+        }
+    }
+
+    if (map_data_ready && map_frame_count > 0U)
+    {
+        map_data_updated = false;
+        g_control_stage = CONTROL_STAGE_PLAN_PATH;
+    }
+}
+
+/**
+ * @brief 处理“执行中的动态位姿校正”。
+ *
+ * 校正策略：
+ * - 误差 < 死区：不修正
+ * - 死区 <= 误差 < 强修正阈值：按 CONTROL_CORR_BLEND 软修正
+ * - 误差 >= 强修正阈值：硬修正到视觉位姿
+ */
+static void handle_dynamic_pose_correction(void)
+{
+    path_follow_status_t st = {0};
+    float cam_x_m = 0.0f;
+    float cam_y_m = 0.0f;
+    float cam_yaw_deg = 0.0f;
+    float err_x_m = 0.0f;
+    float err_y_m = 0.0f;
+    float err_abs_max_m = 0.0f;
+    float blend = 0.0f;
+    float new_x_m = 0.0f;
+    float new_y_m = 0.0f;
+    float yaw_to_use = 0.0f;
+
+    if (!car_pose_updated)
+    {
+        return;
+    }
+    car_pose_updated = false;
+
+    if (!get_camera_pose_meter(&cam_x_m, &cam_y_m, &cam_yaw_deg))
+    {
+        return;
+    }
+
+    path_follow_get_status(&st);
+
+    err_x_m = cam_x_m - st.x_m;
+    err_y_m = cam_y_m - st.y_m;
+    err_abs_max_m = absf_local(err_x_m);
+    if (absf_local(err_y_m) > err_abs_max_m)
+    {
+        err_abs_max_m = absf_local(err_y_m);
+    }
+
+    if (err_abs_max_m < CONTROL_CORR_DEADBAND_M)
+    {
+        return;
+    }
+
+    blend = (err_abs_max_m >= CONTROL_CORR_STRONG_RESET_M) ? 1.0f : CONTROL_CORR_BLEND;
+
+    new_x_m = st.x_m + err_x_m * blend;
+    new_y_m = st.y_m + err_y_m * blend;
+    new_x_m = clampf_local(new_x_m, 0.0f, (float)(MAP_ROWS - 1) * GRID_SIZE_M);
+    new_y_m = clampf_local(new_y_m, 0.0f, (float)(MAP_COLS - 1) * GRID_SIZE_M);
+
+    /* 软修正仅修平移；硬修正时同时修正航向。 */
+    yaw_to_use = (blend >= 1.0f) ? cam_yaw_deg : st.yaw_deg;
+    path_follow_reset_pose(new_x_m, new_y_m, yaw_to_use);
+}
+
+/* ========================= 对外接口实现 ========================= */
+
+void control_init(void)
+{
+    g_control_stage = CONTROL_STAGE_STARTUP_LOCALIZE;
+    g_path_plan_paused = 0U;
+    g_plan_ready = 0U;
+    g_exec_steps = 0U;
+    memset(g_exec_path, 0, sizeof(g_exec_path));
+
+    g_localize_sample_count = 0U;
+    g_localize_sum_x_m = 0.0f;
+    g_localize_sum_y_m = 0.0f;
+    g_localize_sum_yaw_deg = 0.0f;
+
+    g_map_req_loop_cnt = 0U;
+    g_car_req_loop_cnt = 0U;
+
+    path_follow_set_pause_indices(NULL, 0U, 0U);
+    path_follow_set_path(NULL, 0U);
+
+    /* 启动时默认关闭运动输出，路径准备好后再放行。 */
+    car_go_flag = 0U;
+    car_stop_flag = 0U;
+
+    map_data_updated = false;
+    car_pose_updated = false;
+}
+
+void control_restart(void)
+{
+    g_control_stage = CONTROL_STAGE_STARTUP_LOCALIZE;
+    g_plan_ready = 0U;
+    g_exec_steps = 0U;
+    g_localize_sample_count = 0U;
+    g_localize_sum_x_m = 0.0f;
+    g_localize_sum_y_m = 0.0f;
+    g_localize_sum_yaw_deg = 0.0f;
+
+    path_follow_set_path(NULL, 0U);
+    path_follow_set_pause_indices(NULL, 0U, 0U);
+
+    car_go_flag = 0U;
+    car_stop_flag = 0U;
+}
+
+void control_process(void)
+{
+    path_follow_status_t st = {0};
+
+    /* 统一串口解析入口：每圈都先消费 FIFO 并更新地图/位姿缓存。 */
+    process_blob_data();
+
+    switch (g_control_stage)
+    {
+    case CONTROL_STAGE_STARTUP_LOCALIZE:
+        handle_startup_localization();
+        break;
+
+    case CONTROL_STAGE_WAIT_CAMERA_DATA:
+        handle_wait_camera_data();
+        break;
+
+    case CONTROL_STAGE_PLAN_PATH:
+        begin_path_plan_pause();
+        if (control_plan_path())
+        {
+            g_control_stage = CONTROL_STAGE_LOAD_PATH;
+        }
+        else
+        {
+            g_control_stage = CONTROL_STAGE_ERROR;
+        }
+        end_path_plan_pause();
+        break;
+
+    case CONTROL_STAGE_LOAD_PATH:
+        if (!g_plan_ready || g_exec_steps < 2U)
+        {
+            g_control_stage = CONTROL_STAGE_ERROR;
+            break;
+        }
+
+        path_follow_set_pause_indices(NULL, 0U, 0U);
+        path_follow_hold_current_yaw();
+        path_follow_set_path(g_exec_path, g_exec_steps);
+
+        car_go_flag = 1U;
+        car_stop_flag = 0U;
+        g_control_stage = CONTROL_STAGE_EXECUTE_PATH;
+        break;
+
+    case CONTROL_STAGE_EXECUTE_PATH:
+        request_car_periodic(CONTROL_REQ_CAR_PERIOD_EXEC);
+        handle_dynamic_pose_correction();
+
+        path_follow_get_status(&st);
+        if (!st.active)
+        {
+            /* 路径执行结束后切换到停车保持态。 */
+            car_go_flag = 1U;
+            car_stop_flag = 1U;
+            g_control_stage = CONTROL_STAGE_FINISHED;
+        }
+        break;
+
+    case CONTROL_STAGE_FINISHED:
+        /* 完成态保持停车，等待外部调用 control_restart()。 */
+        break;
+
+    case CONTROL_STAGE_ERROR:
+        /* 错误态保持安全停车，并持续请求地图，拿到新图后自动重试规划。 */
+        car_go_flag = 1U;
+        car_stop_flag = 1U;
+        request_map_periodic();
+        request_car_periodic(CONTROL_REQ_CAR_PERIOD_WAIT);
+
+        if (map_data_updated)
+        {
+            map_data_updated = false;
+            g_control_stage = CONTROL_STAGE_PLAN_PATH;
+        }
+        break;
+
+    case CONTROL_STAGE_IDLE:
+    default:
+        break;
+    }
+}
+
+control_stage_t control_get_stage(void)
+{
+    return g_control_stage;
+}
+
+uint8 control_is_path_plan_paused(void)
+{
+    return g_path_plan_paused;
+}
+

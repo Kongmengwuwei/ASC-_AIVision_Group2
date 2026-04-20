@@ -1,18 +1,19 @@
-#ifndef _MAP_ROUTE_DATA_H_
-#define _MAP_ROUTE_DATA_H_
+#ifndef _MAP_PATH_DATA_H_
+#define _MAP_PATH_DATA_H_
 
 #include "zf_common_typedef.h"
 
 // 地图尺寸定义
 #define MAP_ROWS 10
 #define MAP_COLS 14
+#define GRID_SIZE_M 0.20f
 
 // 地图元素坐标上限定义
 #define MAX_OBSTACLES 100
 #define MAX_BOXES 10
 #define MAX_TARGETS 10
 #define MAX_BOMBS 10
-#define MAX_CAR_PATH 250
+#define MAX_CAR_PATH 1000
 
 //路径特殊点ID定义
 #define BOMB_EXPLOSION 1

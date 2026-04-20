@@ -4,18 +4,18 @@
 #include "zf_common_typedef.h"
 
 
-#define MAX_DUTY                 (50 )                           // 最大 MAX_DUTY% 占空比
-#define MOTOR1_DIR               (C9 )                           //上左
-#define MOTOR1_PWM               (PWM2_MODULE1_CHA_C8)
+#define MAX_DUTY            	(50)                                               // 最大 MAX_DUTY% 占空比
+#define MOTOR1_DIR              (C7)                           //上左
+#define MOTOR1_PWM              (PWM2_MODULE0_CHA_C6)
 
-#define MOTOR2_DIR               (C7 )                           //上右
-#define MOTOR2_PWM               (PWM2_MODULE0_CHA_C6)
+#define MOTOR2_DIR              (C9)                          //上右
+#define MOTOR2_PWM              (PWM2_MODULE1_CHA_C8)
 
-#define MOTOR3_DIR               (D3 )                           //下左
-#define MOTOR3_PWM               (PWM2_MODULE3_CHA_D2)
+#define MOTOR3_DIR              (C11)                          //下左
+#define MOTOR3_PWM              (PWM2_MODULE2_CHA_C10)
 
-#define MOTOR4_DIR               (C11 )                          //下右
-#define MOTOR4_PWM               (PWM2_MODULE2_CHA_C10)
+#define MOTOR4_DIR              (D3)                           //下右
+#define MOTOR4_PWM              (PWM2_MODULE3_CHA_D2)
 
 
 #define ENCODER_1                   (QTIMER1_ENCODER2)
@@ -35,8 +35,8 @@
 #define ENCODER_4_B                 (QTIMER1_ENCODER1_CH2_C1)
 
 //参数宏定义
-#define ENCODER_RESOLUTION      2280.0   //编码器分辨率, 轮子转一圈，编码器产生的脉冲数
-#define WHEEL_DIAMETER          0.058    //轮子直径,单位：米
+#define ENCODER_RESOLUTION      2300.0   //编码器分辨率, 轮子转一圈，编码器产生的脉冲数
+#define WHEEL_DIAMETER          0.058    //轮子直径,单位：米@
 #define D_X                     0.176     //底盘Y轴上两轮中心的间距
 #define D_Y                     0.20     //底盘X轴上两轮中心的间距
 #define PID_RATE                100       //PID调节PWM值的频率
@@ -44,8 +44,8 @@
 #define LIMIT_PWM_MIN              -6000
 #define LIMIT_PWM_MAX               6000
 
-#define LIMIT_ENCODER_MIN          -400
-#define LIMIT_ENCODER_MAX           400
+#define LIMIT_ENCODER_MIN          -500
+#define LIMIT_ENCODER_MAX           500
 #define ENCODER_FILTER_ALPHA       0.35f
 
 

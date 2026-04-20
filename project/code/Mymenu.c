@@ -11,8 +11,10 @@ float test2 = 123.45; // 测试数据
 uint8_t test3 = 1;    // 测试数据
 bool test4 = true;    // 测试数据
 
-bool Algo_Test_auto = true;    // 自动算法测试开关
+bool Algo_Test_auto = false;    // 自动算法测试开关
 bool Algo_Test_hand = false;    // 手动算法测试开关
+uint8 car_go_flag = 0;          // 运行标志 
+uint8 car_stop_flag = 0;        // 停车标志
 
 // 创建菜单
 void Menu_Create(void)

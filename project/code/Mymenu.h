@@ -5,7 +5,7 @@
 #include "zf_common_font.h"
 #include "zf_device_ips200.h"
 #include "menu.h"
-#include "Map_Route_Data.h"
+#include "Map_Path_Data.h"
 #include "Algorithm_Test.h"
 
 // 显示配置
@@ -22,6 +22,11 @@
 // 调参步进值
 static float SetupNumber[SETUP_LEN] = {0.01, 0.1, 1, 10, 100};
 static uint8_t SetupIndex = 2;
+
+extern bool Algo_Test_auto;    // 自动算法测试开关
+extern bool Algo_Test_hand;    // 手动算法测试开关
+extern uint8 car_go_flag;
+extern uint8 car_stop_flag;
 
 //菜单初始化
 void Menu_Init(void);

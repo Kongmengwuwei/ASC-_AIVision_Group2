@@ -1,0 +1,86 @@
+#ifndef PATH_FOLLOW_H
+#define PATH_FOLLOW_H
+
+#include <stddef.h>
+#include "zf_common_typedef.h"
+#include "Map_Path_Data.h"
+#include "PID.h"
+
+#define PATH_FOLLOW_SCURVE_BAND_COUNT 5U
+#define PATH_FOLLOW_MAX_PAUSE_POINTS 20U
+
+typedef struct
+{
+    float distance_upper_m;
+    float vmax_mps;
+    float amax_mps2;
+    float jmax_mps3;
+} path_follow_scurve_band_cfg_t;
+
+typedef struct
+{
+    float vx_cmd;
+    float vy_cmd;
+    float omega_cmd;
+    uint8 active;
+    uint8 reached;
+    size_t target_idx;
+} path_follow_output_t;
+
+typedef struct
+{
+    float x_m;
+    float y_m;
+    float yaw_deg;
+    float target_x_m;
+    float target_y_m;
+    float distance_m;
+    float dir_x;
+    float dir_y;
+    float speed_ref_cmps;
+    float target_yaw_deg;
+    uint8 active;
+    uint8 reached;
+    uint8 paused;
+    uint8 yaw_only_active;
+    uint8 segment_axis;
+    size_t target_idx;
+    float yaw_error_deg;
+} path_follow_status_t;
+
+void path_follow_init(float grid_size_m, float pulses_per_meter);
+void path_follow_set_path(const Position *path, size_t steps);
+void path_follow_set_path_pause_enabled(const Position *path, size_t steps, uint8 pause_events_enabled);
+void path_follow_set_target(int target_row, int target_col);
+void path_follow_set_target_yaw(float target_yaw_deg);
+void path_follow_hold_current_yaw(void);
+void path_follow_start_rotate_to_yaw(float target_yaw_deg);
+void path_follow_start_offset_move(float delta_x_m, float delta_y_m);
+void path_follow_start_pose_correction(float target_x_m, float target_y_m);
+void path_follow_set_pause_indices(const size_t *pause_indices, size_t pause_count, uint32 pause_ms);
+void path_follow_reset_pose(float x_m, float y_m, float yaw_deg);
+void path_follow_set_external_position(float x_m, float y_m, uint8 valid);
+void path_follow_update(float yaw_deg, path_follow_output_t *out);
+void path_follow_get_status(path_follow_status_t *status);
+void path_follow_draw_status(void);
+float path_follow_heading_deg(Position from, Position to);
+void distance_speed_strategy(void);
+void path_follow_reset_scurve_band_defaults(void);
+void path_follow_sanitize_scurve_band_cfg(void);
+
+size_t path_follow_extract_corners(const Position *path, size_t path_steps,
+                                   Position *corner_buffer, size_t corner_capacity);
+
+extern tagPID_T pid_world_x;
+extern tagPID_T pid_world_y;
+extern tagPID_T pid_stay;
+extern tagPID_T pid_yaw;
+extern tagPID_T pid_accel_yaw;
+extern uint8 wait_stop;
+extern float prestart_move_left_m;
+extern float prestart_move_right_m;
+extern float prestart_move_forward_m;
+extern float prestart_move_backward_m;
+extern path_follow_scurve_band_cfg_t g_path_follow_scurve_band_cfg[PATH_FOLLOW_SCURVE_BAND_COUNT];
+
+#endif

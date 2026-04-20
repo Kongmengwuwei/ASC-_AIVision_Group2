@@ -1,10 +1,10 @@
 #include "Motor.h"
-#include "string.h"
 #include "PID_config.h"
+#include "PID.h"
 #include "zf_driver_gpio.h"
 #include "zf_driver_pwm.h"
 #include "zf_driver_encoder.h"
-#include "pid.h"
+#include "string.h"
 
 // int up_left_speed = 0;
 // int up_right_speed = 0;
@@ -59,7 +59,7 @@ int16 encoder_data_quaddec4 = 0;
 /**************************************************************************
 函数功能：编码器滤波
 **************************************************************************/                                      
-void encoder_get(void)//多重滤波，1234就是4个的均值滤波
+void encoder_get(void)
 {
 	static int16 encoder_L_up[5],encoder_R_up[5],encoder_L_down[5],encoder_R_down[5];
 	encoder_data_quaddec1 = encoder_get_count(ENCODER_1);                  // 获取编码器计数 左上
@@ -118,7 +118,7 @@ void encoder_get(void)//多重滤波，1234就是4个的均值滤波
 
 /**************************************************************************
 函数功能：低通滤波
-入口参数：旧X，新X；
+入口参数：旧X，新X
 返回  值：新值
 **************************************************************************/
 int16 Lowpass(int16 X_last,int16 X_new)
@@ -193,12 +193,12 @@ void motor_pwm(int up_left_speed,int up_right_speed,int down_left_speed,int down
 	if(up_left_speed > 0)                                                           // 正转
     {
 		gpio_set_level(MOTOR1_DIR, GPIO_LOW);                     // DIR输出高电平
-        pwm_set_duty(MOTOR1_PWM, up_left_speed+500);                   // 计算占空比
+        pwm_set_duty(MOTOR1_PWM, up_left_speed);                   // 计算占空比
      }
      else if (up_left_speed < 0)                                                                  // 反转
      {
 		gpio_set_level(MOTOR1_DIR, GPIO_HIGH);                    // DIR输出低电平
-        pwm_set_duty(MOTOR1_PWM, -up_left_speed+500);                // 计算占空比
+        pwm_set_duty(MOTOR1_PWM, -up_left_speed);                // 计算占空比
 
      }
 	 else if (up_left_speed == 0)
@@ -210,12 +210,12 @@ void motor_pwm(int up_left_speed,int up_right_speed,int down_left_speed,int down
 	 if (up_right_speed > 0)
 	 {
 		 gpio_set_level(MOTOR2_DIR, GPIO_LOW);                       // DIR输出高电平
-         pwm_set_duty(MOTOR2_PWM, up_right_speed+400);                   // 计算占空比
+         pwm_set_duty(MOTOR2_PWM, up_right_speed);                   // 计算占空比
 	 }
 	 else if (up_right_speed < 0)
 	 {
 		 gpio_set_level(MOTOR2_DIR, GPIO_HIGH);                     // DIR输出低电平
-         pwm_set_duty(MOTOR2_PWM, -up_right_speed+440);                // 计算占空比
+         pwm_set_duty(MOTOR2_PWM, -up_right_speed);                // 计算占空比
 	 }
 	 else if (up_right_speed == 0)
 	 {
@@ -226,12 +226,12 @@ void motor_pwm(int up_left_speed,int up_right_speed,int down_left_speed,int down
 	 if (down_left_speed > 0)
 	 {
 		 gpio_set_level(MOTOR3_DIR, GPIO_LOW);                       // DIR输出高电平
-         pwm_set_duty(MOTOR3_PWM, down_left_speed+420);                   // 计算占空比
+         pwm_set_duty(MOTOR3_PWM, down_left_speed);                   // 计算占空比
 	 }
 	 else if (down_left_speed < 0)
 	 {
 		 gpio_set_level(MOTOR3_DIR, GPIO_HIGH);                      // DIR输出低电平
-         pwm_set_duty(MOTOR3_PWM, -down_left_speed+390);                // 计算占空比
+         pwm_set_duty(MOTOR3_PWM, -down_left_speed);                // 计算占空比
 	 }
 	 else if (down_left_speed == 0)
 	 {
@@ -242,12 +242,12 @@ void motor_pwm(int up_left_speed,int up_right_speed,int down_left_speed,int down
 	 if (down_right_speed > 0)
 	 {
 		 gpio_set_level(MOTOR4_DIR, GPIO_HIGH);                       // DIR输出高电平
-         pwm_set_duty(MOTOR4_PWM, down_right_speed+540);                  // 计算占空比
+         pwm_set_duty(MOTOR4_PWM, down_right_speed);                  // 计算占空比
 	 }
 	 else if (down_right_speed < 0)
 	 {
 		 gpio_set_level(MOTOR4_DIR, GPIO_LOW);                       // DIR输出低电平
-         pwm_set_duty(MOTOR4_PWM, -down_right_speed+530);                // 计算占空比
+         pwm_set_duty(MOTOR4_PWM, -down_right_speed);                // 计算占空比
 	 }
 	 else if (down_right_speed == 0)
 	 {
@@ -278,7 +278,7 @@ int Limit_int(int left_limit, int target_num, int right_limit)
 	}
 }
 //在这里修改
-void motor_control(int* input_speed_encoder)//控制底层电机pid输出
+void motor_control(int* input_speed_encoder)
 {
 	int motorUL_pwm_value = 0;
 	int motorUR_pwm_value = 0;
@@ -320,27 +320,28 @@ void Kinematics_Init(void)
   * @输入：麦轮车三轴速度 m/s
   * @输出：电机应达到的目标速度（一个PID控制周期内，电机编码器计数值的变化）
   */
-void Kinematics_Inverse(float* input, int* small_target_output)//在其他地方调用，作为算目标速度的方式
+void Kinematics_Inverse(float* input, int* output)
 {
-	float carvx   = input[0]*0.01f;         //放大输入参数，输入为cm/s，转化为m/s
-	float carvy   = input[1]*0.01f;         //放大输入参数，输入为cm/s，转化为m/s
+	float v_tx   = input[0]*0.01f;         //放大输入参数，输入为cm/s，转化为m/s
+	float v_ty   = input[1]*0.01f;         //放大输入参数，输入为cm/s，转化为m/s
 	float omega = input[2];                //rad/s（弧度/秒）
-	static float vtarget[4] = {0};
+	static float v_w[4] = {0};
 	
-	vtarget[0] = carvx -carvy - (r_x + r_y)*omega;               //rx+ry=0.215
-	vtarget[1] = carvx+ carvy + (r_x + r_y)*omega;
-	vtarget[2] = carvx+carvy - (r_x + r_y)*omega;
-	vtarget[3] =carvx - carvy + (r_x + r_y)*omega;
+	v_w[0] = v_tx - v_ty - (r_x + r_y)*omega;               //rx+ry=0.215
+	v_w[1] = v_tx + v_ty + (r_x + r_y)*omega;
+	v_w[2] = v_tx + v_ty - (r_x + r_y)*omega;
+	v_w[3] = v_tx - v_ty + (r_x + r_y)*omega;
 
     //计算一个PID控制周期内，电机编码器计数值的变化
-	 small_target_output[0] = (int)(vtarget[0] * pulse_per_meter/PID_RATE);   //上左    *125
-	 small_target_output[1] = (int)(vtarget[1] * pulse_per_meter/PID_RATE);   //上右
-	 small_target_output[2] = (int)(vtarget[2] * pulse_per_meter/PID_RATE);   //下左
-	 small_target_output[3] = (int)(vtarget[3] * pulse_per_meter/PID_RATE);   //下右
+	output[0] = (int)(v_w[0] * pulse_per_meter/PID_RATE);   //上左    *125
+	output[1] = (int)(v_w[1] * pulse_per_meter/PID_RATE);   //上右
+	output[2] = (int)(v_w[2] * pulse_per_meter/PID_RATE);   //下左
+	output[3] = (int)(v_w[3] * pulse_per_meter/PID_RATE);   //下右
 	
-	small_target_output[0] = Limit_int(LIMIT_ENCODER_MIN, small_target_output[0], LIMIT_ENCODER_MAX);
-	small_target_output[1] = Limit_int(LIMIT_ENCODER_MIN, small_target_output[1], LIMIT_ENCODER_MAX);
-	small_target_output[2] = Limit_int(LIMIT_ENCODER_MIN, small_target_output[2], LIMIT_ENCODER_MAX);
-	small_target_output[3] = Limit_int(LIMIT_ENCODER_MIN, small_target_output[3], LIMIT_ENCODER_MAX);
+	output[0] = Limit_int(LIMIT_ENCODER_MIN, output[0], LIMIT_ENCODER_MAX);
+	output[1] = Limit_int(LIMIT_ENCODER_MIN, output[1], LIMIT_ENCODER_MAX);
+	output[2] = Limit_int(LIMIT_ENCODER_MIN, output[2], LIMIT_ENCODER_MAX);
+	output[3] = Limit_int(LIMIT_ENCODER_MIN, output[3], LIMIT_ENCODER_MAX);
 
 }
+

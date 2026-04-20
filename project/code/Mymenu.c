@@ -474,6 +474,42 @@ void Show_Map(void)
     ips200_show_uint(start_x + (map_cols + 1) * cell_size + FONT_W * 4, start_y + FONT_H * 6, Car_path_count, 3);
 }
 
+void State_Show(void)
+{
+    ips200_show_string(0,176,"State:");
+
+    switch (g_control_stage)
+    {
+    case CONTROL_STAGE_IDLE:
+        ips200_show_uint(64, 176, 0, 2);
+        break;
+    case CONTROL_STAGE_PRESTART_MOVE:
+        ips200_show_uint(64, 176, 1, 2);
+        break;
+    case CONTROL_STAGE_STARTUP_LOCALIZE:
+        ips200_show_uint(64, 176, 2, 2);
+        break;
+    case CONTROL_STAGE_WAIT_CAMERA_DATA:
+        ips200_show_uint(64, 176, 3, 2);
+        break;
+    case CONTROL_STAGE_PLAN_PATH:
+        ips200_show_uint(64, 176, 4, 2);
+        break;
+    case CONTROL_STAGE_LOAD_PATH:
+        ips200_show_uint(64, 176, 5, 2);
+        break;
+    case CONTROL_STAGE_EXECUTE_PATH:
+        ips200_show_uint(64, 176, 6, 2);
+        break;
+    case CONTROL_STAGE_FINISHED:
+        ips200_show_uint(64, 176, 7, 2);
+        break;
+    case CONTROL_STAGE_ERROR:
+        ips200_show_uint(64, 176, 16, 2);
+        break;
+    }
+}
+
 // 菜单显示
 void Menu_Show(void)
 {
@@ -491,6 +527,7 @@ void Menu_Show(void)
     Show_Number();
 
     Show_Map();
+    State_Show();
 }
 
 // 各类按键处理

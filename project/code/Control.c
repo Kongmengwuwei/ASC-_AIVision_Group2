@@ -35,6 +35,14 @@
 #define CONTROL_LOCALIZE_MIN_SAMPLES 2U
 
 /**
+ * @brief 起步右移距离（米）。
+ *
+ * 需求：开局先向右移动一格（0.2m）驶出发车区。
+ * 这里采用与地图网格一致的 `GRID_SIZE_M`，即 0.2m。
+ */
+#define CONTROL_PRESTART_RIGHT_OFFSET_M GRID_SIZE_M
+
+/**
  * @brief 动态校正死区阈值（米）。
  *
  * 位姿误差小于该阈值时不做修正，避免高频微调抖动。
@@ -81,7 +89,7 @@ typedef struct
 /**
  * @brief 控制状态机当前阶段。
  */
-static control_stage_t g_control_stage = CONTROL_STAGE_IDLE;
+control_stage_t g_control_stage = CONTROL_STAGE_IDLE;
 
 /**
  * @brief 路径规划保护期标志。
@@ -115,6 +123,14 @@ static uint8 g_plan_ready = 0U;
  * @brief 初始定位累计样本数。
  */
 static uint8 g_localize_sample_count = 0U;
+
+/**
+ * @brief 起步右移动作是否已经触发。
+ *
+ * - 0：尚未下发起步右移动作
+ * - 1：已下发，等待动作执行结束
+ */
+static uint8 g_prestart_move_started = 0U;
 
 /**
  * @brief 初始定位阶段累计的视觉 X 坐标和（米）。
@@ -442,6 +458,47 @@ static uint8 control_plan_path(void)
 }
 
 /**
+ * @brief 处理“起步右移出发车区”阶段。
+ *
+ * 行为说明：
+ * - 首次进入时，下发一次“向右 0.2m”的偏移动作
+ * - 动作执行完成后，切到初始定位阶段
+ *
+ * 坐标约定：
+ * - 本工程中“向右一格”对应地图列 +1，即世界坐标 y 正方向
+ * - 因此使用 `path_follow_start_offset_move(0.0f, +0.2f)`
+ */
+static void handle_prestart_move(void)
+{
+    // path_follow_status_t st = {0};
+
+    // if (!g_prestart_move_started)
+    // {
+    //     /* 执行起步右移前放开底盘控制输出。 */
+    //     car_go_flag = 1U;
+    //     car_stop_flag = 0U;
+
+    //     path_follow_hold_current_yaw();
+    //     path_follow_start_offset_move(0.0f, CONTROL_PRESTART_RIGHT_OFFSET_M);
+    //     g_prestart_move_started = 1U;
+    //     return;
+    // }
+
+    // path_follow_get_status(&st);
+    // if (!st.active)
+    // {
+    //     /* 起步右移结束后先回到静止，再进入初始定位阶段。 */
+    //     car_go_flag = 0U;
+    //     car_stop_flag = 0U;
+    //     g_control_stage = CONTROL_STAGE_STARTUP_LOCALIZE;
+    // }
+
+    //
+    g_control_stage = CONTROL_STAGE_STARTUP_LOCALIZE;
+    //
+}
+
+/**
  * @brief 处理“初始定位”阶段。
  *
  * 核心逻辑：
@@ -593,7 +650,7 @@ static void handle_dynamic_pose_correction(void)
 
 void control_init(void)
 {
-    g_control_stage = CONTROL_STAGE_STARTUP_LOCALIZE;
+    g_control_stage = CONTROL_STAGE_PRESTART_MOVE;
     g_path_plan_paused = 0U;
     g_plan_ready = 0U;
     g_exec_steps = 0U;
@@ -603,6 +660,7 @@ void control_init(void)
     g_localize_sum_x_m = 0.0f;
     g_localize_sum_y_m = 0.0f;
     g_localize_sum_yaw_deg = 0.0f;
+    g_prestart_move_started = 0U;
 
     g_map_req_loop_cnt = 0U;
     g_car_req_loop_cnt = 0U;
@@ -620,13 +678,14 @@ void control_init(void)
 
 void control_restart(void)
 {
-    g_control_stage = CONTROL_STAGE_STARTUP_LOCALIZE;
+    g_control_stage = CONTROL_STAGE_PRESTART_MOVE;
     g_plan_ready = 0U;
     g_exec_steps = 0U;
     g_localize_sample_count = 0U;
     g_localize_sum_x_m = 0.0f;
     g_localize_sum_y_m = 0.0f;
     g_localize_sum_yaw_deg = 0.0f;
+    g_prestart_move_started = 0U;
 
     path_follow_set_path(NULL, 0U);
     path_follow_set_pause_indices(NULL, 0U, 0U);
@@ -644,6 +703,10 @@ void control_process(void)
 
     switch (g_control_stage)
     {
+    case CONTROL_STAGE_PRESTART_MOVE:
+        handle_prestart_move();
+        break;
+
     case CONTROL_STAGE_STARTUP_LOCALIZE:
         handle_startup_localization();
         break;
@@ -728,4 +791,3 @@ uint8 control_is_path_plan_paused(void)
 {
     return g_path_plan_paused;
 }
-

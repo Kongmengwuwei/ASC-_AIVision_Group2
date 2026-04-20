@@ -7,6 +7,7 @@
 #include "menu.h"
 #include "Map_Path_Data.h"
 #include "Algorithm_Test.h"
+#include "Control.h"
 
 // 显示配置
 #define FONT_W (8)               //字体宽

@@ -64,8 +64,8 @@ int main(void)
   Menu_Init();          // 菜单系统初始化(包含按键，显示屏等相关初始化)
   motor_init();         // 电机控制模块初始化
   encoder_init();       // 电机编码器模块初始化
-  // imu963ra_init();      // IMU模块初始化
-  // Attitude_Init();      // 姿态解算模块初始化
+  imu963ra_init();      // IMU模块初始化
+  Attitude_Init();      // 姿态解算模块初始化
 
   PID_Init(&ULpid, &ULPidInitStruct);
   PID_Init(&URpid, &URPidInitStruct);
@@ -88,7 +88,6 @@ int main(void)
   interrupt_set_priority(LPUART1_IRQn, 3);   // UART1 interrupt priority.
   interrupt_set_priority(LPUART4_IRQn, 4);   // UART4 interrupt priority.
   interrupt_global_enable(0);
-  ips200_show_string(0, 16, "init success.");
 
   /*以下为算法测试*/
   Menu_Show();
@@ -128,6 +127,8 @@ int main(void)
     // 菜单系统主循环调用：响应按键事件，更新显示等。
     Menu_Switch();
     Menu_Show();
+
+    ips200_show_float(0, 100, eulerAngle.yaw, 3, 2); // 显示当前航向角，便于调试
   }
 }
 
@@ -202,5 +203,5 @@ void pit_2_handler(void)
   /* 规划保护期内不更新姿态，避免重规划期间姿态状态与路径状态不同步。 */
   if (control_is_path_plan_paused())
     return;
-  // Attitude_Calculate();
+  Attitude_Calculate();
 }

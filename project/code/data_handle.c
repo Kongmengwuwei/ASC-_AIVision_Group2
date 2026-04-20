@@ -107,6 +107,58 @@ static bool consume_one_line_break(const uint8_t *buf, uint16_t len, uint16_t *i
     return false;
 }
 
+/*
+ * Parse map text using a given grid shape without semantic validation.
+ */
+static bool parse_map_grid_with_shape(const uint8_t *payload,
+                                      uint16_t payload_len,
+                                      size_t expected_rows,
+                                      size_t expected_cols,
+                                      char *out_cells)
+{
+    uint16_t idx = 0U;
+    size_t row = 0U;
+    size_t col = 0U;
+
+    if (payload == NULL || out_cells == NULL || 0U == expected_rows || 0U == expected_cols) {
+        return false;
+    }
+
+    idx = skip_line_break_prefix(payload, payload_len, idx);
+
+    for (row = 0U; row < expected_rows; row++) {
+        while (idx < payload_len && (' ' == payload[idx] || '\t' == payload[idx])) {
+            idx++;
+        }
+
+        if (((uint32_t)idx + expected_cols) > payload_len) {
+            return false;
+        }
+
+        for (col = 0U; col < expected_cols; col++) {
+            out_cells[row * expected_cols + col] = (char)payload[idx++];
+        }
+
+        while (idx < payload_len && (' ' == payload[idx] || '\t' == payload[idx])) {
+            idx++;
+        }
+
+        if (row < (expected_rows - 1U)) {
+            if (!consume_one_line_break(payload, payload_len, &idx)) {
+                return false;
+            }
+        } else {
+            consume_one_line_break(payload, payload_len, &idx);
+        }
+    }
+
+    while (idx < payload_len && (' ' == payload[idx] || '\t' == payload[idx])) {
+        idx++;
+    }
+    idx = skip_line_break_prefix(payload, payload_len, idx);
+    return (idx == payload_len);
+}
+
 /* 从 stream_buf 头部丢弃已消费字节 */
 static void consume_stream_prefix(uint16_t consume_len)
 {
@@ -190,6 +242,7 @@ static void compact_stream_buffer(void)
  */
 static bool parse_map_payload(const uint8_t *payload, uint16_t payload_len)
 {
+    char parsed_cells[MAP_ROWS * MAP_COLS] = {0};
     char new_map[MAP_ROWS][MAP_COLS] = {{0}};
     Position new_obstacles[MAX_OBSTACLES] = {{0}};
     Position new_boxes[MAX_BOXES] = {{0}};
@@ -201,7 +254,7 @@ static bool parse_map_payload(const uint8_t *payload, uint16_t payload_len)
     size_t new_targets_count = 0U;
     size_t new_bombs_count = 0U;
     bool car_found = false;
-    uint16_t idx = 0U;
+    bool input_transposed = false;
     size_t row = 0U;
     size_t col = 0U;
     char cell = 0;
@@ -210,20 +263,22 @@ static bool parse_map_payload(const uint8_t *payload, uint16_t payload_len)
         return false;
     }
 
-    idx = skip_line_break_prefix(payload, payload_len, idx);
-
-    for (row = 0U; row < MAP_ROWS; row++) {
-        /* 与旧版一致：允许每行前后带空格/Tab */
-        while (idx < payload_len && (' ' == payload[idx] || '\t' == payload[idx])) {
-            idx++;
-        }
-
-        if (((uint32_t)idx + MAP_COLS) > payload_len) {
+    if (!parse_map_grid_with_shape(payload, payload_len, MAP_ROWS, MAP_COLS, parsed_cells)) {
+        if (!parse_map_grid_with_shape(payload, payload_len, MAP_COLS, MAP_ROWS, parsed_cells)) {
             return false;
         }
+        input_transposed = true;
+    }
 
+    for (row = 0U; row < MAP_ROWS; row++) {
         for (col = 0U; col < MAP_COLS; col++) {
-            cell = (char)payload[idx++];
+            if (!input_transposed) {
+                cell = parsed_cells[row * MAP_COLS + col];
+            } else {
+                /* Input is 14x10, transpose back to canonical 10x14. */
+                cell = parsed_cells[col * MAP_ROWS + row];
+            }
+
             switch (cell) {
                 case MAP_SYMBOL_OBSTACLE:
                     if (new_obstacles_count >= MAX_OBSTACLES) {
@@ -284,26 +339,9 @@ static bool parse_map_payload(const uint8_t *payload, uint16_t payload_len)
 
             new_map[row][col] = cell;
         }
-
-        while (idx < payload_len && (' ' == payload[idx] || '\t' == payload[idx])) {
-            idx++;
-        }
-
-        if (row < (MAP_ROWS - 1U)) {
-            if (!consume_one_line_break(payload, payload_len, &idx)) {
-                return false;
-            }
-        } else {
-            /* 最后一行换行可有可无 */
-            consume_one_line_break(payload, payload_len, &idx);
-        }
     }
 
-    while (idx < payload_len && (' ' == payload[idx] || '\t' == payload[idx])) {
-        idx++;
-    }
-    idx = skip_line_break_prefix(payload, payload_len, idx);
-    if (idx != payload_len || !car_found) {
+    if (!car_found) {
         return false;
     }
 
@@ -337,11 +375,6 @@ static bool parse_map_payload(const uint8_t *payload, uint16_t payload_len)
     return true;
 }
 
-/*
- * 从直接输入的多行字符串解析地图（等价于 parse_map_payload 语义）：
- * - 支持最后一行不带换行符（会自动补 '\n'）
- * - 解析成功后同样更新 map_data/map_data_ready/map_data_updated
- */
 bool parse_map_from_string(const char *map_text)
 {
     size_t payload_len = 0U;

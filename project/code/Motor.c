@@ -1,10 +1,9 @@
 #include "Motor.h"
-#include "PID_config.h"
-#include "PID.h"
 #include "zf_driver_gpio.h"
 #include "zf_driver_pwm.h"
 #include "zf_driver_encoder.h"
-#include "string.h"
+#include "PID_config.h"
+#include "PID.h"
 
 // int up_left_speed = 0;
 // int up_right_speed = 0;
@@ -62,10 +61,10 @@ int16 encoder_data_quaddec4 = 0;
 void encoder_get(void)
 {
 	static int16 encoder_L_up[5],encoder_R_up[5],encoder_L_down[5],encoder_R_down[5];
-	encoder_data_quaddec1 = encoder_get_count(ENCODER_1);                  // 获取编码器计数 左上
-	encoder_data_quaddec2 = encoder_get_count(ENCODER_2);                  // 获取编码器计数 右上
-	encoder_data_quaddec3 = encoder_get_count(ENCODER_3);                  // 获取编码器计数 左下
-	encoder_data_quaddec4 = encoder_get_count(ENCODER_4);                  // 获取编码器计数 右下
+	encoder_data_quaddec1 = -encoder_get_count(ENCODER_1);                  // 获取编码器计数 左上
+	encoder_data_quaddec2 = -encoder_get_count(ENCODER_2);                  // 获取编码器计数 右上
+	encoder_data_quaddec3 = -encoder_get_count(ENCODER_3);                  // 获取编码器计数 左下
+	encoder_data_quaddec4 = -encoder_get_count(ENCODER_4);                  // 获取编码器计数 右下
 	
 	
 	encoder_L_up[4]=encoder_L_up[3];//左上编码器
@@ -209,17 +208,17 @@ void motor_pwm(int up_left_speed,int up_right_speed,int down_left_speed,int down
 
 	 if (up_right_speed > 0)
 	 {
-		 gpio_set_level(MOTOR2_DIR, GPIO_LOW);                       // DIR输出高电平
+		 gpio_set_level(MOTOR2_DIR, GPIO_HIGH);                       // DIR输出高电平
          pwm_set_duty(MOTOR2_PWM, up_right_speed);                   // 计算占空比
 	 }
 	 else if (up_right_speed < 0)
 	 {
-		 gpio_set_level(MOTOR2_DIR, GPIO_HIGH);                     // DIR输出低电平
+		 gpio_set_level(MOTOR2_DIR, GPIO_LOW);                     // DIR输出低电平
          pwm_set_duty(MOTOR2_PWM, -up_right_speed);                // 计算占空比
 	 }
 	 else if (up_right_speed == 0)
 	 {
-		 gpio_set_level(MOTOR2_DIR, GPIO_LOW);                       // DIR输出高电平
+		 gpio_set_level(MOTOR2_DIR, GPIO_HIGH);                       // DIR输出高电平
 		 pwm_set_duty(MOTOR2_PWM, 0);                                 // 停止
 	 }
 
@@ -344,4 +343,6 @@ void Kinematics_Inverse(float* input, int* output)
 	output[3] = Limit_int(LIMIT_ENCODER_MIN, output[3], LIMIT_ENCODER_MAX);
 
 }
+
+
 

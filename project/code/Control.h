@@ -11,7 +11,7 @@
  * @brief 视觉推箱车主控制流程接口。
  *
  * 该模块负责把上层任务拆成固定阶段并串起来执行：
- * 1) 启动右移出发车区（向右一格）
+ * 1) 启动前进出发车区（沿车头方向前进 0.2m）
  * 2) 启动初始定位
  * 3) 等待摄像头地图数据
  * 4) 路径规划
@@ -25,7 +25,7 @@
 typedef enum
 {
     CONTROL_STAGE_IDLE = 0,         /**< 空闲态：流程未启动。 */
-    CONTROL_STAGE_PRESTART_MOVE,    /**< 起步态：先向右移动一格，驶出发车区。 */
+    CONTROL_STAGE_PRESTART_MOVE,    /**< 起步态：先沿车头方向前进 0.2m，驶出发车区。 */
     CONTROL_STAGE_STARTUP_LOCALIZE, /**< 初始定位态：采集相机位姿并对齐里程计。 */
     CONTROL_STAGE_WAIT_CAMERA_DATA, /**< 等待地图态：周期请求并等待摄像头地图帧。 */
     CONTROL_STAGE_PLAN_PATH,        /**< 规划态：调用 Game_logic 进行路径规划。 */
@@ -35,6 +35,21 @@ typedef enum
     CONTROL_STAGE_ERROR             /**< 错误态：规划/下发失败，等待新地图后重试。 */
 } control_stage_t;
 
+/**
+ * @brief 路径规划模式枚举。
+ *
+ * CONTROL_PLAN_MODE_1:
+ * 在 CONTROL_STAGE_PLAN_PATH 阶段调用 Plan_path_Mode1()。
+ *
+ * CONTROL_PLAN_MODE_2:
+ * 在 CONTROL_STAGE_PLAN_PATH 阶段调用 Plan_path_Mode2()。
+ */
+typedef enum
+{
+    CONTROL_PLAN_MODE_1 = 0U,
+    CONTROL_PLAN_MODE_2 = 1U
+} control_plan_mode_t;
+
 extern control_stage_t g_control_stage;
 
 /**
@@ -43,7 +58,7 @@ extern control_stage_t g_control_stage;
  * 主要动作：
  * - 清空控制内部缓存与标志位
  * - 关闭运动输出（car_go_flag/car_stop_flag）
- * - 把流程状态切到“起步右移”阶段
+ * - 把流程状态切到“起步前进”阶段
  */
 void control_init(void);
 
@@ -73,6 +88,22 @@ void control_restart(void);
  * @return control_stage_t 当前状态机阶段值。
  */
 control_stage_t control_get_stage(void);
+
+/**
+ * @brief 设置控制流程使用的路径规划模式。
+ *
+ * @param mode 规划模式标志位：
+ * - CONTROL_PLAN_MODE_1：使用 Plan_path_Mode1()
+ * - CONTROL_PLAN_MODE_2：使用 Plan_path_Mode2()
+ */
+void control_set_plan_mode(control_plan_mode_t mode);
+
+/**
+ * @brief 获取当前路径规划模式标志位。
+ *
+ * @return control_plan_mode_t 当前规划模式。
+ */
+control_plan_mode_t control_get_plan_mode(void);
 
 /**
  * @brief 查询是否处于“路径规划保护期”。

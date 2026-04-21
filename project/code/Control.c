@@ -1,6 +1,8 @@
 #include "Control.h"
 #include "Game_logic.h"
 #include "Mymenu.h"
+#include "Attitude.h"
+#include <math.h>
 #include <string.h>
 
 /* ========================= 参数配置区 ========================= */
@@ -35,12 +37,14 @@
 #define CONTROL_LOCALIZE_MIN_SAMPLES 2U
 
 /**
- * @brief 起步右移距离（米）。
+ * @brief 起步前进距离（米）。
  *
- * 需求：开局先向右移动一格（0.2m）驶出发车区。
+ * 需求：开局先沿车头方向前进 0.2m 驶出发车区。
  * 这里采用与地图网格一致的 `GRID_SIZE_M`，即 0.2m。
  */
-#define CONTROL_PRESTART_RIGHT_OFFSET_M GRID_SIZE_M
+#define CONTROL_PRESTART_FORWARD_OFFSET_M GRID_SIZE_M
+/* 角度转弧度：yaw_rad = yaw_deg * CONTROL_DEG_TO_RAD */
+#define CONTROL_DEG_TO_RAD 0.01745329251994329577f
 
 /**
  * @brief 动态校正死区阈值（米）。
@@ -118,6 +122,8 @@ static size_t g_exec_steps = 0U;
  * - 0：尚未得到有效路径
  */
 static uint8 g_plan_ready = 0U;
+/* 规划模式标志位：默认使用 Mode2，可通过 control_set_plan_mode() 切换。 */
+static control_plan_mode_t g_control_plan_mode = CONTROL_PLAN_MODE_1;
 
 /**
  * @brief 初始定位累计样本数。
@@ -125,9 +131,9 @@ static uint8 g_plan_ready = 0U;
 static uint8 g_localize_sample_count = 0U;
 
 /**
- * @brief 起步右移动作是否已经触发。
+ * @brief 起步前进动作是否已经触发。
  *
- * - 0：尚未下发起步右移动作
+ * - 0：尚未下发起步前进动作
  * - 1：已下发，等待动作执行结束
  */
 static uint8 g_prestart_move_started = 0U;
@@ -433,11 +439,14 @@ static uint8 control_plan_path(void)
     memset(&map_snapshot, 0, sizeof(map_snapshot));
     snapshot_take(&map_snapshot);
 
-    Plan_path_Mode2();
-    if (Car_path_count < 2U)
+    /* 根据 planmode 标志位选择规划方案，不做自动模式回退。 */
+    if (g_control_plan_mode == CONTROL_PLAN_MODE_1)
     {
-        snapshot_restore(&map_snapshot);
         Plan_path_Mode1();
+    }
+    else
+    {
+        Plan_path_Mode2();
     }
 
     if (Car_path_count < 2U)
@@ -458,44 +467,48 @@ static uint8 control_plan_path(void)
 }
 
 /**
- * @brief 处理“起步右移出发车区”阶段。
+ * @brief 处理“起步前进出发车区”阶段。
  *
  * 行为说明：
- * - 首次进入时，下发一次“向右 0.2m”的偏移动作
+ * - 首次进入时，读取当前 IMU 航向角作为车头方向
+ * - 按该航向分解出世界坐标位移，下发一次前进 0.2m 偏移动作
  * - 动作执行完成后，切到初始定位阶段
- *
- * 坐标约定：
- * - 本工程中“向右一格”对应地图列 +1，即世界坐标 y 正方向
- * - 因此使用 `path_follow_start_offset_move(0.0f, +0.2f)`
  */
 static void handle_prestart_move(void)
 {
-    // path_follow_status_t st = {0};
+    path_follow_status_t st = {0};
+    float prestart_yaw_deg = 0.0f;
+    float prestart_yaw_rad = 0.0f;
+    float delta_x_m = 0.0f;
+    float delta_y_m = 0.0f;
 
-    // if (!g_prestart_move_started)
-    // {
-    //     /* 执行起步右移前放开底盘控制输出。 */
-    //     car_go_flag = 1U;
-    //     car_stop_flag = 0U;
+    if (!g_prestart_move_started)
+    {
+        /* 执行起步前进前放开底盘控制输出。 */
+        car_go_flag = 1U;
+        car_stop_flag = 0U;
 
-    //     path_follow_hold_current_yaw();
-    //     path_follow_start_offset_move(0.0f, CONTROL_PRESTART_RIGHT_OFFSET_M);
-    //     g_prestart_move_started = 1U;
-    //     return;
-    // }
+        path_follow_get_status(&st);
+        prestart_yaw_deg = eulerAngle.yaw;
+        prestart_yaw_rad = prestart_yaw_deg * CONTROL_DEG_TO_RAD;
+        delta_x_m = cosf(prestart_yaw_rad) * CONTROL_PRESTART_FORWARD_OFFSET_M;
+        delta_y_m = sinf(prestart_yaw_rad) * CONTROL_PRESTART_FORWARD_OFFSET_M;
 
-    // path_follow_get_status(&st);
-    // if (!st.active)
-    // {
-    //     /* 起步右移结束后先回到静止，再进入初始定位阶段。 */
-    //     car_go_flag = 0U;
-    //     car_stop_flag = 0U;
-    //     g_control_stage = CONTROL_STAGE_STARTUP_LOCALIZE;
-    // }
+        path_follow_reset_pose(st.x_m, st.y_m, prestart_yaw_deg);
+        path_follow_hold_current_yaw();
+        path_follow_start_offset_move(delta_x_m, delta_y_m);
+        g_prestart_move_started = 1U;
+        return;
+    }
 
-    //
-    g_control_stage = CONTROL_STAGE_STARTUP_LOCALIZE;
-    //
+    path_follow_get_status(&st);
+    if (!st.active)
+    {
+        /* 起步前进结束后先回到静止，再进入初始定位阶段。 */
+        car_go_flag = 0U;
+        car_stop_flag = 0U;
+        g_control_stage = CONTROL_STAGE_STARTUP_LOCALIZE;
+    }
 }
 
 /**
@@ -785,6 +798,32 @@ void control_process(void)
 control_stage_t control_get_stage(void)
 {
     return g_control_stage;
+}
+
+/**
+ * @brief 设置规划模式标志位。
+ *
+ * 为了避免非法输入破坏流程，除 CONTROL_PLAN_MODE_1 外都归一到
+ * CONTROL_PLAN_MODE_2。
+ */
+void control_set_plan_mode(control_plan_mode_t mode)
+{
+    if (mode == CONTROL_PLAN_MODE_1)
+    {
+        g_control_plan_mode = CONTROL_PLAN_MODE_1;
+    }
+    else
+    {
+        g_control_plan_mode = CONTROL_PLAN_MODE_2;
+    }
+}
+
+/**
+ * @brief 获取当前规划模式标志位。
+ */
+control_plan_mode_t control_get_plan_mode(void)
+{
+    return g_control_plan_mode;
 }
 
 uint8 control_is_path_plan_paused(void)

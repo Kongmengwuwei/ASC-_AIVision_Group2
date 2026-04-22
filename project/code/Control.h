@@ -11,7 +11,7 @@
  * @brief 视觉推箱车主控制流程接口。
  *
  * 该模块负责把上层任务拆成固定阶段并串起来执行：
- * 1) 启动前进出发车区（沿车头方向前进 0.2m）
+ * 1) 启动出发车区动作（沿车头方向移动 0.2m）
  * 2) 启动初始定位
  * 3) 等待摄像头地图数据
  * 4) 路径规划
@@ -25,7 +25,7 @@
 typedef enum
 {
     CONTROL_STAGE_IDLE = 0,         /**< 空闲态：流程未启动。 */
-    CONTROL_STAGE_PRESTART_MOVE,    /**< 起步态：先沿车头方向前进 0.2m，驶出发车区。 */
+    CONTROL_STAGE_PRESTART_MOVE,    /**< 起步态：先沿车头方向运动 0.2m，驶出发车区。 */
     CONTROL_STAGE_STARTUP_LOCALIZE, /**< 初始定位态：采集相机位姿并对齐里程计。 */
     CONTROL_STAGE_WAIT_CAMERA_DATA, /**< 等待地图态：周期请求并等待摄像头地图帧。 */
     CONTROL_STAGE_PLAN_PATH,        /**< 规划态：调用 Game_logic 进行路径规划。 */
@@ -58,7 +58,7 @@ extern control_stage_t g_control_stage;
  * 主要动作：
  * - 清空控制内部缓存与标志位
  * - 关闭运动输出（car_go_flag/car_stop_flag）
- * - 把流程状态切到“起步前进”阶段
+ * - 把流程状态切到“起步动作”阶段
  */
 void control_init(void);
 

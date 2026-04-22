@@ -37,14 +37,41 @@
 #define CONTROL_LOCALIZE_MIN_SAMPLES 2U
 
 /**
- * @brief 起步前进距离（米）。
+ * @brief 起步位移距离（米）。
  *
- * 需求：开局先沿车头方向前进 0.2m 驶出发车区。
  * 这里采用与地图网格一致的 `GRID_SIZE_M`，即 0.2m。
  */
-#define CONTROL_PRESTART_FORWARD_OFFSET_M GRID_SIZE_M
+#define CONTROL_PRESTART_OFFSET_M GRID_SIZE_M
+
+/**
+ * @brief 起步方向系数。
+ *
+ * - 1.0f：沿车头方向前进
+ * - -1.0f：沿车头反方向后退
+ */
+#define CONTROL_PRESTART_DIR_SIGN 1.0f
 /* 角度转弧度：yaw_rad = yaw_deg * CONTROL_DEG_TO_RAD */
 #define CONTROL_DEG_TO_RAD 0.01745329251994329577f
+
+/**
+ * @brief 坐标轴补偿开关。
+ *
+ * 现象：规划“向右”实际“向下”，规划“向上”实际“向左”，
+ * 对应规划/执行坐标发生了行列转置。开启该开关后：
+ * - 路径点 (row,col) 在下发前转为 (col,row)
+ * - 视觉位姿映射同步采用 (x=col, y=row)
+ */
+#define CONTROL_COORD_TRANSPOSE_COMPENSATE 1U
+/* 在转置补偿基础上，额外翻转“上下轴”（对应 map 的 row 方向）。 */
+#define CONTROL_COORD_FLIP_VERTICAL 1U
+
+#if CONTROL_COORD_TRANSPOSE_COMPENSATE
+#define CONTROL_WORLD_X_MAX_M ((float)(MAP_COLS - 1) * GRID_SIZE_M)
+#define CONTROL_WORLD_Y_MAX_M ((float)(MAP_ROWS - 1) * GRID_SIZE_M)
+#else
+#define CONTROL_WORLD_X_MAX_M ((float)(MAP_ROWS - 1) * GRID_SIZE_M)
+#define CONTROL_WORLD_Y_MAX_M ((float)(MAP_COLS - 1) * GRID_SIZE_M)
+#endif
 
 /**
  * @brief 动态校正死区阈值（米）。
@@ -122,7 +149,7 @@ static size_t g_exec_steps = 0U;
  * - 0：尚未得到有效路径
  */
 static uint8 g_plan_ready = 0U;
-/* 规划模式标志位：默认使用 Mode2，可通过 control_set_plan_mode() 切换。 */
+/* 规划模式标志位：可通过 control_set_plan_mode() 在 Mode1/Mode2 间切换。 */
 static control_plan_mode_t g_control_plan_mode = CONTROL_PLAN_MODE_1;
 
 /**
@@ -131,9 +158,9 @@ static control_plan_mode_t g_control_plan_mode = CONTROL_PLAN_MODE_1;
 static uint8 g_localize_sample_count = 0U;
 
 /**
- * @brief 起步前进动作是否已经触发。
+ * @brief 起步动作是否已经触发。
  *
- * - 0：尚未下发起步前进动作
+ * - 0：尚未下发起步动作
  * - 1：已下发，等待动作执行结束
  */
 static uint8 g_prestart_move_started = 0U;
@@ -198,6 +225,76 @@ static float clampf_local(float v, float min_v, float max_v)
 }
 
 /**
+ * @brief 将规划输出的路径点转换为执行坐标系。
+ *
+ * 当开启行列补偿时，把 (row,col) 转为 (col,row)；
+ * 关闭补偿时保持原样。
+ */
+static void remap_exec_path_point(Position *p)
+{
+    uint8 temp = 0U;
+
+    if (p == NULL)
+    {
+        return;
+    }
+
+#if CONTROL_COORD_TRANSPOSE_COMPENSATE
+    temp = p->row;
+    p->row = p->col;
+    p->col = temp;
+#endif
+
+#if CONTROL_COORD_FLIP_VERTICAL
+    p->col = (uint8)((MAP_ROWS - 1) - p->col);
+#endif
+}
+
+/**
+ * @brief 判断两个栅格点是否在同一单元。
+ */
+static uint8 is_same_grid_cell(const Position *a, const Position *b)
+{
+    if (a == NULL || b == NULL)
+    {
+        return 0U;
+    }
+    return (a->row == b->row && a->col == b->col) ? 1U : 0U;
+}
+
+/**
+ * @brief 判断三点是否“同一直线且同向前进”。
+ *
+ * 仅当 A->B 与 B->C 共线且方向不反向（点积 >= 0）时返回 1，
+ * 这样可压缩直线段，同时避免把“原路折返”的拐点误删。
+ */
+static uint8 is_collinear_forward(const Position *a,
+                                  const Position *b,
+                                  const Position *c)
+{
+    int32 v1_r = 0;
+    int32 v1_c = 0;
+    int32 v2_r = 0;
+    int32 v2_c = 0;
+    int32 cross = 0;
+    int32 dot = 0;
+
+    if (a == NULL || b == NULL || c == NULL)
+    {
+        return 0U;
+    }
+
+    v1_r = (int32)b->row - (int32)a->row;
+    v1_c = (int32)b->col - (int32)a->col;
+    v2_r = (int32)c->row - (int32)b->row;
+    v2_c = (int32)c->col - (int32)b->col;
+    cross = v1_r * v2_c - v1_c * v2_r;
+    dot = v1_r * v2_r + v1_c * v2_c;
+
+    return (cross == 0 && dot >= 0) ? 1U : 0U;
+}
+
+/**
  * @brief 将视觉位姿转换为 path_follow 需要的米制坐标。
  *
  * 当前工程坐标约定：
@@ -226,8 +323,18 @@ static uint8 get_camera_pose_meter(float *x_m, float *y_m, float *yaw_deg)
         return 0U;
     }
 
+/* 视觉位姿到执行坐标系的映射需与路径点 remap 保持一致。 */
+#if CONTROL_COORD_TRANSPOSE_COMPENSATE
+    row_f = car_pose.x;
+    col_f = car_pose.y;
+#else
     row_f = car_pose.y;
     col_f = car_pose.x;
+#endif
+
+#if CONTROL_COORD_FLIP_VERTICAL
+    col_f = (float)(MAP_ROWS - 1) - col_f;
+#endif
 
     *x_m = row_f * GRID_SIZE_M;
     *y_m = col_f * GRID_SIZE_M;
@@ -394,7 +501,9 @@ static void snapshot_restore(const map_runtime_snapshot_t *snap)
  */
 static uint8 build_exec_path_from_planner(void)
 {
-    size_t corner_steps = 0U;
+    size_t i = 0U;
+    size_t out_steps = 0U;
+    Position mapped = {0};
 
     g_exec_steps = 0U;
     memset(g_exec_path, 0, sizeof(g_exec_path));
@@ -404,19 +513,53 @@ static uint8 build_exec_path_from_planner(void)
         return 0U;
     }
 
-    corner_steps = path_follow_extract_corners(car_path,
-                                               Car_path_count,
-                                               g_exec_path,
-                                               MAX_CAR_PATH);
-
-    if (corner_steps >= 2U && corner_steps <= MAX_CAR_PATH)
+    /* 路径下发前统一做：坐标映射 + 重复点剔除 + 直线段压缩。 */
+    for (i = 0U; i < Car_path_count; i++)
     {
-        g_exec_steps = corner_steps;
-        return 1U;
+        mapped = car_path[i];
+        remap_exec_path_point(&mapped);
+
+        if (out_steps == 0U)
+        {
+            g_exec_path[out_steps++] = mapped;
+            continue;
+        }
+
+        if (is_same_grid_cell(&g_exec_path[out_steps - 1U], &mapped))
+        {
+            /* 同格重复点：若新点带事件 id，覆盖保留。 */
+            if (mapped.id != 0U)
+            {
+                g_exec_path[out_steps - 1U].id = mapped.id;
+            }
+            continue;
+        }
+
+        if (out_steps >= 2U &&
+            g_exec_path[out_steps - 1U].id == 0U &&
+            mapped.id == 0U &&
+            is_collinear_forward(&g_exec_path[out_steps - 2U],
+                                 &g_exec_path[out_steps - 1U],
+                                 &mapped))
+        {
+            /* 直线同向延长：用新终点替换旧终点，实现“一段到底”。 */
+            g_exec_path[out_steps - 1U] = mapped;
+            continue;
+        }
+
+        if (out_steps >= MAX_CAR_PATH)
+        {
+            return 0U;
+        }
+        g_exec_path[out_steps++] = mapped;
     }
 
-    memcpy(g_exec_path, car_path, Car_path_count * sizeof(Position));
-    g_exec_steps = Car_path_count;
+    if (out_steps < 2U)
+    {
+        return 0U;
+    }
+
+    g_exec_steps = out_steps;
     return 1U;
 }
 
@@ -467,11 +610,11 @@ static uint8 control_plan_path(void)
 }
 
 /**
- * @brief 处理“起步前进出发车区”阶段。
+ * @brief 处理“起步出发车区”阶段。
  *
  * 行为说明：
  * - 首次进入时，读取当前 IMU 航向角作为车头方向
- * - 按该航向分解出世界坐标位移，下发一次前进 0.2m 偏移动作
+ * - 按该航向分解出世界坐标位移，下发一次 0.2m 偏移动作
  * - 动作执行完成后，切到初始定位阶段
  */
 static void handle_prestart_move(void)
@@ -479,24 +622,34 @@ static void handle_prestart_move(void)
     path_follow_status_t st = {0};
     float prestart_yaw_deg = 0.0f;
     float prestart_yaw_rad = 0.0f;
+    float start_x_m = 0.0f;
+    float start_y_m = 0.0f;
     float delta_x_m = 0.0f;
     float delta_y_m = 0.0f;
+    float target_x_m = 0.0f;
+    float target_y_m = 0.0f;
 
     if (!g_prestart_move_started)
     {
-        /* 执行起步前进前放开底盘控制输出。 */
+        /* 执行起步动作前放开底盘控制输出。 */
         car_go_flag = 1U;
         car_stop_flag = 0U;
 
         path_follow_get_status(&st);
         prestart_yaw_deg = eulerAngle.yaw;
         prestart_yaw_rad = prestart_yaw_deg * CONTROL_DEG_TO_RAD;
-        delta_x_m = cosf(prestart_yaw_rad) * CONTROL_PRESTART_FORWARD_OFFSET_M;
-        delta_y_m = sinf(prestart_yaw_rad) * CONTROL_PRESTART_FORWARD_OFFSET_M;
+        start_x_m = st.x_m;
+        start_y_m = st.y_m;
+        delta_x_m = CONTROL_PRESTART_DIR_SIGN * cosf(prestart_yaw_rad) * CONTROL_PRESTART_OFFSET_M;
+        delta_y_m = CONTROL_PRESTART_DIR_SIGN * sinf(prestart_yaw_rad) * CONTROL_PRESTART_OFFSET_M;
+
+        /* 防止起步目标越界（负坐标转 uint8 会变 255，导致远距离猛冲）。 */
+        target_x_m = clampf_local(start_x_m + delta_x_m, 0.0f, CONTROL_WORLD_X_MAX_M);
+        target_y_m = clampf_local(start_y_m + delta_y_m, 0.0f, CONTROL_WORLD_Y_MAX_M);
 
         path_follow_reset_pose(st.x_m, st.y_m, prestart_yaw_deg);
         path_follow_hold_current_yaw();
-        path_follow_start_offset_move(delta_x_m, delta_y_m);
+        path_follow_start_pose_correction(target_x_m, target_y_m);
         g_prestart_move_started = 1U;
         return;
     }
@@ -504,7 +657,7 @@ static void handle_prestart_move(void)
     path_follow_get_status(&st);
     if (!st.active)
     {
-        /* 起步前进结束后先回到静止，再进入初始定位阶段。 */
+        /* 起步动作结束后先回到静止，再进入初始定位阶段。 */
         car_go_flag = 0U;
         car_stop_flag = 0U;
         g_control_stage = CONTROL_STAGE_STARTUP_LOCALIZE;
@@ -651,8 +804,8 @@ static void handle_dynamic_pose_correction(void)
 
     new_x_m = st.x_m + err_x_m * blend;
     new_y_m = st.y_m + err_y_m * blend;
-    new_x_m = clampf_local(new_x_m, 0.0f, (float)(MAP_ROWS - 1) * GRID_SIZE_M);
-    new_y_m = clampf_local(new_y_m, 0.0f, (float)(MAP_COLS - 1) * GRID_SIZE_M);
+    new_x_m = clampf_local(new_x_m, 0.0f, CONTROL_WORLD_X_MAX_M);
+    new_y_m = clampf_local(new_y_m, 0.0f, CONTROL_WORLD_Y_MAX_M);
 
     /* 软修正仅修平移；硬修正时同时修正航向。 */
     yaw_to_use = (blend >= 1.0f) ? cam_yaw_deg : st.yaw_deg;

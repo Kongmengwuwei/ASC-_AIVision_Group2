@@ -16,7 +16,7 @@
  * 3) 等待摄像头地图数据
  * 4) 路径规划
  * 5) 路径下发并执行
- * 6) 执行中动态校正
+ * 6) 路径执行与完结
  */
 
 /**
@@ -30,7 +30,7 @@ typedef enum
     CONTROL_STAGE_WAIT_CAMERA_DATA, /**< 等待地图态：周期请求并等待摄像头地图帧。 */
     CONTROL_STAGE_PLAN_PATH,        /**< 规划态：调用 Game_logic 进行路径规划。 */
     CONTROL_STAGE_LOAD_PATH,        /**< 下发态：把规划结果转换并下发给 path_follow。 */
-    CONTROL_STAGE_EXECUTE_PATH,     /**< 执行态：沿路径运动并进行动态校正。 */
+    CONTROL_STAGE_EXECUTE_PATH,     /**< 执行态：沿路径连续运动并检测执行完成。 */
     CONTROL_STAGE_FINISHED,         /**< 完成态：整段路径执行完毕并保持停车。 */
     CONTROL_STAGE_ERROR             /**< 错误态：规划/下发失败，等待新地图后重试。 */
 } control_stage_t;
@@ -69,7 +69,7 @@ void control_init(void);
  * - 串口数据解析
  * - 初始定位
  * - 路径规划与下发
- * - 动态校正与完结判断
+ * - 路径执行状态与完结判断
  */
 void control_process(void);
 

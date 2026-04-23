@@ -22,12 +22,6 @@
  */
 #define CONTROL_REQ_CAR_PERIOD_WAIT 20U
 
-/**
- * @brief 执行阶段车位姿请求发送周期（单位：control_process 调用次数）。
- *
- * 执行阶段需要更高频率位姿用于动态校正，因此周期更短。
- */
-#define CONTROL_REQ_CAR_PERIOD_EXEC 6U
 
 /**
  * @brief 初始定位最少采样帧数。
@@ -73,26 +67,6 @@
 #define CONTROL_WORLD_Y_MAX_M ((float)(MAP_COLS - 1) * GRID_SIZE_M)
 #endif
 
-/**
- * @brief 动态校正死区阈值（米）。
- *
- * 位姿误差小于该阈值时不做修正，避免高频微调抖动。
- */
-#define CONTROL_CORR_DEADBAND_M 0.03f
-
-/**
- * @brief 动态校正“强修正”阈值（米）。
- *
- * 超过该阈值时认为误差较大，直接做 100% 对齐（硬修正）。
- */
-#define CONTROL_CORR_STRONG_RESET_M 0.15f
-
-/**
- * @brief 动态校正“软修正”融合系数。
- *
- * 当误差位于死区与强修正阈值之间时，按该比例向视觉位姿靠拢。
- */
-#define CONTROL_CORR_BLEND 0.40f
 
 /* ========================= 内部数据结构 ========================= */
 
@@ -191,17 +165,6 @@ static uint16 g_map_req_loop_cnt = 0U;
 static uint16 g_car_req_loop_cnt = 0U;
 
 /* ========================= 内部工具函数 ========================= */
-
-/**
- * @brief 本地绝对值函数（float 版本）。
- *
- * @param v 输入值。
- * @return float 绝对值。
- */
-static float absf_local(float v)
-{
-    return (v >= 0.0f) ? v : (-v);
-}
 
 /**
  * @brief 本地限幅函数。
@@ -486,6 +449,16 @@ static void snapshot_restore(const map_runtime_snapshot_t *snap)
                snap->bombs_buf,
                Bombs_count * sizeof(Position));
     }
+
+    //
+    // boxes[0].id = 0;
+    // boxes[1].id = 1;
+    // boxes[2].id = 2;
+    // targets[0].id = 0;
+    // targets[1].id = 1;
+    // targets[2].id = 2;
+    //
+
 }
 
 /**
@@ -752,66 +725,6 @@ static void handle_wait_camera_data(void)
     }
 }
 
-/**
- * @brief 处理“执行中的动态位姿校正”。
- *
- * 校正策略：
- * - 误差 < 死区：不修正
- * - 死区 <= 误差 < 强修正阈值：按 CONTROL_CORR_BLEND 软修正
- * - 误差 >= 强修正阈值：硬修正到视觉位姿
- */
-static void handle_dynamic_pose_correction(void)
-{
-    path_follow_status_t st = {0};
-    float cam_x_m = 0.0f;
-    float cam_y_m = 0.0f;
-    float cam_yaw_deg = 0.0f;
-    float err_x_m = 0.0f;
-    float err_y_m = 0.0f;
-    float err_abs_max_m = 0.0f;
-    float blend = 0.0f;
-    float new_x_m = 0.0f;
-    float new_y_m = 0.0f;
-    float yaw_to_use = 0.0f;
-
-    if (!car_pose_updated)
-    {
-        return;
-    }
-    car_pose_updated = false;
-
-    if (!get_camera_pose_meter(&cam_x_m, &cam_y_m, &cam_yaw_deg))
-    {
-        return;
-    }
-
-    path_follow_get_status(&st);
-
-    err_x_m = cam_x_m - st.x_m;
-    err_y_m = cam_y_m - st.y_m;
-    err_abs_max_m = absf_local(err_x_m);
-    if (absf_local(err_y_m) > err_abs_max_m)
-    {
-        err_abs_max_m = absf_local(err_y_m);
-    }
-
-    if (err_abs_max_m < CONTROL_CORR_DEADBAND_M)
-    {
-        return;
-    }
-
-    blend = (err_abs_max_m >= CONTROL_CORR_STRONG_RESET_M) ? 1.0f : CONTROL_CORR_BLEND;
-
-    new_x_m = st.x_m + err_x_m * blend;
-    new_y_m = st.y_m + err_y_m * blend;
-    new_x_m = clampf_local(new_x_m, 0.0f, CONTROL_WORLD_X_MAX_M);
-    new_y_m = clampf_local(new_y_m, 0.0f, CONTROL_WORLD_Y_MAX_M);
-
-    /* 软修正仅修平移；硬修正时同时修正航向。 */
-    yaw_to_use = (blend >= 1.0f) ? cam_yaw_deg : st.yaw_deg;
-    path_follow_reset_pose(new_x_m, new_y_m, yaw_to_use);
-}
-
 /* ========================= 对外接口实现 ========================= */
 
 void control_init(void)
@@ -911,9 +824,6 @@ void control_process(void)
         break;
 
     case CONTROL_STAGE_EXECUTE_PATH:
-        request_car_periodic(CONTROL_REQ_CAR_PERIOD_EXEC);
-        handle_dynamic_pose_correction();
-
         path_follow_get_status(&st);
         if (!st.active)
         {

@@ -103,7 +103,7 @@ int main(void)
   targets[2].id = 2;
 
   Test_Data_Load();  // 数据加载到内部测试地图
-  Plan_path_Mode2(); // 路径规划
+  Plan_path_Identify(); // 路径规划
 
   Test_Path_Init(); // 路径初始化
   }

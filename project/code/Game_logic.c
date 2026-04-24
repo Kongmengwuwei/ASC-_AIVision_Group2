@@ -28,6 +28,8 @@
 #define FAST_UNLOCK_WALL_TOPK_PASS1 4
 #define PAIR_REACH_CACHE_SIZE 96
 #define INFER_WALL_CACHE_SIZE 192
+#define IDENTIFY_NEED_CACHE_SIZE 96
+#define IDENTIFY_BOMB_CACHE_SIZE 96
 
 typedef struct
 {
@@ -106,19 +108,42 @@ typedef struct
     int critical_owner[MAX_BOMBS];
 } critical_owner_cache_entry_t;
 
+typedef struct
+{
+    uint8 valid;
+    uint32 unlock_sig;
+    uint8 need_unlock;
+} identify_need_cache_entry_t;
+
+typedef struct
+{
+    uint8 valid;
+    uint32 state_sig;
+    uint8 has_action;
+    round_action_t action;
+} identify_bomb_cache_entry_t;
+
 static pair_reach_cache_entry_t s_pair_reach_cache[PAIR_REACH_CACHE_SIZE];
 static infer_wall_cache_entry_t s_infer_wall_cache[INFER_WALL_CACHE_SIZE];
 static critical_owner_cache_entry_t s_critical_owner_cache;
+static identify_need_cache_entry_t s_identify_need_cache[IDENTIFY_NEED_CACHE_SIZE];
+static identify_bomb_cache_entry_t s_identify_bomb_cache[IDENTIFY_BOMB_CACHE_SIZE];
 static int s_pair_reach_cache_next = 0;
 static int s_infer_wall_cache_next = 0;
+static int s_identify_need_cache_next = 0;
+static int s_identify_bomb_cache_next = 0;
 
 static void reset_planning_caches(void)
 {
     memset(s_pair_reach_cache, 0, sizeof(s_pair_reach_cache));
     memset(s_infer_wall_cache, 0, sizeof(s_infer_wall_cache));
     memset(&s_critical_owner_cache, 0, sizeof(s_critical_owner_cache));
+    memset(s_identify_need_cache, 0, sizeof(s_identify_need_cache));
+    memset(s_identify_bomb_cache, 0, sizeof(s_identify_bomb_cache));
     s_pair_reach_cache_next = 0;
     s_infer_wall_cache_next = 0;
+    s_identify_need_cache_next = 0;
+    s_identify_bomb_cache_next = 0;
 }
 
 static void apply_box_action_result(planning_state_t *state,
@@ -209,6 +234,31 @@ static uint32 hash_state_signature(const planning_state_t *state)
     h = hash_mix_u32(h, (uint32)state->boxes_cnt);
     h = hash_mix_u32(h, (uint32)state->targets_cnt);
     h = hash_mix_position(h, state->car_state);
+
+    for (i = 0; i < state->obstacles_cnt; i++)
+        h = hash_mix_position(h, state->obstacles_state[i]);
+    for (i = 0; i < state->bombs_cnt; i++)
+        h = hash_mix_position(h, state->bombs_state[i]);
+    for (i = 0; i < state->boxes_cnt; i++)
+        h = hash_mix_position(h, state->boxes_state[i]);
+    for (i = 0; i < state->targets_cnt; i++)
+        h = hash_mix_position(h, state->targets_state[i]);
+
+    return h;
+}
+
+/* 仅用于“是否需开路”判定缓存：忽略 car 位置，聚焦静态地形与物体分布。 */
+static uint32 hash_unlock_signature(const planning_state_t *state)
+{
+    int i;
+    uint32 h = 2166136261u;
+    if (!state)
+        return 0;
+
+    h = hash_mix_u32(h, (uint32)state->obstacles_cnt);
+    h = hash_mix_u32(h, (uint32)state->bombs_cnt);
+    h = hash_mix_u32(h, (uint32)state->boxes_cnt);
+    h = hash_mix_u32(h, (uint32)state->targets_cnt);
 
     for (i = 0; i < state->obstacles_cnt; i++)
         h = hash_mix_position(h, state->obstacles_state[i]);
@@ -354,6 +404,75 @@ static void store_infer_wall_cache(uint32 state_sig,
     e->bomb_ref = bomb_ref;
     e->found = (uint8)(found ? 1 : 0);
     e->wall_ref = wall_ref;
+}
+
+static int lookup_identify_need_cache(uint32 unlock_sig, int *out_need_unlock)
+{
+    int i;
+    if (!out_need_unlock)
+        return 0;
+    for (i = 0; i < IDENTIFY_NEED_CACHE_SIZE; i++)
+    {
+        const identify_need_cache_entry_t *e = &s_identify_need_cache[i];
+        if (!e->valid)
+            continue;
+        if (e->unlock_sig != unlock_sig)
+            continue;
+        *out_need_unlock = e->need_unlock ? 1 : 0;
+        return 1;
+    }
+    return 0;
+}
+
+static void store_identify_need_cache(uint32 unlock_sig, int need_unlock)
+{
+    identify_need_cache_entry_t *e;
+    if (s_identify_need_cache_next < 0 || s_identify_need_cache_next >= IDENTIFY_NEED_CACHE_SIZE)
+        s_identify_need_cache_next = 0;
+    e = &s_identify_need_cache[s_identify_need_cache_next++];
+    if (s_identify_need_cache_next >= IDENTIFY_NEED_CACHE_SIZE)
+        s_identify_need_cache_next = 0;
+
+    e->valid = 1;
+    e->unlock_sig = unlock_sig;
+    e->need_unlock = (uint8)(need_unlock ? 1 : 0);
+}
+
+static int lookup_identify_bomb_cache(uint32 state_sig, int *out_has_action, round_action_t *out_action)
+{
+    int i;
+    if (!out_has_action || !out_action)
+        return 0;
+    for (i = 0; i < IDENTIFY_BOMB_CACHE_SIZE; i++)
+    {
+        const identify_bomb_cache_entry_t *e = &s_identify_bomb_cache[i];
+        if (!e->valid)
+            continue;
+        if (e->state_sig != state_sig)
+            continue;
+        *out_has_action = e->has_action ? 1 : 0;
+        *out_action = e->action;
+        return 1;
+    }
+    return 0;
+}
+
+static void store_identify_bomb_cache(uint32 state_sig, int has_action, const round_action_t *action)
+{
+    identify_bomb_cache_entry_t *e;
+    if (s_identify_bomb_cache_next < 0 || s_identify_bomb_cache_next >= IDENTIFY_BOMB_CACHE_SIZE)
+        s_identify_bomb_cache_next = 0;
+    e = &s_identify_bomb_cache[s_identify_bomb_cache_next++];
+    if (s_identify_bomb_cache_next >= IDENTIFY_BOMB_CACHE_SIZE)
+        s_identify_bomb_cache_next = 0;
+
+    e->valid = 1;
+    e->state_sig = state_sig;
+    e->has_action = (uint8)(has_action ? 1 : 0);
+    if (action)
+        e->action = *action;
+    else
+        memset(&e->action, 0, sizeof(e->action));
 }
 
 static int box_can_match_target(Position box, Position target, int require_same_id)
@@ -2433,6 +2552,39 @@ static int pick_best_adjacent_stand_by_dist(Position object_pos,
     return 1;
 }
 
+/* 基于当前 dist 图给炸弹动作一个安全下界：
+ * 炸弹动作至少要先到达某颗炸弹可推站位，因此下界为该最小站位距离。 */
+static int estimate_bomb_action_lb_by_dist(const planning_state_t *state, const int *dist)
+{
+    const int dr[4] = {-1, 1, 0, 0};
+    const int dc[4] = {0, 0, -1, 1};
+    int b, k;
+    int best = INT_MAX;
+
+    if (!state || !dist || state->bombs_cnt <= 0)
+        return INT_MAX;
+
+    for (b = 0; b < state->bombs_cnt; b++)
+    {
+        Position bomb = state->bombs_state[b];
+        for (k = 0; k < 4; k++)
+        {
+            Position stand = {(uint8)((int)bomb.row + dr[k]), (uint8)((int)bomb.col + dc[k]), 0};
+            int idx;
+            int d;
+            if (!is_valid_cell(stand))
+                continue;
+            idx = (int)stand.row * MAP_COLS + (int)stand.col;
+            d = dist[idx];
+            if (d < 0)
+                continue;
+            if (d < best)
+                best = d;
+        }
+    }
+    return best;
+}
+
 /* 根据“站位点 -> 被识别目标”的相对方向给出识别标记。 */
 static uint8 identify_marker_by_relative(Position stand, Position object_pos)
 {
@@ -2523,12 +2675,18 @@ static int identify_need_proactive_unlock(const planning_state_t *state,
                                           int target_cnt)
 {
     int i;
+    uint32 unlock_sig;
+    int cached_need = 0;
     (void)box_done;
     (void)box_cnt;
     (void)target_done;
     (void)target_cnt;
     if (!state)
         return 0;
+
+    unlock_sig = hash_unlock_signature(state);
+    if (lookup_identify_need_cache(unlock_sig, &cached_need))
+        return cached_need;
 
     for (i = 0; i < state->targets_cnt; i++)
     {
@@ -2537,6 +2695,7 @@ static int identify_need_proactive_unlock(const planning_state_t *state,
                                                  box_done,
                                                  box_cnt))
         {
+            store_identify_need_cache(unlock_sig, 1);
             return 1;
         }
     }
@@ -2545,10 +2704,12 @@ static int identify_need_proactive_unlock(const planning_state_t *state,
     {
         if (box_is_wall_stuck_no_bomb(state, state->boxes_state[i]))
         {
+            store_identify_need_cache(unlock_sig, 1);
             return 1;
         }
     }
 
+    store_identify_need_cache(unlock_sig, 0);
     return 0;
 }
 
@@ -2686,13 +2847,27 @@ static int pick_best_unlock_bomb_action_for_identify(const planning_state_t *sta
     int has_best = 0;
     int best_steps = INT_MAX;
     round_action_t best_action;
+    round_action_t cached_action;
     Position walls[MAX_UNLOCK_WALL_CANDIDATES * 2];
     int wall_cnt;
+    int cached_has_action = 0;
+    uint32 state_sig;
 
     if (!state || !out_action)
         return 0;
     if (state->bombs_cnt <= 0)
         return 0;
+
+    state_sig = hash_state_signature(state);
+    if (lookup_identify_bomb_cache(state_sig, &cached_has_action, &cached_action))
+    {
+        if (cached_has_action)
+        {
+            *out_action = cached_action;
+            return 1;
+        }
+        return 0;
+    }
 
     wall_cnt = collect_identify_wall_candidates(state,
                                                 box_done,
@@ -2702,7 +2877,10 @@ static int pick_best_unlock_bomb_action_for_identify(const planning_state_t *sta
                                                 walls,
                                                 MAX_UNLOCK_WALL_CANDIDATES * 2);
     if (wall_cnt <= 0)
+    {
+        store_identify_bomb_cache(state_sig, 0, 0);
         return 0;
+    }
 
     for (b = 0; b < state->bombs_cnt; b++)
     {
@@ -2771,9 +2949,13 @@ static int pick_best_unlock_bomb_action_for_identify(const planning_state_t *sta
     }
 
     if (!has_best)
+    {
+        store_identify_bomb_cache(state_sig, 0, 0);
         return 0;
+    }
 
     *out_action = best_action;
+    store_identify_bomb_cache(state_sig, 1, &best_action);
     return 1;
 }
 
@@ -2922,12 +3104,22 @@ static int execute_identify_plan_with_skip(const planning_state_t *initial_state
                                                      state.targets_cnt);
         if (state.bombs_cnt > 0 && (need_unlock || !found_identify))
         {
-            has_bomb_action = pick_best_unlock_bomb_action_for_identify(&state,
-                                                                         box_done,
-                                                                         state.boxes_cnt,
-                                                                         target_done,
-                                                                         state.targets_cnt,
-                                                                         &bomb_action);
+            int should_plan_bomb = 1;
+            if (found_identify)
+            {
+                int bomb_lb = estimate_bomb_action_lb_by_dist(&state, dist);
+                if (bomb_lb != INT_MAX && best_steps <= bomb_lb)
+                    should_plan_bomb = 0;
+            }
+            if (should_plan_bomb)
+            {
+                has_bomb_action = pick_best_unlock_bomb_action_for_identify(&state,
+                                                                             box_done,
+                                                                             state.boxes_cnt,
+                                                                             target_done,
+                                                                             state.targets_cnt,
+                                                                             &bomb_action);
+            }
         }
 
         /* 识别动作与炸弹动作同优先级：都可执行时按步数最短先做。 */
@@ -3057,14 +3249,14 @@ static void plan_mode_identify_auto(void)
         }
     }
 
-    /* 启发式排序：先评估更可能短的组合，尽早拿到上界用于剪枝。 */
+    /* 启发式排序：优先评估“跳过较远对象”的组合，通常更快得到较短上界以便剪枝。 */
     for (i = 0; i < combo_cnt; i++)
     {
         int j;
         int best = i;
         for (j = i + 1; j < combo_cnt; j++)
         {
-            if (combos[j].score < combos[best].score)
+            if (combos[j].score > combos[best].score)
                 best = j;
         }
         if (best != i)

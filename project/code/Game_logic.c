@@ -144,11 +144,19 @@ static int is_valid_cell(Position p)
     return (p.row < MAP_ROWS) && (p.col < MAP_COLS);
 }
 
+static int is_identification_marker(uint8 marker_id)
+{
+    return (marker_id == IDENTIFICATION_UP ||
+            marker_id == IDENTIFICATION_DOWN ||
+            marker_id == IDENTIFICATION_LEFT ||
+            marker_id == IDENTIFICATION_RIGHT);
+}
+
 static uint8 marker_priority(uint8 marker_id)
 {
     if (marker_id == BOMB_EXPLOSION)
         return 3;
-    if (marker_id == IDENTIFICATION)
+    if (is_identification_marker(marker_id))
         return 2;
     if (marker_id == TURNING_POINT)
         return 1;
@@ -2187,6 +2195,943 @@ static void append_return_to_depot(planning_state_t *state,
     state->car_state = depot;
 }
 
+/* 仅小车移动的最短路径（4邻域 BFS）。 */
+static int build_car_shortest_path(const planning_state_t *state,
+                                   Position start,
+                                   Position goal,
+                                   Position *out_path,
+                                   int max_path)
+{
+    const int dr[4] = {-1, 1, 0, 0};
+    const int dc[4] = {0, 0, -1, 1};
+    int dist[MAP_ROWS * MAP_COLS];
+    int prev[MAP_ROWS * MAP_COLS];
+    int queue[MAP_ROWS * MAP_COLS];
+    int qh = 0;
+    int qt = 0;
+    int start_idx;
+    int goal_idx;
+    int i;
+    int cur;
+    Position reverse_path[MAP_ROWS * MAP_COLS];
+    int path_len = 0;
+
+    if (!state || !out_path || max_path <= 0)
+        return 0;
+    if (!is_valid_cell(start) || !is_valid_cell(goal))
+        return 0;
+    if (is_blocked_for_return(state, goal.row, goal.col) && !same_cell(start, goal))
+        return 0;
+
+    for (i = 0; i < MAP_ROWS * MAP_COLS; i++)
+    {
+        dist[i] = -1;
+        prev[i] = -1;
+    }
+
+    start_idx = (int)start.row * MAP_COLS + (int)start.col;
+    goal_idx = (int)goal.row * MAP_COLS + (int)goal.col;
+    dist[start_idx] = 0;
+    queue[qt++] = start_idx;
+
+    while (qh < qt)
+    {
+        int idx = queue[qh++];
+        int row = idx / MAP_COLS;
+        int col = idx % MAP_COLS;
+        int k;
+
+        if (idx == goal_idx)
+            break;
+
+        for (k = 0; k < 4; k++)
+        {
+            int nr = row + dr[k];
+            int nc = col + dc[k];
+            int nidx;
+            if (nr < 0 || nr >= MAP_ROWS || nc < 0 || nc >= MAP_COLS)
+                continue;
+            if (is_blocked_for_return(state, nr, nc))
+                continue;
+            nidx = nr * MAP_COLS + nc;
+            if (dist[nidx] >= 0)
+                continue;
+            dist[nidx] = dist[idx] + 1;
+            prev[nidx] = idx;
+            queue[qt++] = nidx;
+        }
+    }
+
+    if (dist[goal_idx] < 0)
+        return 0;
+
+    cur = goal_idx;
+    while (cur >= 0 && path_len < MAP_ROWS * MAP_COLS)
+    {
+        reverse_path[path_len].row = (uint8)(cur / MAP_COLS);
+        reverse_path[path_len].col = (uint8)(cur % MAP_COLS);
+        reverse_path[path_len].id = 0;
+        path_len++;
+        if (cur == start_idx)
+            break;
+        cur = prev[cur];
+    }
+
+    if (path_len <= 0)
+        return 0;
+    if (path_len > max_path)
+        path_len = max_path;
+
+    for (i = 0; i < path_len; i++)
+    {
+        out_path[i] = reverse_path[path_len - 1 - i];
+    }
+    return path_len;
+}
+
+/* 单次 BFS 生成从 start 到全图的最短步数与前驱表，用于复用。 */
+static int build_car_distance_prev_map(const planning_state_t *state,
+                                       Position start,
+                                       int *dist,
+                                       int *prev)
+{
+    const int dr[4] = {-1, 1, 0, 0};
+    const int dc[4] = {0, 0, -1, 1};
+    int queue[MAP_ROWS * MAP_COLS];
+    int qh = 0;
+    int qt = 0;
+    int i;
+    int start_idx;
+
+    if (!state || !dist || !prev)
+        return 0;
+    if (!is_valid_cell(start))
+        return 0;
+
+    for (i = 0; i < MAP_ROWS * MAP_COLS; i++)
+    {
+        dist[i] = -1;
+        prev[i] = -1;
+    }
+
+    start_idx = (int)start.row * MAP_COLS + (int)start.col;
+    dist[start_idx] = 0;
+    queue[qt++] = start_idx;
+
+    while (qh < qt)
+    {
+        int idx = queue[qh++];
+        int row = idx / MAP_COLS;
+        int col = idx % MAP_COLS;
+        int k;
+
+        for (k = 0; k < 4; k++)
+        {
+            int nr = row + dr[k];
+            int nc = col + dc[k];
+            int nidx;
+            if (nr < 0 || nr >= MAP_ROWS || nc < 0 || nc >= MAP_COLS)
+                continue;
+            if (is_blocked_for_return(state, nr, nc))
+                continue;
+            nidx = nr * MAP_COLS + nc;
+            if (dist[nidx] >= 0)
+                continue;
+            dist[nidx] = dist[idx] + 1;
+            prev[nidx] = idx;
+            queue[qt++] = nidx;
+        }
+    }
+    return 1;
+}
+
+/* 由 prev 前驱表回溯一条最短路径。 */
+static int rebuild_car_path_from_prev(Position start,
+                                      Position goal,
+                                      const int *prev,
+                                      Position *out_path,
+                                      int max_path)
+{
+    Position reverse_path[MAP_ROWS * MAP_COLS];
+    int start_idx;
+    int goal_idx;
+    int cur;
+    int len = 0;
+    int i;
+
+    if (!prev || !out_path || max_path <= 0)
+        return 0;
+    if (!is_valid_cell(start) || !is_valid_cell(goal))
+        return 0;
+
+    start_idx = (int)start.row * MAP_COLS + (int)start.col;
+    goal_idx = (int)goal.row * MAP_COLS + (int)goal.col;
+    cur = goal_idx;
+
+    while (cur >= 0 && len < MAP_ROWS * MAP_COLS)
+    {
+        reverse_path[len].row = (uint8)(cur / MAP_COLS);
+        reverse_path[len].col = (uint8)(cur % MAP_COLS);
+        reverse_path[len].id = 0;
+        len++;
+        if (cur == start_idx)
+            break;
+        cur = prev[cur];
+    }
+
+    if (len <= 0 || cur != start_idx)
+        return 0;
+    if (len > max_path)
+        len = max_path;
+
+    for (i = 0; i < len; i++)
+    {
+        out_path[i] = reverse_path[len - 1 - i];
+    }
+    return len;
+}
+
+/* 在 dist 图上选择“对象四邻中最近站位”，避免重复求最短路。 */
+static int pick_best_adjacent_stand_by_dist(Position object_pos,
+                                            const int *dist,
+                                            Position *out_stand,
+                                            int *out_steps)
+{
+    const int dr[4] = {-1, 1, 0, 0};
+    const int dc[4] = {0, 0, -1, 1};
+    int k;
+    int best_steps = INT_MAX;
+    Position best_stand = {0, 0, 0};
+
+    if (!dist || !is_valid_cell(object_pos))
+        return 0;
+
+    for (k = 0; k < 4; k++)
+    {
+        Position stand = {(uint8)((int)object_pos.row + dr[k]), (uint8)((int)object_pos.col + dc[k]), 0};
+        int idx;
+        int steps;
+        if (!is_valid_cell(stand))
+            continue;
+        idx = (int)stand.row * MAP_COLS + (int)stand.col;
+        steps = dist[idx];
+        if (steps < 0)
+            continue;
+        if (steps < best_steps)
+        {
+            best_steps = steps;
+            best_stand = stand;
+        }
+    }
+
+    if (best_steps == INT_MAX)
+        return 0;
+    if (out_stand)
+        *out_stand = best_stand;
+    if (out_steps)
+        *out_steps = best_steps;
+    return 1;
+}
+
+/* 根据“站位点 -> 被识别目标”的相对方向给出识别标记。 */
+static uint8 identify_marker_by_relative(Position stand, Position object_pos)
+{
+    int dr = (int)object_pos.row - (int)stand.row;
+    int dc = (int)object_pos.col - (int)stand.col;
+
+    if (dr < 0)
+        return IDENTIFICATION_UP;
+    if (dr > 0)
+        return IDENTIFICATION_DOWN;
+    if (dc < 0)
+        return IDENTIFICATION_LEFT;
+    return IDENTIFICATION_RIGHT;
+}
+
+/* 无炸弹前提下，判断该格是否可作为推箱相关通行格。 */
+static int is_push_blocked_cell_no_bomb(const planning_state_t *state, Position p)
+{
+    if (!state || !is_valid_cell(p))
+        return 1;
+    if (find_position_index(state->obstacles_state, state->obstacles_cnt, p) >= 0)
+        return 1;
+    if (find_position_index(state->bombs_state, state->bombs_cnt, p) >= 0)
+        return 1;
+    return 0;
+}
+
+/* 判断箱子是否被“墙/边界”卡住到无法起推（无炸弹视角）。 */
+static int box_is_wall_stuck_no_bomb(const planning_state_t *state, Position box_pos)
+{
+    const int dr[4] = {-1, 1, 0, 0};
+    const int dc[4] = {0, 0, -1, 1};
+    int k;
+    if (!state || !is_valid_cell(box_pos))
+        return 1;
+
+    for (k = 0; k < 4; k++)
+    {
+        Position front = {(uint8)((int)box_pos.row + dr[k]), (uint8)((int)box_pos.col + dc[k]), 0};
+        Position back = {(uint8)((int)box_pos.row - dr[k]), (uint8)((int)box_pos.col - dc[k]), 0};
+        if (!is_valid_cell(front) || !is_valid_cell(back))
+            continue;
+        if (!is_push_blocked_cell_no_bomb(state, front) &&
+            !is_push_blocked_cell_no_bomb(state, back))
+        {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+/* 判断某目标点是否存在至少一个箱子可在无炸弹条件下推达。 */
+static int target_reachable_by_any_box_no_bomb(const planning_state_t *state,
+                                               Position target,
+                                               const uint8 *box_done,
+                                               int box_cnt)
+{
+    int i;
+    (void)box_done;
+    (void)box_cnt;
+    if (!state || !is_valid_cell(target))
+        return 0;
+
+    for (i = 0; i < state->boxes_cnt; i++)
+    {
+        planning_state_t simplified;
+
+        simplified = *state;
+        simplified.bombs_cnt = 0;
+        simplified.boxes_cnt = 1;
+        simplified.targets_cnt = 1;
+        simplified.boxes_state[0] = state->boxes_state[i];
+        simplified.targets_state[0] = target;
+
+        if (box_reachable_no_bomb_relaxed(&simplified, 0, target))
+            return 1;
+    }
+    return 0;
+}
+
+/* 识别阶段是否“应提前开路”：
+ * - 仍有目标点在无炸弹条件下不可由任一箱子推达；
+ * - 或仍有箱子被墙/边界卡到无法起推。 */
+static int identify_need_proactive_unlock(const planning_state_t *state,
+                                          const uint8 *box_done,
+                                          int box_cnt,
+                                          const uint8 *target_done,
+                                          int target_cnt)
+{
+    int i;
+    (void)box_done;
+    (void)box_cnt;
+    (void)target_done;
+    (void)target_cnt;
+    if (!state)
+        return 0;
+
+    for (i = 0; i < state->targets_cnt; i++)
+    {
+        if (!target_reachable_by_any_box_no_bomb(state,
+                                                 state->targets_state[i],
+                                                 box_done,
+                                                 box_cnt))
+        {
+            return 1;
+        }
+    }
+
+    for (i = 0; i < state->boxes_cnt; i++)
+    {
+        if (box_is_wall_stuck_no_bomb(state, state->boxes_state[i]))
+        {
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
+/* 规划小车到“目标点四邻任一可达格”的最短路径。 */
+static int build_best_adjacent_identify_path(const planning_state_t *state,
+                                             Position object_pos,
+                                             Position *out_path,
+                                             int max_path,
+                                             Position *out_stand)
+{
+    const int dr[4] = {-1, 1, 0, 0};
+    const int dc[4] = {0, 0, -1, 1};
+    int k;
+    int best_len = 0;
+    Position best_path[MAP_ROWS * MAP_COLS];
+    Position stand;
+
+    if (!state || !out_path || max_path <= 0)
+        return 0;
+    if (!is_valid_cell(state->car_state) || !is_valid_cell(object_pos))
+        return 0;
+
+    for (k = 0; k < 4; k++)
+    {
+        Position tmp_path[MAP_ROWS * MAP_COLS];
+        int len;
+
+        stand.row = (uint8)((int)object_pos.row + dr[k]);
+        stand.col = (uint8)((int)object_pos.col + dc[k]);
+        stand.id = 0;
+        if (!is_valid_cell(stand))
+            continue;
+
+        len = build_car_shortest_path(state,
+                                      state->car_state,
+                                      stand,
+                                      tmp_path,
+                                      MAP_ROWS * MAP_COLS);
+        if (len <= 0)
+            continue;
+
+        if (best_len == 0 || len < best_len)
+        {
+            best_len = len;
+            memcpy(best_path, tmp_path, (size_t)len * sizeof(Position));
+            if (out_stand)
+                *out_stand = stand;
+        }
+    }
+
+    if (best_len <= 0)
+        return 0;
+    if (best_len > max_path)
+        best_len = max_path;
+    memcpy(out_path, best_path, (size_t)best_len * sizeof(Position));
+    return best_len;
+}
+
+/* 为识别模式收集“值得炸开”的墙点候选。 */
+static int collect_identify_wall_candidates(const planning_state_t *state,
+                                            const uint8 *box_done,
+                                            int box_cnt,
+                                            const uint8 *target_done,
+                                            int target_cnt,
+                                            Position *out_walls,
+                                            int max_walls)
+{
+    const int dr[4] = {-1, 1, 0, 0};
+    const int dc[4] = {0, 0, -1, 1};
+    int i, k;
+    int cnt = 0;
+    (void)box_done;
+    (void)box_cnt;
+    (void)target_done;
+    (void)target_cnt;
+
+    if (!state || !out_walls || max_walls <= 0)
+        return 0;
+
+    for (i = 0; i < state->boxes_cnt; i++)
+    {
+        Position obj = state->boxes_state[i];
+        for (k = 0; k < 4; k++)
+        {
+            Position stand = {(uint8)((int)obj.row + dr[k]), (uint8)((int)obj.col + dc[k]), 0};
+            Position block_bomb;
+            if (!is_valid_cell(stand))
+                continue;
+            if (state_has_obstacle_at(state, stand))
+                append_unique_wall_candidate(out_walls, &cnt, max_walls, stand);
+            if (state_find_bomb_at(state, stand, &block_bomb))
+                append_bomb_local_unlock_walls(state, block_bomb, out_walls, &cnt, max_walls);
+        }
+    }
+
+    for (i = 0; i < state->targets_cnt; i++)
+    {
+        Position obj = state->targets_state[i];
+        for (k = 0; k < 4; k++)
+        {
+            Position stand = {(uint8)((int)obj.row + dr[k]), (uint8)((int)obj.col + dc[k]), 0};
+            Position block_bomb;
+            if (!is_valid_cell(stand))
+                continue;
+            if (state_has_obstacle_at(state, stand))
+                append_unique_wall_candidate(out_walls, &cnt, max_walls, stand);
+            if (state_find_bomb_at(state, stand, &block_bomb))
+                append_bomb_local_unlock_walls(state, block_bomb, out_walls, &cnt, max_walls);
+        }
+    }
+
+    /* 兜底扩展：即使已有局部候选，也补充全局障碍作为低优先级后备，
+     * 避免“局部看得到但全局关键墙不在候选里”导致错过必要开路。 */
+    for (i = 0; i < state->obstacles_cnt && cnt < max_walls; i++)
+        append_unique_wall_candidate(out_walls, &cnt, max_walls, state->obstacles_state[i]);
+
+    if (cnt <= 0)
+    {
+        return 0;
+    }
+
+    return cnt;
+}
+
+/* 识别模式炸弹动作选择：
+ * 当识别点都不可达时，按“最短可行动作”挑一条炸弹开路任务。 */
+static int pick_best_unlock_bomb_action_for_identify(const planning_state_t *state,
+                                                     const uint8 *box_done,
+                                                     int box_cnt,
+                                                     const uint8 *target_done,
+                                                     int target_cnt,
+                                                     round_action_t *out_action)
+{
+    int b;
+    int has_best = 0;
+    int best_steps = INT_MAX;
+    round_action_t best_action;
+    Position walls[MAX_UNLOCK_WALL_CANDIDATES * 2];
+    int wall_cnt;
+
+    if (!state || !out_action)
+        return 0;
+    if (state->bombs_cnt <= 0)
+        return 0;
+
+    wall_cnt = collect_identify_wall_candidates(state,
+                                                box_done,
+                                                box_cnt,
+                                                target_done,
+                                                target_cnt,
+                                                walls,
+                                                MAX_UNLOCK_WALL_CANDIDATES * 2);
+    if (wall_cnt <= 0)
+        return 0;
+
+    for (b = 0; b < state->bombs_cnt; b++)
+    {
+        Position primary_bomb = state->bombs_state[b];
+        Position support_all[MAX_BOMBS];
+        int support_all_cnt = build_support_bombs_except_primary(state, primary_bomb, support_all);
+        int w;
+
+        for (w = 0; w < wall_cnt; w++)
+        {
+            path_plan_result plan;
+            int steps;
+            int used_support = 0;
+            Position support_pos = {255, 255, 0};
+            round_action_t candidate;
+            int lb = manhattan_cell_dist(state->car_state, primary_bomb) +
+                     manhattan_cell_dist(primary_bomb, walls[w]);
+
+            if (has_best && lb >= best_steps)
+                continue;
+
+            steps = plan_bomb_task_in_state(state,
+                                            primary_bomb,
+                                            walls[w],
+                                            0,
+                                            0,
+                                            &plan,
+                                            &used_support,
+                                            &support_pos);
+            if (steps <= 0)
+            {
+                steps = plan_bomb_task_in_state(state,
+                                                primary_bomb,
+                                                walls[w],
+                                                support_all,
+                                                support_all_cnt,
+                                                &plan,
+                                                &used_support,
+                                                &support_pos);
+            }
+            if (steps <= 0)
+                continue;
+
+            memset(&candidate, 0, sizeof(candidate));
+            candidate.valid = 1;
+            candidate.action_type = ACTION_BOMB;
+            candidate.steps = steps;
+            candidate.box_index = -1;
+            candidate.pair_index = -1;
+            candidate.plan = plan;
+            candidate.has_support_bomb_pos = (uint8)(used_support ? 1 : 0);
+            candidate.support_bomb_pos = support_pos;
+            candidate.has_primary_bomb_pos = 1;
+            candidate.primary_bomb_pos = primary_bomb;
+
+            if (!has_best ||
+                candidate.steps < best_steps ||
+                (candidate.steps == best_steps &&
+                 candidate.has_support_bomb_pos < best_action.has_support_bomb_pos))
+            {
+                has_best = 1;
+                best_steps = candidate.steps;
+                best_action = candidate;
+            }
+        }
+    }
+
+    if (!has_best)
+        return 0;
+
+    *out_action = best_action;
+    return 1;
+}
+
+/* 执行一次识别规划（可指定跳过一个箱子和一个目标点）。 */
+static int execute_identify_plan_with_skip(const planning_state_t *initial_state,
+                                           int skip_box_index,
+                                           int skip_target_index,
+                                           int max_len_bound,
+                                           Position *out_path,
+                                           int *out_len,
+                                           planning_state_t *out_state)
+{
+    planning_state_t state;
+    Position merged_path[MAX_CAR_PATH];
+    int merged_len = 0;
+    uint8 box_done[MAX_BOXES];
+    uint8 target_done[MAX_TARGETS];
+    int pending_boxes;
+    int pending_targets;
+    int safety_round = 0;
+
+    if (!initial_state || !out_path || !out_len || !out_state)
+        return 0;
+    if (max_len_bound <= 0)
+        max_len_bound = INT_MAX;
+
+    state = *initial_state;
+    memset(box_done, 0, sizeof(box_done));
+    memset(target_done, 0, sizeof(target_done));
+
+    pending_boxes = state.boxes_cnt;
+    pending_targets = state.targets_cnt;
+
+    if (skip_box_index >= 0 && skip_box_index < state.boxes_cnt)
+    {
+        box_done[skip_box_index] = 1;
+        pending_boxes--;
+    }
+    if (skip_target_index >= 0 && skip_target_index < state.targets_cnt)
+    {
+        target_done[skip_target_index] = 1;
+        pending_targets--;
+    }
+
+    while ((pending_boxes > 0 || pending_targets > 0) && safety_round < 512)
+    {
+        int i;
+        int dist[MAP_ROWS * MAP_COLS];
+        int prev[MAP_ROWS * MAP_COLS];
+        int found_identify = 0;
+        int need_unlock = 0;
+        int has_bomb_action = 0;
+        round_action_t bomb_action;
+        int best_steps = INT_MAX;
+        int best_kind = -1; /* 0:box, 1:target */
+        int best_index = -1;
+        Position best_path[MAP_ROWS * MAP_COLS];
+        int best_len = 0;
+        Position best_stand = {0, 0, 0};
+        Position best_object = {0, 0, 0};
+
+        if (merged_len >= max_len_bound)
+            return 0;
+        if (!build_car_distance_prev_map(&state, state.car_state, dist, prev))
+            break;
+
+        for (i = 0; i < state.boxes_cnt; i++)
+        {
+            Position stand;
+            int steps;
+
+            if (box_done[i])
+                continue;
+            if (!pick_best_adjacent_stand_by_dist(state.boxes_state[i],
+                                                  dist,
+                                                  &stand,
+                                                  &steps))
+                continue;
+            if (!found_identify || steps < best_steps)
+            {
+                found_identify = 1;
+                best_steps = steps;
+                best_kind = 0;
+                best_index = i;
+                best_len = 0;
+                best_stand = stand;
+                best_object = state.boxes_state[i];
+            }
+        }
+
+        for (i = 0; i < state.targets_cnt; i++)
+        {
+            Position stand;
+            int steps;
+
+            if (target_done[i])
+                continue;
+            if (!pick_best_adjacent_stand_by_dist(state.targets_state[i],
+                                                  dist,
+                                                  &stand,
+                                                  &steps))
+                continue;
+            if (!found_identify || steps < best_steps)
+            {
+                found_identify = 1;
+                best_steps = steps;
+                best_kind = 1;
+                best_index = i;
+                best_len = 0;
+                best_stand = stand;
+                best_object = state.targets_state[i];
+            }
+        }
+
+        if (found_identify)
+        {
+            best_len = rebuild_car_path_from_prev(state.car_state,
+                                                  best_stand,
+                                                  prev,
+                                                  best_path,
+                                                  MAP_ROWS * MAP_COLS);
+            if (best_len <= 0)
+            {
+                /* 兜底：极端情况下退回旧实现，保证功能稳定。 */
+                best_len = build_best_adjacent_identify_path(&state,
+                                                             best_object,
+                                                             best_path,
+                                                             MAP_ROWS * MAP_COLS,
+                                                             &best_stand);
+            }
+            if (best_len <= 0)
+            {
+                found_identify = 0;
+            }
+            else
+            {
+                best_steps = best_len - 1;
+            }
+        }
+
+        /* 与推箱模式对齐：若检测到未来推箱关键瓶颈，则提前把炸弹开路纳入候选。 */
+        need_unlock = identify_need_proactive_unlock(&state,
+                                                     box_done,
+                                                     state.boxes_cnt,
+                                                     target_done,
+                                                     state.targets_cnt);
+        if (state.bombs_cnt > 0 && (need_unlock || !found_identify))
+        {
+            has_bomb_action = pick_best_unlock_bomb_action_for_identify(&state,
+                                                                         box_done,
+                                                                         state.boxes_cnt,
+                                                                         target_done,
+                                                                         state.targets_cnt,
+                                                                         &bomb_action);
+        }
+
+        /* 识别动作与炸弹动作同优先级：都可执行时按步数最短先做。 */
+        if (found_identify && best_len > 0 &&
+            (!has_bomb_action || best_steps <= bomb_action.steps))
+        {
+            uint8 id_mark = identify_marker_by_relative(best_stand, best_object);
+            best_path[best_len - 1].id = merge_marker(best_path[best_len - 1].id, id_mark);
+            append_segment_path(merged_path, &merged_len, best_path, best_len);
+            state.car_state = best_path[best_len - 1];
+
+            if (best_kind == 0 && best_index >= 0 && best_index < state.boxes_cnt && !box_done[best_index])
+            {
+                box_done[best_index] = 1;
+                pending_boxes--;
+            }
+            else if (best_kind == 1 && best_index >= 0 && best_index < state.targets_cnt && !target_done[best_index])
+            {
+                target_done[best_index] = 1;
+                pending_targets--;
+            }
+
+            if (merged_len >= max_len_bound)
+                return 0;
+            safety_round++;
+            continue;
+        }
+
+        if (has_bomb_action)
+        {
+            apply_bomb_action_result(&state, &bomb_action, merged_path, &merged_len);
+            if (merged_len >= max_len_bound)
+                return 0;
+            safety_round++;
+            continue;
+        }
+
+        break;
+    }
+
+    if (pending_boxes > 0 || pending_targets > 0)
+        return 0;
+
+    *out_len = merged_len;
+    memcpy(out_path, merged_path, (size_t)merged_len * sizeof(Position));
+    *out_state = state;
+    return 1;
+}
+
+/* 模式3：自动识别路径规划
+ * 目标：
+ * 1) 结束后不返场；
+ * 2) 若开始有 n 对箱子/目标，则仅识别 n-1 个箱子和 n-1 个目标；
+ * 3) 在所有“跳过1箱子+1目标”的组合里，选择总路径点最短的方案。 */
+static void plan_mode_identify_auto(void)
+{
+    typedef struct
+    {
+        uint8 b_skip;
+        uint8 t_skip;
+        int score;
+    } identify_skip_combo_t;
+
+    planning_state_t init_state;
+    Position best_path[MAX_CAR_PATH];
+    planning_state_t best_state;
+    int best_len = INT_MAX;
+    int has_best = 0;
+    identify_skip_combo_t combos[MAX_BOXES * MAX_TARGETS];
+    int combo_cnt = 0;
+    int dist[MAP_ROWS * MAP_COLS];
+    int prev_dummy[MAP_ROWS * MAP_COLS];
+    int box_score[MAX_BOXES];
+    int target_score[MAX_TARGETS];
+    int b_skip, t_skip;
+    int i;
+
+    reset_planning_caches();
+    load_state_from_globals(&init_state);
+
+    if (init_state.boxes_cnt <= 0 || init_state.targets_cnt <= 0)
+    {
+        Car_path_count = 0;
+        return;
+    }
+
+    for (i = 0; i < MAX_BOXES; i++)
+        box_score[i] = 10000;
+    for (i = 0; i < MAX_TARGETS; i++)
+        target_score[i] = 10000;
+
+    if (build_car_distance_prev_map(&init_state, init_state.car_state, dist, prev_dummy))
+    {
+        for (i = 0; i < init_state.boxes_cnt; i++)
+        {
+            Position stand;
+            int steps;
+            if (pick_best_adjacent_stand_by_dist(init_state.boxes_state[i], dist, &stand, &steps))
+                box_score[i] = steps;
+        }
+        for (i = 0; i < init_state.targets_cnt; i++)
+        {
+            Position stand;
+            int steps;
+            if (pick_best_adjacent_stand_by_dist(init_state.targets_state[i], dist, &stand, &steps))
+                target_score[i] = steps;
+        }
+    }
+    else
+    {
+        for (i = 0; i < init_state.boxes_cnt; i++)
+            box_score[i] = manhattan_cell_dist(init_state.car_state, init_state.boxes_state[i]);
+        for (i = 0; i < init_state.targets_cnt; i++)
+            target_score[i] = manhattan_cell_dist(init_state.car_state, init_state.targets_state[i]);
+    }
+
+    for (b_skip = 0; b_skip < init_state.boxes_cnt; b_skip++)
+    {
+        for (t_skip = 0; t_skip < init_state.targets_cnt; t_skip++)
+        {
+            if (combo_cnt >= (MAX_BOXES * MAX_TARGETS))
+                break;
+            combos[combo_cnt].b_skip = (uint8)b_skip;
+            combos[combo_cnt].t_skip = (uint8)t_skip;
+            combos[combo_cnt].score = box_score[b_skip] + target_score[t_skip];
+            combo_cnt++;
+        }
+    }
+
+    /* 启发式排序：先评估更可能短的组合，尽早拿到上界用于剪枝。 */
+    for (i = 0; i < combo_cnt; i++)
+    {
+        int j;
+        int best = i;
+        for (j = i + 1; j < combo_cnt; j++)
+        {
+            if (combos[j].score < combos[best].score)
+                best = j;
+        }
+        if (best != i)
+        {
+            identify_skip_combo_t tmp = combos[i];
+            combos[i] = combos[best];
+            combos[best] = tmp;
+        }
+    }
+
+    for (i = 0; i < combo_cnt; i++)
+    {
+        Position tmp_path[MAX_CAR_PATH];
+        planning_state_t tmp_state;
+        int tmp_len = 0;
+
+        if (!execute_identify_plan_with_skip(&init_state,
+                                             (int)combos[i].b_skip,
+                                             (int)combos[i].t_skip,
+                                             has_best ? best_len : INT_MAX,
+                                             tmp_path,
+                                             &tmp_len,
+                                             &tmp_state))
+        {
+            continue;
+        }
+
+        if (!has_best || tmp_len < best_len)
+        {
+            has_best = 1;
+            best_len = tmp_len;
+            best_state = tmp_state;
+            memcpy(best_path, tmp_path, (size_t)tmp_len * sizeof(Position));
+        }
+    }
+
+    /* 兜底：若 n-1 组合均失败，退回“全识别”方案。 */
+    if (!has_best)
+    {
+        Position tmp_path[MAX_CAR_PATH];
+        planning_state_t tmp_state;
+        int tmp_len = 0;
+        if (execute_identify_plan_with_skip(&init_state,
+                                            -1,
+                                            -1,
+                                            has_best ? best_len : INT_MAX,
+                                            tmp_path,
+                                            &tmp_len,
+                                            &tmp_state))
+        {
+            has_best = 1;
+            best_len = tmp_len;
+            best_state = tmp_state;
+            memcpy(best_path, tmp_path, (size_t)tmp_len * sizeof(Position));
+        }
+    }
+
+    if (!has_best)
+    {
+        Car_path_count = 0;
+        return;
+    }
+
+    save_state_to_globals(&best_state);
+    save_path_to_globals(best_path, best_len);
+}
+
 /* 模式1（不按 ID 配对）：
  * 每轮在所有箱子中选择当前总代价最小的可执行任务。 */
 static void plan_mode1_simple(void)
@@ -2334,5 +3279,5 @@ void Plan_path_Mode2(void)
 
 void Plan_path_Identify(void)
 {
-
+    plan_mode_identify_auto();
 }

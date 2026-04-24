@@ -43,11 +43,15 @@ typedef enum
  *
  * CONTROL_PLAN_MODE_2:
  * 在 CONTROL_STAGE_PLAN_PATH 阶段调用 Plan_path_Mode2()。
+ *
+ * CONTROL_PLAN_MODE_IDENTIFY:
+ * 在 CONTROL_STAGE_PLAN_PATH 阶段调用 Plan_path_Identify()。
  */
 typedef enum
 {
     CONTROL_PLAN_MODE_1 = 0U,
-    CONTROL_PLAN_MODE_2 = 1U
+    CONTROL_PLAN_MODE_2 = 1U,
+    CONTROL_PLAN_MODE_IDENTIFY = 2U
 } control_plan_mode_t;
 
 extern control_stage_t g_control_stage;

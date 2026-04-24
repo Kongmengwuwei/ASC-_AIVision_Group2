@@ -1,6 +1,10 @@
 ﻿#include "Algorithm.h"
 #include <string.h>
 
+#ifndef IDENTIFICATION
+#define IDENTIFICATION IDENTIFICATION_UP
+#endif
+
 /*
  * Algorithm.c：底层路径搜索模块
  * 1) 2D A*：用于小车在静态地图中的最短路；

@@ -123,7 +123,7 @@ static size_t g_exec_steps = 0U;
  * - 0：尚未得到有效路径
  */
 static uint8 g_plan_ready = 0U;
-/* 规划模式标志位：可通过 control_set_plan_mode() 在 Mode1/Mode2 间切换。 */
+/* 规划模式标志位：可通过 control_set_plan_mode() 在 Mode1/Mode2/Identify 间切换。 */
 static control_plan_mode_t g_control_plan_mode = CONTROL_PLAN_MODE_1;
 
 /**
@@ -560,6 +560,10 @@ static uint8 control_plan_path(void)
     {
         Plan_path_Mode1();
     }
+    else if (g_control_plan_mode == CONTROL_PLAN_MODE_IDENTIFY)
+    {
+        Plan_path_Identify();
+    }
     else
     {
         Plan_path_Mode2();
@@ -874,6 +878,10 @@ void control_set_plan_mode(control_plan_mode_t mode)
     if (mode == CONTROL_PLAN_MODE_1)
     {
         g_control_plan_mode = CONTROL_PLAN_MODE_1;
+    }
+    else if (mode == CONTROL_PLAN_MODE_IDENTIFY)
+    {
+        g_control_plan_mode = CONTROL_PLAN_MODE_IDENTIFY;
     }
     else
     {

@@ -171,10 +171,7 @@ static int is_valid_cell(Position p)
 
 static int is_identification_marker(uint8 marker_id)
 {
-    return (marker_id == IDENTIFICATION_UP ||
-            marker_id == IDENTIFICATION_DOWN ||
-            marker_id == IDENTIFICATION_LEFT ||
-            marker_id == IDENTIFICATION_RIGHT);
+    return marker_id == IDENTIFICATION;
 }
 
 static uint8 marker_priority(uint8 marker_id)
@@ -2585,19 +2582,12 @@ static int estimate_bomb_action_lb_by_dist(const planning_state_t *state, const 
     return best;
 }
 
-/* 根据“站位点 -> 被识别目标”的相对方向给出识别标记。 */
+/* 识别点统一标记为 IDENTIFICATION，不再区分方向。 */
 static uint8 identify_marker_by_relative(Position stand, Position object_pos)
 {
-    int dr = (int)object_pos.row - (int)stand.row;
-    int dc = (int)object_pos.col - (int)stand.col;
-
-    if (dr < 0)
-        return IDENTIFICATION_UP;
-    if (dr > 0)
-        return IDENTIFICATION_DOWN;
-    if (dc < 0)
-        return IDENTIFICATION_LEFT;
-    return IDENTIFICATION_RIGHT;
+    (void)stand;
+    (void)object_pos;
+    return IDENTIFICATION;
 }
 
 /* 无炸弹前提下，判断该格是否可作为推箱相关通行格。 */

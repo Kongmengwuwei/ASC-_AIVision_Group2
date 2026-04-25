@@ -18,10 +18,7 @@
 //路径特殊点ID定义
 #define BOMB_EXPLOSION 1        // 炸弹爆炸位置标记
 #define TURNING_POINT  2        // 路径转折点标记
-#define IDENTIFICATION_UP 3     // 识别目标在上方位置标记
-#define IDENTIFICATION_DOWN 4   // 识别目标在下方位置标记
-#define IDENTIFICATION_LEFT 5   // 识别目标在左方位置标记
-#define IDENTIFICATION_RIGHT 6  // 识别目标在右方位置标记
+#define IDENTIFICATION 3        // 识别位置标记
 
 typedef struct
 {

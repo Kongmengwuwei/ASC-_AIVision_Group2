@@ -45,7 +45,7 @@ typedef enum
  * 在 CONTROL_STAGE_PLAN_PATH 阶段调用 Plan_path_Mode2()。
  *
  * CONTROL_PLAN_MODE_IDENTIFY:
- * 在 CONTROL_STAGE_PLAN_PATH 阶段调用 Plan_path_Identify()。
+ * 预留值。识别流程由控制状态机首轮自动执行，不通过该标志手动切换。
  */
 typedef enum
 {

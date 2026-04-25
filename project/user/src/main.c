@@ -60,23 +60,23 @@ int main(void)
   // 模块初始化
   system_delay_ms(300); // 等待主板其他外设上电完成
   Menu_Init();          // 菜单系统初始化(包含按键，显示屏等相关初始化)
-  // uart_blob_init();     // 摄像头串口接收与解析模块初始化
-  // flash_init();         // Flash模块初始化
-  // motor_init();         // 电机控制模块初始化
-  // encoder_init();       // 电机编码器模块初始化
-  // imu963ra_init();      // IMU模块初始化
-  // Attitude_Init();      // 姿态解算模块初始化
+  uart_blob_init();     // 摄像头串口接收与解析模块初始化
+  flash_init();         // Flash模块初始化
+  motor_init();         // 电机控制模块初始化
+  encoder_init();       // 电机编码器模块初始化
+  imu963ra_init();      // IMU模块初始化
+  Attitude_Init();      // 姿态解算模块初始化
 
-  // PID_Init(&ULpid, &ULPidInitStruct);
-  // PID_Init(&URpid, &URPidInitStruct);
-  // PID_Init(&DLpid, &DLPidInitStruct);
-  // PID_Init(&DRpid, &DRPidInitStruct);
-  // PID_Init(&Yawpid, &YawPidInitStruct);
-  // PID_Init(&Camera_x_pid, &Camera_x_PidInitStruct);
-  // PID_Init(&Camera_y_pid, &Camera_y_PidInitStruct);
-  // PID_Init(&Gyro_rotate_pid, &Gyro_Rotate_PidInitStruct);
-  // Kinematics_Init();
-  // path_follow_init(GRID_SIZE_M, (float)pulse_per_meter);
+  PID_Init(&ULpid, &ULPidInitStruct);
+  PID_Init(&URpid, &URPidInitStruct);
+  PID_Init(&DLpid, &DLPidInitStruct);
+  PID_Init(&DRpid, &DRPidInitStruct);
+  PID_Init(&Yawpid, &YawPidInitStruct);
+  PID_Init(&Camera_x_pid, &Camera_x_PidInitStruct);
+  PID_Init(&Camera_y_pid, &Camera_y_PidInitStruct);
+  PID_Init(&Gyro_rotate_pid, &Gyro_Rotate_PidInitStruct);
+  Kinematics_Init();
+  path_follow_init(GRID_SIZE_M, (float)pulse_per_meter);
 
   // 中断初始化
   pit_ms_init(PIT_CH0, 20);                  // PIT0 periodic interrupt: 20 ms.
@@ -101,7 +101,7 @@ int main(void)
   targets[0].id = 0;
   targets[1].id = 1;
   targets[2].id = 2;
-
+	
   Test_Data_Load();  // 数据加载到内部测试地图
   Plan_path_Identify(); // 路径规划
 
@@ -122,7 +122,14 @@ int main(void)
     /*以上为算法测试*/
 
     // 控制主流程：初始定位 -> 摄像头数据到齐 -> 路径规划 -> 路径执行 -> 执行中动态校正
-    // control_process();
+    control_process();
+
+    boxes[0].id = 0;
+    boxes[1].id = 1;
+    boxes[2].id = 2;
+    targets[0].id = 0;
+    targets[1].id = 1;
+    targets[2].id = 2;
 
     // 菜单系统主循环调用：响应按键事件，更新显示等。
     Menu_Switch();
@@ -141,67 +148,67 @@ void pit_0_handler(void)
 /* PIT1 周期中断（10ms）：编码器采样 + 速度环控制输出。 */
 void pit_1_handler(void)
 {
-  // // 采样编码器
-  // encoder_get();
+  // 采样编码器
+  encoder_get();
 
-  // if (control_is_path_plan_paused())
-  // {
-  //   // 规划保护期内，清零速度目标，避免执行层继续输出旧命令
-  //   memset(speed_three_array, 0, sizeof(speed_three_array));
-  //   memset(speed_encoder, 0, sizeof(speed_encoder));
-  // }
-  // else
-  // {
-  //   // 正常状态下按路径/姿态策略更新目标速度
-  //   distance_speed_strategy();
-  // }
+  if (control_is_path_plan_paused())
+  {
+    // 规划保护期内，清零速度目标，避免执行层继续输出旧命令
+    memset(speed_three_array, 0, sizeof(speed_three_array));
+    memset(speed_encoder, 0, sizeof(speed_encoder));
+  }
+  else
+  {
+    // 正常状态下按路径/姿态策略更新目标速度
+    distance_speed_strategy();
+  }
 
-  // // 电机输出控制：按运行/停车标志选择控制分支
-  // if (car_go_flag == 1 && car_stop_flag == 0)
-  // {
-  //   if (wait_stop == 1) // 兼容历史“等待完全停稳”模式。
-  //   {
-  //     motor_control(car_stop_array);
-  //     // 四轮都接近静止后清空 PID 累积并断 PWM
-  //     if (abs(up_L_all) < 5 && abs(up_R_all) < 5 && abs(down_L_all) < 5 && abs(down_R_all) < 5)
-  //     {
-  //       PID_Clear(&ULpid);
-  //       PID_Clear(&URpid);
-  //       PID_Clear(&DLpid);
-  //       PID_Clear(&DRpid);
-  //       motor_pwm(0, 0, 0, 0);
-  //     }
-  //   }
-  //   else
-  //   {
-  //     motor_control(speed_encoder);
-  //   }
-  // }
-  // else if (car_go_flag == 1 && car_stop_flag == 1)
-  // {
-  //   // 运行态但要求急停，统一下发 0 速度
-  //   motor_control(car_stop_array);
-  //   if (abs(up_L_all) < 5 && abs(up_R_all) < 5 && abs(down_L_all) < 5 && abs(down_R_all) < 5)
-  //   {
-  //     PID_Clear(&ULpid);
-  //     PID_Clear(&URpid);
-  //     PID_Clear(&DLpid);
-  //     PID_Clear(&DRpid);
-  //     motor_pwm(0, 0, 0, 0);
-  //   }
-  // }
-  // else
-  // {
-  //   // 未进入运行态，直接关闭四路 PWM
-  //   motor_pwm(0, 0, 0, 0);
-  // }
+  // 电机输出控制：按运行/停车标志选择控制分支
+  if (car_go_flag == 1 && car_stop_flag == 0)
+  {
+    if (wait_stop == 1) // 兼容历史“等待完全停稳”模式。
+    {
+      motor_control(car_stop_array);
+      // 四轮都接近静止后清空 PID 累积并断 PWM
+      if (abs(up_L_all) < 5 && abs(up_R_all) < 5 && abs(down_L_all) < 5 && abs(down_R_all) < 5)
+      {
+        PID_Clear(&ULpid);
+        PID_Clear(&URpid);
+        PID_Clear(&DLpid);
+        PID_Clear(&DRpid);
+        motor_pwm(0, 0, 0, 0);
+      }
+    }
+    else
+    {
+      motor_control(speed_encoder);
+    }
+  }
+  else if (car_go_flag == 1 && car_stop_flag == 1)
+  {
+    // 运行态但要求急停，统一下发 0 速度
+    motor_control(car_stop_array);
+    if (abs(up_L_all) < 5 && abs(up_R_all) < 5 && abs(down_L_all) < 5 && abs(down_R_all) < 5)
+    {
+      PID_Clear(&ULpid);
+      PID_Clear(&URpid);
+      PID_Clear(&DLpid);
+      PID_Clear(&DRpid);
+      motor_pwm(0, 0, 0, 0);
+    }
+  }
+  else
+  {
+    // 未进入运行态，直接关闭四路 PWM
+    motor_pwm(0, 0, 0, 0);
+  }
 }
 
 /* PIT2 周期中断（2ms）：姿态解算 */
 void pit_2_handler(void)
 {
-  // /* 规划保护期内不更新姿态，避免重规划期间姿态状态与路径状态不同步。 */
-  // if (control_is_path_plan_paused())
-  //   return;
-  // Attitude_Calculate();
+  /* 规划保护期内不更新姿态，避免重规划期间姿态状态与路径状态不同步。 */
+  if (control_is_path_plan_paused())
+    return;
+  Attitude_Calculate();
 }

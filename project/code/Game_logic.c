@@ -3159,6 +3159,32 @@ static int execute_identify_plan_with_skip(const planning_state_t *initial_state
     return 1;
 }
 
+/* 识别模式收尾约束：
+ * 终点不能与任何目标点重合；若重合则按来路退回一格。 */
+static void adjust_identify_end_avoid_target_overlap(planning_state_t *state,
+                                                     Position *path,
+                                                     int *path_len)
+{
+    Position last;
+    Position prev;
+
+    if (!state || !path || !path_len || *path_len <= 0)
+        return;
+
+    last = path[*path_len - 1];
+    if (find_position_index(state->targets_state, state->targets_cnt, last) < 0)
+        return;
+
+    if (*path_len >= 2 && *path_len < MAX_CAR_PATH)
+    {
+        prev = path[*path_len - 2];
+        prev.id = 0;
+        path[*path_len] = prev;
+        (*path_len)++;
+        state->car_state = prev;
+    }
+}
+
 /* 模式3：自动识别路径规划
  * 目标：
  * 1) 结束后不返场；
@@ -3310,6 +3336,7 @@ static void plan_mode_identify_auto(void)
         return;
     }
 
+    adjust_identify_end_avoid_target_overlap(&best_state, best_path, &best_len);
     save_state_to_globals(&best_state);
     save_path_to_globals(best_path, best_len);
 }

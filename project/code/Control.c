@@ -21,6 +21,7 @@
  * 用于初始定位和等待地图阶段，采样频率较低即可满足需求�?
  */
 #define CONTROL_REQ_CAR_PERIOD_WAIT 20U
+#define CONTROL_REQ_CAR_PERIOD_LOCALIZE_FAST 8U
 
 
 /**
@@ -29,6 +30,7 @@
  * 使用简单平均抑制单帧抖动。达到该采样数后才完成初始定位�?
  */
 #define CONTROL_LOCALIZE_MIN_SAMPLES 2U
+#define CONTROL_RELOCALIZE_MIN_SAMPLES_PUSHBOX 4U
 
 /**
  * @brief 起步位移距离（米）�?
@@ -173,6 +175,7 @@ static control_map_dir_t g_body_map_dir = CONTROL_MAP_DIR_RIGHT;
 
 static uint8 g_wait_new_map_frame = 0U;
 static uint8 g_wait_map_frame_base = 0U;
+static uint8 g_relocalize_force_fresh_pose = 0U;
 
 static size_t g_identify_segment_start_idx = 0U;
 static size_t g_identify_endpoint_indices[MAX_CAR_PATH] = {0U};
@@ -583,7 +586,6 @@ static void finish_identify_flow_and_relocalize(void)
     path_follow_set_pause_indices(NULL, 0U, 0U);
 
     g_control_flow_phase = CONTROL_FLOW_PUSHBOX;
-    g_body_map_dir = CONTROL_MAP_DIR_RIGHT;
     g_plan_ready = 0U;
     reset_identify_runtime_state();
     reset_localization_accumulator();
@@ -591,6 +593,7 @@ static void finish_identify_flow_and_relocalize(void)
     g_car_req_loop_cnt = 0U;
     g_wait_new_map_frame = 0U;
     g_wait_map_frame_base = 0U;
+    g_relocalize_force_fresh_pose = 1U;
     map_data_updated = false;
     car_pose_updated = false;
     g_control_stage = CONTROL_STAGE_STARTUP_LOCALIZE;
@@ -1084,18 +1087,28 @@ static void handle_prestart_move(void)
 static void handle_startup_localization(void)
 {
     uint8 accept_sample = 0U;
+    uint8 min_samples = CONTROL_LOCALIZE_MIN_SAMPLES;
     float cam_x_m = 0.0f;
     float cam_y_m = 0.0f;
     float cam_yaw_deg = 0.0f;
 
-    request_car_periodic(CONTROL_REQ_CAR_PERIOD_WAIT);
+    if (g_control_flow_phase == CONTROL_FLOW_PUSHBOX)
+    {
+        request_car_periodic(CONTROL_REQ_CAR_PERIOD_LOCALIZE_FAST);
+        min_samples = CONTROL_RELOCALIZE_MIN_SAMPLES_PUSHBOX;
+    }
+    else
+    {
+        request_car_periodic(CONTROL_REQ_CAR_PERIOD_WAIT);
+    }
 
     if (car_pose_updated)
     {
         car_pose_updated = false;
         accept_sample = 1U;
     }
-    else if (g_localize_sample_count == 0U && car_pose_ready)
+    else if (!g_relocalize_force_fresh_pose &&
+             g_localize_sample_count == 0U && car_pose_ready)
     {
         /* 启动初期若已有缓存帧，允许先吃一帧，避免死等 updated 标志�?*/
         accept_sample = 1U;
@@ -1115,7 +1128,7 @@ static void handle_startup_localization(void)
     g_localize_sum_yaw_deg += cam_yaw_deg;
     g_localize_sample_count++;
 
-    if (g_localize_sample_count < CONTROL_LOCALIZE_MIN_SAMPLES)
+    if (g_localize_sample_count < min_samples)
     {
         return;
     }
@@ -1130,7 +1143,11 @@ static void handle_startup_localization(void)
         g_map_right_yaw_deg = g_localize_sum_yaw_deg / (float)g_localize_sample_count;
         g_map_right_yaw_ready = 1U;
     }
-    g_body_map_dir = CONTROL_MAP_DIR_RIGHT;
+    g_relocalize_force_fresh_pose = 0U;
+    if (g_control_flow_phase == CONTROL_FLOW_IDENTIFY)
+    {
+        g_body_map_dir = CONTROL_MAP_DIR_RIGHT;
+    }
     mark_wait_new_map_frame();
     g_control_stage = CONTROL_STAGE_WAIT_CAMERA_DATA;
 }
@@ -1335,6 +1352,7 @@ void control_init(void)
     g_body_map_dir = CONTROL_MAP_DIR_RIGHT;
     g_wait_new_map_frame = 0U;
     g_wait_map_frame_base = 0U;
+    g_relocalize_force_fresh_pose = 0U;
     reset_identify_runtime_state();
 
     g_map_req_loop_cnt = 0U;
@@ -1365,6 +1383,7 @@ void control_restart(void)
     g_body_map_dir = CONTROL_MAP_DIR_RIGHT;
     g_wait_new_map_frame = 0U;
     g_wait_map_frame_base = 0U;
+    g_relocalize_force_fresh_pose = 0U;
     reset_identify_runtime_state();
     g_map_req_loop_cnt = 0U;
     g_car_req_loop_cnt = 0U;

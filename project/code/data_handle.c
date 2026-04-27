@@ -48,6 +48,43 @@ uint8_t map_frame_count = 0U;
 uint8_t car_frame_count = 0U;
 bool uart_rx_overflow_flag = false;
 
+/*
+ * ===================== 图案/数字识别摄像头串口模块 =====================
+ *
+ * 这一组变量只服务 loadmode.py 的 NUM/IMG 行协议，和上面的地图/车姿
+ * $MAP/$CAR/$END 流式协议完全分开：
+ * - 使用独立 UART（默认 UART4）；
+ * - 使用独立 FIFO；
+ * - 使用独立行缓冲；
+ * - 使用独立结果结构和 updated 标志。
+ *
+ * 这样即使视觉识别端返回 "NUM,3,96\n" 这种短行，也不会被地图解析器当成
+ * 噪声塞进 stream_buf；反过来地图大包也不会污染视觉识别结果。
+ */
+static uint8_t vision_uart_fifo_buf[VISION_FIFO_SIZE];
+static fifo_struct vision_uart_data_fifo;
+static uint8_t vision_fifo_read_buf[VISION_FIFO_READ_BUF_SIZE] = {0};
+static char vision_line_buf[VISION_LINE_BUF_SIZE] = {0};
+static uint16_t vision_line_len = 0U;
+static bool vision_drop_until_line_end = false;
+
+bool vision_data_processing_enabled = false;
+
+VisionRecognitionResult vision_num_result = {0};
+bool vision_num_result_ready = false;
+bool vision_num_result_updated = false;
+
+VisionRecognitionResult vision_img_result = {0};
+bool vision_img_result_ready = false;
+bool vision_img_result_updated = false;
+
+uint8_t vision_num_frame_count = 0U;
+uint8_t vision_img_frame_count = 0U;
+uint8_t vision_bad_line_count = 0U;
+bool vision_uart_rx_overflow_flag = false;
+bool vision_line_overflow_flag = false;
+bool vision_parse_error_flag = false;
+
 /* 在字节缓冲区内查找 pattern，返回首下标，失败返回 -1 */
 static int find_pattern(const uint8_t *buf, uint16_t len, const char *pattern, uint16_t pattern_len)
 {
@@ -588,6 +625,318 @@ static void parse_packets(void)
     }
 }
 
+/* ASCII 空白判断：视觉协议只允许英文逗号和数字/标签，按 ASCII 处理最稳妥。 */
+static bool vision_is_ascii_space(char ch)
+{
+    return (' ' == ch || '\t' == ch || '\r' == ch || '\n' == ch);
+}
+
+/* 原地去掉字符串首尾空白，返回裁剪后的起始地址。 */
+static char *vision_trim_ascii_in_place(char *text)
+{
+    char *end = NULL;
+
+    if (text == NULL) {
+        return NULL;
+    }
+
+    while ('\0' != *text && vision_is_ascii_space(*text)) {
+        text++;
+    }
+
+    if ('\0' == *text) {
+        return text;
+    }
+
+    end = text + strlen(text) - 1U;
+    while (end > text && vision_is_ascii_space(*end)) {
+        *end = '\0';
+        end--;
+    }
+
+    return text;
+}
+
+/* 将小写英文字母转成大写，避免 OpenMV 端调试时误发小写命令导致解析失败。 */
+static char vision_ascii_upper(char ch)
+{
+    if (ch >= 'a' && ch <= 'z') {
+        return (char)(ch - ('a' - 'A'));
+    }
+    return ch;
+}
+
+/* 解析视觉结果行的第一个字段：只接受 NUM 或 IMG。 */
+static VisionRecognitionType vision_parse_type_field(const char *cmd)
+{
+    if (cmd == NULL || '\0' == cmd[0] || '\0' == cmd[1] || '\0' == cmd[2] || '\0' != cmd[3]) {
+        return VISION_RECOGNITION_NONE;
+    }
+
+    if ('N' == vision_ascii_upper(cmd[0]) &&
+        'U' == vision_ascii_upper(cmd[1]) &&
+        'M' == vision_ascii_upper(cmd[2])) {
+        return VISION_RECOGNITION_NUM;
+    }
+
+    if ('I' == vision_ascii_upper(cmd[0]) &&
+        'M' == vision_ascii_upper(cmd[1]) &&
+        'G' == vision_ascii_upper(cmd[2])) {
+        return VISION_RECOGNITION_IMG;
+    }
+
+    return VISION_RECOGNITION_NONE;
+}
+
+/* 严格解析十进制整数：字段里除了首尾空白，不允许混入其它字符。 */
+static bool vision_parse_int32_text(const char *text, int32 *value)
+{
+    char *end_ptr = NULL;
+    long temp = 0;
+
+    if (text == NULL || value == NULL || '\0' == *text) {
+        return false;
+    }
+
+    temp = strtol(text, &end_ptr, 10);
+    if (end_ptr == text) {
+        return false;
+    }
+
+    while ('\0' != *end_ptr && vision_is_ascii_space(*end_ptr)) {
+        end_ptr++;
+    }
+
+    if ('\0' != *end_ptr) {
+        return false;
+    }
+
+    *value = (int32)temp;
+    return true;
+}
+
+/* 记录一行视觉识别坏包，计数溢出不影响功能，只作为调试线索。 */
+static void vision_note_bad_line(void)
+{
+    vision_parse_error_flag = true;
+    vision_bad_line_count++;
+}
+
+/* 初始化单个视觉识别结果结构，label_value 预置为 -1 便于上层判断“非数字标签”。 */
+static void vision_reset_result(VisionRecognitionResult *result, VisionRecognitionType type)
+{
+    if (result == NULL) {
+        return;
+    }
+
+    memset(result, 0, sizeof(*result));
+    result->type = type;
+    result->label_value = -1;
+    result->score = -1;
+    result->success = false;
+}
+
+/* 提交一条已经校验过的 NUM/IMG 结果，更新对应的 ready/updated 标志。 */
+static void vision_store_result(VisionRecognitionType type,
+                                const char *label,
+                                int32 label_value,
+                                bool label_is_number,
+                                int16 score,
+                                bool success)
+{
+    VisionRecognitionResult *dst = NULL;
+
+    if (VISION_RECOGNITION_NUM == type) {
+        dst = &vision_num_result;
+    } else if (VISION_RECOGNITION_IMG == type) {
+        dst = &vision_img_result;
+    } else {
+        return;
+    }
+
+    vision_reset_result(dst, type);
+    if (label != NULL) {
+        strncpy(dst->label, label, VISION_LABEL_MAX_LEN - 1U);
+        dst->label[VISION_LABEL_MAX_LEN - 1U] = '\0';
+    }
+    dst->label_value = label_value;
+    dst->label_is_number = label_is_number;
+    dst->score = score;
+    dst->success = success;
+
+    if (VISION_RECOGNITION_NUM == type) {
+        vision_num_result_ready = true;
+        vision_num_result_updated = true;
+        vision_num_frame_count++;
+    } else {
+        vision_img_result_ready = true;
+        vision_img_result_updated = true;
+        vision_img_frame_count++;
+    }
+}
+
+/*
+ * 解析 loadmode.py 返回的一整行：
+ *
+ * 正常格式：
+ *   NUM,标签,置信度
+ *   IMG,标签,置信度
+ *
+ * 失败格式：
+ *   NUM,-1,-1
+ *   IMG,-1,-1
+ *
+ * 注意：这里不解析地图帧，也不查找 $MAP/$END。视觉识别是行协议，
+ * 地图/车姿是包协议，两者保持独立，避免互相误判。
+ */
+static void vision_parse_line(char *line)
+{
+    char *cmd = NULL;
+    char *label = NULL;
+    char *score_text = NULL;
+    char *comma1 = NULL;
+    char *comma2 = NULL;
+    VisionRecognitionType type = VISION_RECOGNITION_NONE;
+    int32 score_value = 0;
+    int32 label_value = -1;
+    bool label_is_number = false;
+    bool success = true;
+
+    if (line == NULL) {
+        return;
+    }
+
+    cmd = vision_trim_ascii_in_place(line);
+    if (cmd == NULL || '\0' == *cmd) {
+        return;
+    }
+
+    comma1 = strchr(cmd, ',');
+    if (comma1 == NULL) {
+        vision_note_bad_line();
+        return;
+    }
+    *comma1 = '\0';
+
+    label = comma1 + 1U;
+    comma2 = strchr(label, ',');
+    if (comma2 == NULL) {
+        vision_note_bad_line();
+        return;
+    }
+    *comma2 = '\0';
+    score_text = comma2 + 1U;
+
+    if (strchr(score_text, ',') != NULL) {
+        vision_note_bad_line();
+        return;
+    }
+
+    cmd = vision_trim_ascii_in_place(cmd);
+    label = vision_trim_ascii_in_place(label);
+    score_text = vision_trim_ascii_in_place(score_text);
+    if (cmd == NULL || label == NULL || score_text == NULL || '\0' == *label) {
+        vision_note_bad_line();
+        return;
+    }
+
+    type = vision_parse_type_field(cmd);
+    if (VISION_RECOGNITION_NONE == type) {
+        vision_note_bad_line();
+        return;
+    }
+
+    if (!vision_parse_int32_text(score_text, &score_value)) {
+        vision_note_bad_line();
+        return;
+    }
+
+    label_is_number = vision_parse_int32_text(label, &label_value);
+    if (!label_is_number) {
+        label_value = -1;
+    }
+
+    if (0 == strcmp(label, "-1") && -1 == score_value) {
+        success = false;
+    } else if (score_value < 0 || score_value > 100) {
+        vision_note_bad_line();
+        return;
+    }
+
+    vision_store_result(type, label, label_value, label_is_number, (int16)score_value, success);
+}
+
+/*
+ * 逐字节拼接视觉识别行。
+ *
+ * 串口中断只负责把字节放入 FIFO，真正的行拼接在主循环完成：
+ * - 收到 '\n' 或 '\r' 时认为一行结束；
+ * - 空行直接忽略，兼容 "\r\n"；
+ * - 行太长时丢弃到下一次换行，防止异常数据撑爆缓冲区。
+ */
+static void vision_feed_rx_byte(uint8_t data)
+{
+    if ('\r' == data || '\n' == data) {
+        if (vision_drop_until_line_end) {
+            vision_drop_until_line_end = false;
+            vision_line_len = 0U;
+            return;
+        }
+
+        if (vision_line_len > 0U) {
+            vision_line_buf[vision_line_len] = '\0';
+            vision_parse_line(vision_line_buf);
+            memset(vision_line_buf, 0, sizeof(vision_line_buf));
+            vision_line_len = 0U;
+        }
+        return;
+    }
+
+    if (vision_drop_until_line_end || '\0' == data) {
+        return;
+    }
+
+    if (vision_line_len >= (VISION_LINE_BUF_SIZE - 1U)) {
+        vision_line_len = 0U;
+        vision_drop_until_line_end = true;
+        vision_line_overflow_flag = true;
+        vision_note_bad_line();
+        return;
+    }
+
+    vision_line_buf[vision_line_len++] = (char)data;
+}
+
+/* 视觉识别串口/FIFO/状态初始化。由 uart_blob_init 统一调用，外部不需要再单独初始化。 */
+static void vision_uart_init_internal(void)
+{
+    fifo_init(&vision_uart_data_fifo, FIFO_DATA_8BIT, vision_uart_fifo_buf, VISION_FIFO_SIZE);
+    fifo_clear(&vision_uart_data_fifo);
+    uart_init(VISION_UART_INDEX, VISION_UART_BAUDRATE, VISION_UART_TX_PIN, VISION_UART_RX_PIN);
+    uart_rx_interrupt(VISION_UART_INDEX, ZF_ENABLE);
+
+    memset(vision_fifo_read_buf, 0, sizeof(vision_fifo_read_buf));
+    memset(vision_line_buf, 0, sizeof(vision_line_buf));
+    vision_line_len = 0U;
+    vision_drop_until_line_end = false;
+
+    vision_reset_result(&vision_num_result, VISION_RECOGNITION_NUM);
+    vision_num_result_ready = false;
+    vision_num_result_updated = false;
+
+    vision_reset_result(&vision_img_result, VISION_RECOGNITION_IMG);
+    vision_img_result_ready = false;
+    vision_img_result_updated = false;
+
+    vision_num_frame_count = 0U;
+    vision_img_frame_count = 0U;
+    vision_bad_line_count = 0U;
+    vision_uart_rx_overflow_flag = false;
+    vision_line_overflow_flag = false;
+    vision_parse_error_flag = false;
+    vision_data_processing_enabled = true;
+}
+
 /* 初始化串口/FIFO/状态变量，开启串口接收中断 */
 void uart_blob_init(void)
 {
@@ -610,6 +959,9 @@ void uart_blob_init(void)
     car_frame_count = 0U;
     uart_rx_overflow_flag = false;
     uart_data_processing_enabled = true;
+
+    /* 视觉识别串口独立初始化：不复用地图/车姿 FIFO，也不复用 stream_buf。 */
+    vision_uart_init_internal();
 }
 
 /*
@@ -647,6 +999,43 @@ void process_blob_data(void)
     parse_packets();
 }
 
+/*
+ * 视觉识别数据处理入口：
+ * - 从视觉识别专用 FIFO 取出 UART4 中断收到的字节；
+ * - 按行拼接 NUM/IMG 返回结果；
+ * - 解析成功后只更新 vision_num_result 或 vision_img_result；
+ * - 不访问 map_data/car_pose，也不调用 parse_packets。
+ */
+void process_vision_data(void)
+{
+    uint32_t read_len = 0U;
+    uint32_t i = 0U;
+
+    if (!vision_data_processing_enabled) {
+        return;
+    }
+
+    read_len = fifo_used(&vision_uart_data_fifo);
+    if (0U == read_len) {
+        return;
+    }
+
+    if (read_len > VISION_FIFO_READ_BUF_SIZE) {
+        read_len = VISION_FIFO_READ_BUF_SIZE;
+    }
+
+    if (FIFO_SUCCESS != fifo_read_buffer(&vision_uart_data_fifo,
+                                         vision_fifo_read_buf,
+                                         &read_len,
+                                         FIFO_READ_AND_CLEAN)) {
+        return;
+    }
+
+    for (i = 0U; i < read_len; i++) {
+        vision_feed_rx_byte(vision_fifo_read_buf[i]);
+    }
+}
+
 /* 串口接收中断处理：只做“取 1 字节 + 写 FIFO”，失败则置溢出标志 */
 void uart_blob_rx_interrupt_handler(void)
 {
@@ -655,6 +1044,20 @@ void uart_blob_rx_interrupt_handler(void)
     uart_query_byte(UART_INDEX, &data);
     if (FIFO_SUCCESS != fifo_write_buffer(&uart_data_fifo, &data, 1U)) {
         uart_rx_overflow_flag = true;
+    }
+}
+
+/* 视觉识别串口接收中断：只收字节入视觉 FIFO，所有解析都留给 process_vision_data。 */
+void vision_uart_rx_interrupt_handler(void)
+{
+    uint8_t data = 0U;
+
+    if (!uart_query_byte(VISION_UART_INDEX, &data)) {
+        return;
+    }
+
+    if (FIFO_SUCCESS != fifo_write_buffer(&vision_uart_data_fifo, &data, 1U)) {
+        vision_uart_rx_overflow_flag = true;
     }
 }
 
@@ -668,4 +1071,76 @@ void uart_send_map_request(void)
 void uart_send_car_request(void)
 {
     uart_write_string(UART_INDEX, UART_CMD_CAR);
+}
+
+/* 向视觉识别端请求一次数字识别。发送前清掉半包数据，避免旧残留误触发本次结果。 */
+void uart_send_vision_num_request(void)
+{
+    vision_clear_pending_data();
+    uart_write_string(VISION_UART_INDEX, UART_CMD_VISION_NUM);
+}
+
+/* 向视觉识别端请求一次图案识别。发送前清掉半包数据，避免旧残留误触发本次结果。 */
+void uart_send_vision_img_request(void)
+{
+    vision_clear_pending_data();
+    uart_write_string(VISION_UART_INDEX, UART_CMD_VISION_IMG);
+}
+
+/* 清空视觉识别接收缓存和“有新结果”标志，但保留最近一次结果内容供调试查看。 */
+void vision_clear_pending_data(void)
+{
+    fifo_clear(&vision_uart_data_fifo);
+    memset(vision_fifo_read_buf, 0, sizeof(vision_fifo_read_buf));
+    memset(vision_line_buf, 0, sizeof(vision_line_buf));
+    vision_line_len = 0U;
+    vision_drop_until_line_end = false;
+    vision_num_result_updated = false;
+    vision_img_result_updated = false;
+}
+
+/* 仅读取最近一次数字识别响应；没有收到过响应时返回 false。 */
+bool vision_get_latest_num_result(VisionRecognitionResult *out_result)
+{
+    if (out_result == NULL || !vision_num_result_ready) {
+        return false;
+    }
+
+    *out_result = vision_num_result;
+    return true;
+}
+
+/* 仅读取最近一次图案识别响应；没有收到过响应时返回 false。 */
+bool vision_get_latest_img_result(VisionRecognitionResult *out_result)
+{
+    if (out_result == NULL || !vision_img_result_ready) {
+        return false;
+    }
+
+    *out_result = vision_img_result;
+    return true;
+}
+
+/* 读取最新数字识别响应，并清除 updated，适合“一次请求等待一次结果”的流程。 */
+bool vision_take_num_result(VisionRecognitionResult *out_result)
+{
+    if (out_result == NULL || !vision_num_result_updated) {
+        return false;
+    }
+
+    *out_result = vision_num_result;
+    vision_num_result_updated = false;
+    return true;
+}
+
+/* 读取最新图案识别响应，并清除 updated，适合“一次请求等待一次结果”的流程。 */
+bool vision_take_img_result(VisionRecognitionResult *out_result)
+{
+    if (out_result == NULL || !vision_img_result_updated) {
+        return false;
+    }
+
+    *out_result = vision_img_result;
+    vision_img_result_updated = false;
+    return true;
 }

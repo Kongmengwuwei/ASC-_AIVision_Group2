@@ -119,6 +119,9 @@ void LPUART4_IRQHandler(void)
 {
     if(kLPUART_RxDataRegFullFlag & LPUART_GetStatusFlags(LPUART4))
     {
+        extern void vision_uart_rx_interrupt_handler(void);
+        vision_uart_rx_interrupt_handler();
+
         // Ω” ’÷–∂œ 
     }
         

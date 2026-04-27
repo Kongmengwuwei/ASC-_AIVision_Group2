@@ -1403,6 +1403,7 @@ void control_process(void)
 
     /* 统一串口解析入口：每圈都先消�?FIFO 并更新地�?位姿缓存�?*/
     process_blob_data();
+    process_vision_data();
 
     switch (g_control_stage)
     {

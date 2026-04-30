@@ -93,6 +93,11 @@ typedef struct
 
 #define CONTROL_IDENTIFY_MAX_TARGETS_PER_POINT (MAX_BOXES + MAX_TARGETS)
 #define CONTROL_IDENTIFY_YAW_ALIGN_TOL_DEG 5.0f
+#define CONTROL_IDENTIFY_RECOG_TIMEOUT_LOOPS 250U
+#define CONTROL_IDENTIFY_ID_UNASSIGNED 0xFFU
+#define CONTROL_IDENTIFY_ID_MIN 0U
+#define CONTROL_IDENTIFY_ID_MAX 9U
+#define CONTROL_IDENTIFY_ID_ELIMINATE 10U
 
 typedef enum
 {
@@ -121,6 +126,14 @@ typedef struct
     control_identify_obj_t obj_type;
     uint8 obj_index;
 } control_identify_target_t;
+
+typedef struct
+{
+    uint8 valid;
+    uint8 row;
+    uint8 col;
+    uint8 id;
+} control_identify_id_record_t;
 
 typedef enum
 {
@@ -193,6 +206,15 @@ static control_identify_exec_state_t g_identify_exec_state = CONTROL_IDENTIFY_EX
 
 static uint8 g_identified_box_flags[MAX_BOXES] = {0U};
 static uint8 g_identified_target_flags[MAX_TARGETS] = {0U};
+static uint8 g_identify_box_id_assigned[MAX_BOXES] = {0U};
+static uint8 g_identify_target_id_assigned[MAX_TARGETS] = {0U};
+static uint8 g_identify_recog_waiting = 0U;
+static uint16 g_identify_recog_wait_loops = 0U;
+static VisionRecognitionType g_identify_recog_wait_type = VISION_RECOGNITION_NONE;
+
+static control_identify_id_record_t g_saved_box_id_records[MAX_BOXES] = {{0}};
+static control_identify_id_record_t g_saved_target_id_records[MAX_TARGETS] = {{0}};
+static uint8 g_saved_identify_ids_ready = 0U;
 
 /**
  * @brief 初始定位累计样本数�?
@@ -297,9 +319,14 @@ static void reset_identify_runtime_state(void)
     g_identify_target_cursor = 0U;
     g_identify_rotate_started = 0U;
     g_identify_exec_state = CONTROL_IDENTIFY_EXEC_IDLE;
+    g_identify_recog_waiting = 0U;
+    g_identify_recog_wait_loops = 0U;
+    g_identify_recog_wait_type = VISION_RECOGNITION_NONE;
 
     memset(g_identified_box_flags, 0, sizeof(g_identified_box_flags));
     memset(g_identified_target_flags, 0, sizeof(g_identified_target_flags));
+    memset(g_identify_box_id_assigned, 0, sizeof(g_identify_box_id_assigned));
+    memset(g_identify_target_id_assigned, 0, sizeof(g_identify_target_id_assigned));
 }
 
 static void inverse_remap_exec_path_point(Position *p)
@@ -386,10 +413,360 @@ static float map_dir_to_yaw_deg(control_map_dir_t dir)
     return wrap_yaw_deg_local(base_yaw + delta_yaw);
 }
 
-static void identify_action_stub(const control_identify_target_t *target)
+static void clear_saved_identify_ids(void)
 {
-    (void)target;
-    /* TODO: 鍦ㄨ繖閲屾帴鍏ュ叿浣撶殑璇嗗埆绠楁硶�?*/
+    memset(g_saved_box_id_records, 0, sizeof(g_saved_box_id_records));
+    memset(g_saved_target_id_records, 0, sizeof(g_saved_target_id_records));
+    g_saved_identify_ids_ready = 0U;
+}
+
+static uint8 identify_result_to_valid_id(const VisionRecognitionResult *result, uint8 *id_out)
+{
+    if (result == NULL || id_out == NULL)
+    {
+        return 0U;
+    }
+    if (!result->success || !result->label_is_number)
+    {
+        return 0U;
+    }
+    if (result->label_value < (int32)CONTROL_IDENTIFY_ID_MIN ||
+        result->label_value > (int32)CONTROL_IDENTIFY_ID_MAX)
+    {
+        return 0U;
+    }
+
+    *id_out = (uint8)result->label_value;
+    return 1U;
+}
+
+static void save_identify_ids_from_current_map(void)
+{
+    size_t i = 0U;
+    size_t box_cnt = Boxes_count;
+    size_t target_cnt = Targets_count;
+
+    if (box_cnt > MAX_BOXES)
+    {
+        box_cnt = MAX_BOXES;
+    }
+    if (target_cnt > MAX_TARGETS)
+    {
+        target_cnt = MAX_TARGETS;
+    }
+
+    memset(g_saved_box_id_records, 0, sizeof(g_saved_box_id_records));
+    memset(g_saved_target_id_records, 0, sizeof(g_saved_target_id_records));
+
+    for (i = 0U; i < box_cnt; i++)
+    {
+        g_saved_box_id_records[i].valid = 1U;
+        g_saved_box_id_records[i].row = boxes[i].row;
+        g_saved_box_id_records[i].col = boxes[i].col;
+        g_saved_box_id_records[i].id = boxes[i].id;
+    }
+
+    for (i = 0U; i < target_cnt; i++)
+    {
+        g_saved_target_id_records[i].valid = 1U;
+        g_saved_target_id_records[i].row = targets[i].row;
+        g_saved_target_id_records[i].col = targets[i].col;
+        g_saved_target_id_records[i].id = targets[i].id;
+    }
+
+    g_saved_identify_ids_ready = 1U;
+}
+
+static uint8 lookup_saved_id_by_cell(const control_identify_id_record_t *records,
+                                     size_t record_capacity,
+                                     uint8 row,
+                                     uint8 col,
+                                     uint8 *id_out)
+{
+    size_t i = 0U;
+
+    if (records == NULL || id_out == NULL)
+    {
+        return 0U;
+    }
+
+    for (i = 0U; i < record_capacity; i++)
+    {
+        if (!records[i].valid)
+        {
+            continue;
+        }
+        if (records[i].row == row && records[i].col == col)
+        {
+            *id_out = records[i].id;
+            return 1U;
+        }
+    }
+    return 0U;
+}
+
+static void apply_saved_identify_ids_to_current_map(void)
+{
+    size_t i = 0U;
+    size_t box_cnt = Boxes_count;
+    size_t target_cnt = Targets_count;
+    uint8 id = 0U;
+
+    if (!g_saved_identify_ids_ready)
+    {
+        return;
+    }
+
+    if (box_cnt > MAX_BOXES)
+    {
+        box_cnt = MAX_BOXES;
+    }
+    if (target_cnt > MAX_TARGETS)
+    {
+        target_cnt = MAX_TARGETS;
+    }
+
+    for (i = 0U; i < box_cnt; i++)
+    {
+        if (lookup_saved_id_by_cell(g_saved_box_id_records, MAX_BOXES, boxes[i].row, boxes[i].col, &id))
+        {
+            boxes[i].id = id;
+        }
+    }
+
+    for (i = 0U; i < target_cnt; i++)
+    {
+        if (lookup_saved_id_by_cell(g_saved_target_id_records, MAX_TARGETS, targets[i].row, targets[i].col, &id))
+        {
+            targets[i].id = id;
+        }
+    }
+}
+
+static void finalize_identify_ids_for_pushbox(void)
+{
+    uint8 box_id_count[256] = {0U};
+    uint8 target_id_count[256] = {0U};
+    size_t unassigned_box_indices[MAX_BOXES] = {0U};
+    size_t unassigned_target_indices[MAX_TARGETS] = {0U};
+    size_t unassigned_box_count = 0U;
+    size_t unassigned_target_count = 0U;
+    size_t box_cnt = Boxes_count;
+    size_t target_cnt = Targets_count;
+    size_t i = 0U;
+    size_t box_cursor = 0U;
+    size_t target_cursor = 0U;
+    uint8 id = 0U;
+    uint8 known_ids_paired = 1U;
+    uint8 has_any_assigned = 0U;
+    uint16 next_auto_id = CONTROL_IDENTIFY_ID_ELIMINATE;
+
+    if (box_cnt > MAX_BOXES)
+    {
+        box_cnt = MAX_BOXES;
+    }
+    if (target_cnt > MAX_TARGETS)
+    {
+        target_cnt = MAX_TARGETS;
+    }
+
+    for (i = 0U; i < box_cnt; i++)
+    {
+        if (g_identify_box_id_assigned[i] && boxes[i].id != CONTROL_IDENTIFY_ID_UNASSIGNED)
+        {
+            box_id_count[boxes[i].id]++;
+            has_any_assigned = 1U;
+        }
+        else if (unassigned_box_count < MAX_BOXES)
+        {
+            boxes[i].id = CONTROL_IDENTIFY_ID_UNASSIGNED;
+            unassigned_box_indices[unassigned_box_count++] = i;
+        }
+    }
+
+    for (i = 0U; i < target_cnt; i++)
+    {
+        if (g_identify_target_id_assigned[i] && targets[i].id != CONTROL_IDENTIFY_ID_UNASSIGNED)
+        {
+            target_id_count[targets[i].id]++;
+            has_any_assigned = 1U;
+        }
+        else if (unassigned_target_count < MAX_TARGETS)
+        {
+            targets[i].id = CONTROL_IDENTIFY_ID_UNASSIGNED;
+            unassigned_target_indices[unassigned_target_count++] = i;
+        }
+    }
+
+    for (id = CONTROL_IDENTIFY_ID_MIN; id <= CONTROL_IDENTIFY_ID_MAX; id++)
+    {
+        if (box_id_count[id] != target_id_count[id])
+        {
+            known_ids_paired = 0U;
+            break;
+        }
+    }
+
+    if (has_any_assigned &&
+        known_ids_paired &&
+        unassigned_box_count == unassigned_target_count)
+    {
+        for (i = 0U; i < unassigned_box_count; i++)
+        {
+            size_t idx = unassigned_box_indices[i];
+            boxes[idx].id = CONTROL_IDENTIFY_ID_ELIMINATE;
+            g_identify_box_id_assigned[idx] = 1U;
+        }
+        for (i = 0U; i < unassigned_target_count; i++)
+        {
+            size_t idx = unassigned_target_indices[i];
+            targets[idx].id = CONTROL_IDENTIFY_ID_ELIMINATE;
+            g_identify_target_id_assigned[idx] = 1U;
+        }
+        save_identify_ids_from_current_map();
+        return;
+    }
+
+    for (id = CONTROL_IDENTIFY_ID_MIN; id <= CONTROL_IDENTIFY_ID_MAX; id++)
+    {
+        while (box_id_count[id] > target_id_count[id] &&
+               target_cursor < unassigned_target_count)
+        {
+            size_t target_idx = unassigned_target_indices[target_cursor++];
+            targets[target_idx].id = id;
+            g_identify_target_id_assigned[target_idx] = 1U;
+            target_id_count[id]++;
+        }
+
+        while (target_id_count[id] > box_id_count[id] &&
+               box_cursor < unassigned_box_count)
+        {
+            size_t box_idx = unassigned_box_indices[box_cursor++];
+            boxes[box_idx].id = id;
+            g_identify_box_id_assigned[box_idx] = 1U;
+            box_id_count[id]++;
+        }
+    }
+
+    while (box_cursor < unassigned_box_count && target_cursor < unassigned_target_count)
+    {
+        size_t box_idx = unassigned_box_indices[box_cursor++];
+        size_t target_idx = unassigned_target_indices[target_cursor++];
+
+        while (next_auto_id < 255U &&
+               (box_id_count[next_auto_id] > 0U || target_id_count[next_auto_id] > 0U))
+        {
+            next_auto_id++;
+        }
+        if (next_auto_id >= 255U)
+        {
+            next_auto_id = CONTROL_IDENTIFY_ID_ELIMINATE;
+        }
+
+        boxes[box_idx].id = (uint8)next_auto_id;
+        targets[target_idx].id = (uint8)next_auto_id;
+        g_identify_box_id_assigned[box_idx] = 1U;
+        g_identify_target_id_assigned[target_idx] = 1U;
+        box_id_count[next_auto_id]++;
+        target_id_count[next_auto_id]++;
+        next_auto_id++;
+    }
+
+    while (box_cursor < unassigned_box_count)
+    {
+        size_t box_idx = unassigned_box_indices[box_cursor++];
+        boxes[box_idx].id = CONTROL_IDENTIFY_ID_ELIMINATE;
+        g_identify_box_id_assigned[box_idx] = 1U;
+    }
+
+    while (target_cursor < unassigned_target_count)
+    {
+        size_t target_idx = unassigned_target_indices[target_cursor++];
+        targets[target_idx].id = CONTROL_IDENTIFY_ID_ELIMINATE;
+        g_identify_target_id_assigned[target_idx] = 1U;
+    }
+
+    save_identify_ids_from_current_map();
+}
+
+static uint8 identify_action_stub(const control_identify_target_t *target)
+{
+    VisionRecognitionResult result = {0};
+    uint8 recognized_id = 0U;
+
+    if (target == NULL)
+    {
+        return 1U;
+    }
+
+    /* ʶ�����ڼ䱣��ͣ��������ͼ�񶶶��� */
+    car_go_flag = 1U;
+    car_stop_flag = 1U;
+
+    if (!g_identify_recog_waiting)
+    {
+        g_identify_recog_wait_loops = 0U;
+        if (target->obj_type == CONTROL_IDENTIFY_OBJ_BOX)
+        {
+            uart_send_vision_img_request();
+            g_identify_recog_wait_type = VISION_RECOGNITION_IMG;
+        }
+        else
+        {
+            uart_send_vision_num_request();
+            g_identify_recog_wait_type = VISION_RECOGNITION_NUM;
+        }
+        g_identify_recog_waiting = 1U;
+        return 0U;
+    }
+
+    if (g_identify_recog_wait_type == VISION_RECOGNITION_IMG)
+    {
+        if (vision_take_img_result(&result))
+        {
+            if (target->obj_type == CONTROL_IDENTIFY_OBJ_BOX &&
+                target->obj_index < MAX_BOXES &&
+                target->obj_index < Boxes_count &&
+                identify_result_to_valid_id(&result, &recognized_id))
+            {
+                boxes[target->obj_index].id = recognized_id;
+                g_identify_box_id_assigned[target->obj_index] = 1U;
+            }
+            g_identify_recog_waiting = 0U;
+            g_identify_recog_wait_loops = 0U;
+            g_identify_recog_wait_type = VISION_RECOGNITION_NONE;
+            return 1U;
+        }
+    }
+    else if (g_identify_recog_wait_type == VISION_RECOGNITION_NUM)
+    {
+        if (vision_take_num_result(&result))
+        {
+            if (target->obj_type == CONTROL_IDENTIFY_OBJ_TARGET &&
+                target->obj_index < MAX_TARGETS &&
+                target->obj_index < Targets_count &&
+                identify_result_to_valid_id(&result, &recognized_id))
+            {
+                targets[target->obj_index].id = recognized_id;
+                g_identify_target_id_assigned[target->obj_index] = 1U;
+            }
+            g_identify_recog_waiting = 0U;
+            g_identify_recog_wait_loops = 0U;
+            g_identify_recog_wait_type = VISION_RECOGNITION_NONE;
+            return 1U;
+        }
+    }
+
+    g_identify_recog_wait_loops++;
+    if (g_identify_recog_wait_loops >= CONTROL_IDENTIFY_RECOG_TIMEOUT_LOOPS)
+    {
+        g_identify_recog_waiting = 0U;
+        g_identify_recog_wait_loops = 0U;
+        g_identify_recog_wait_type = VISION_RECOGNITION_NONE;
+        return 1U;
+    }
+
+    return 0U;
 }
 
 static void identify_sort_targets_by_direction(void)
@@ -584,6 +961,10 @@ static void finish_identify_flow_and_relocalize(void)
     car_stop_flag = 0U;
     path_follow_set_path(NULL, 0U);
     path_follow_set_pause_indices(NULL, 0U, 0U);
+
+    /* ʶ��׶ν�����ͳһ��ȫ����/Ŀ��� ID�������浽���湩�ض�λ��ָ��� */
+    finalize_identify_ids_for_pushbox();
+    vision_clear_pending_data();
 
     g_control_flow_phase = CONTROL_FLOW_PUSHBOX;
     g_plan_ready = 0U;
@@ -992,7 +1373,9 @@ static uint8 control_plan_path(void)
     /* 根据 planmode 标志位选择规划方案，不做自动模式回退�?*/
     if (g_control_flow_phase == CONTROL_FLOW_IDENTIFY)
     {
+        clear_saved_identify_ids();
         reset_identify_runtime_state();
+        vision_clear_pending_data();
         Plan_path_Identify();
     }
     else if (g_control_plan_mode == CONTROL_PLAN_MODE_1)
@@ -1183,6 +1566,11 @@ static void handle_wait_camera_data(void)
         if (!g_wait_new_map_frame || map_frame_count != g_wait_map_frame_base)
         {
             g_wait_new_map_frame = 0U;
+            if (g_control_flow_phase == CONTROL_FLOW_PUSHBOX)
+            {
+                /* �ض�λ���õ��µ�ͼʱ����ʶ��׶εõ��� ID ��д����ǰ objects�� */
+                apply_saved_identify_ids_to_current_map();
+            }
             map_data_updated = false;
             g_control_stage = CONTROL_STAGE_PLAN_PATH;
         }
@@ -1265,6 +1653,9 @@ static void handle_identify_execute_path(void)
         {
             g_identify_rotate_started = 0U;
             g_body_map_dir = curr_target->face_dir;
+            g_identify_recog_waiting = 0U;
+            g_identify_recog_wait_loops = 0U;
+            g_identify_recog_wait_type = VISION_RECOGNITION_NONE;
             g_identify_exec_state = CONTROL_IDENTIFY_EXEC_DO_RECOGNIZE;
             return;
         }
@@ -1286,6 +1677,9 @@ static void handle_identify_execute_path(void)
 
         g_identify_rotate_started = 0U;
         g_body_map_dir = curr_target->face_dir;
+        g_identify_recog_waiting = 0U;
+        g_identify_recog_wait_loops = 0U;
+        g_identify_recog_wait_type = VISION_RECOGNITION_NONE;
         g_identify_exec_state = CONTROL_IDENTIFY_EXEC_DO_RECOGNIZE;
         break;
 
@@ -1293,7 +1687,10 @@ static void handle_identify_execute_path(void)
         if (g_identify_target_cursor < g_identify_target_count)
         {
             curr_target = &g_identify_targets[g_identify_target_cursor];
-            identify_action_stub(curr_target);
+            if (!identify_action_stub(curr_target))
+            {
+                return;
+            }
 
             if (curr_target->obj_type == CONTROL_IDENTIFY_OBJ_BOX &&
                 curr_target->obj_index < MAX_BOXES)
@@ -1321,7 +1718,7 @@ static void handle_identify_execute_path(void)
         break;
 
     case CONTROL_IDENTIFY_EXEC_ROTATE_BACK:
-        /* 不再强制回正到“地图右向”，保持当前车头朝向直接进入下一段。 */
+        /* 不再强制回正到“地图右向”，保持当前车头朝向直接进入下一段�?*/
         g_identify_rotate_started = 0U;
         if (!advance_identify_endpoint_or_finish())
         {
@@ -1354,6 +1751,8 @@ void control_init(void)
     g_wait_map_frame_base = 0U;
     g_relocalize_force_fresh_pose = 0U;
     reset_identify_runtime_state();
+    clear_saved_identify_ids();
+    vision_clear_pending_data();
 
     g_map_req_loop_cnt = 0U;
     g_car_req_loop_cnt = 0U;
@@ -1385,6 +1784,8 @@ void control_restart(void)
     g_wait_map_frame_base = 0U;
     g_relocalize_force_fresh_pose = 0U;
     reset_identify_runtime_state();
+    clear_saved_identify_ids();
+    vision_clear_pending_data();
     g_map_req_loop_cnt = 0U;
     g_car_req_loop_cnt = 0U;
 
@@ -1490,6 +1891,10 @@ void control_process(void)
 
         if (map_data_updated)
         {
+            if (g_control_flow_phase == CONTROL_FLOW_PUSHBOX)
+            {
+                apply_saved_identify_ids_to_current_map();
+            }
             map_data_updated = false;
             g_control_stage = CONTROL_STAGE_PLAN_PATH;
         }
@@ -1520,7 +1925,7 @@ void control_set_plan_mode(control_plan_mode_t mode)
     }
     else
     {
-        /* ʶ�����̶̹��������Զ�ִ�У��˴�����������׶� Mode1/Mode2�� */
+        /* ʶ�����̶̹��������Զ�ִ�У��˴�����������׶�?Mode1/Mode2�� */
         g_control_plan_mode = CONTROL_PLAN_MODE_2;
     }
 }

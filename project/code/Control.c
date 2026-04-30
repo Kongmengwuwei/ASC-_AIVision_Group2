@@ -5,6 +5,15 @@
 #include <math.h>
 #include <string.h>
 
+/*
+ * 手动开关：是否在控制流程中使用视觉定位。
+ * 1：使用视觉 CAR 位姿做初始定位/二次定位，并在等地图阶段轻量同步里程计。
+ * 0：跳过视觉定位，只请求地图并依靠当前里程计/IMU 继续规划执行。
+ *
+ * 需要临时关闭视觉定位时，只改这一处即可。
+ */
+static uint8 g_control_use_vision_localization = 1U;
+
 /* ========================= 参数配置�?========================= */
 
 /**
@@ -22,6 +31,8 @@
  */
 #define CONTROL_REQ_CAR_PERIOD_WAIT 20U
 #define CONTROL_REQ_CAR_PERIOD_LOCALIZE_FAST 8U
+/* 推炸弹到爆炸点后停留 0.5s，等待爆炸效果生效 */
+#define CONTROL_BOMB_EXPLOSION_PAUSE_MS 500U
 
 
 /**
@@ -178,7 +189,12 @@ static size_t g_exec_steps = 0U;
  * - 0：尚未得到有效路�?
  */
 static uint8 g_plan_ready = 0U;
-/* 规划模式标志位：可通过 control_set_plan_mode() �?Mode1/Mode2/Identify 间切换�?*/
+/*
+ * 推箱阶段使用的规划模式：
+ * - 默认 Mode2，表示识别阶段得到 0~9 后按箱子/目标 ID 配对推箱；
+ * - 若第一个目标点 NUM 识别无效或超时，会自动切到 Mode1；
+ * - 仍保留 control_set_plan_mode() 作为外部手动覆盖入口。
+ */
 static control_plan_mode_t g_control_plan_mode = CONTROL_PLAN_MODE_2;
 static control_flow_phase_t g_control_flow_phase = CONTROL_FLOW_IDENTIFY;
 
@@ -211,6 +227,10 @@ static uint8 g_identify_target_id_assigned[MAX_TARGETS] = {0U};
 static uint8 g_identify_recog_waiting = 0U;
 static uint16 g_identify_recog_wait_loops = 0U;
 static VisionRecognitionType g_identify_recog_wait_type = VISION_RECOGNITION_NONE;
+/* 第一个目标点 NUM 识别结果用于判断后续是否按 ID 配对推箱。 */
+static uint8 g_identify_first_target_checked = 0U;
+/* 第一个目标点未得到 0~9 时置 1，当前识别阶段会立刻结束并转 Mode1。 */
+static uint8 g_identify_abort_to_mode1 = 0U;
 
 static control_identify_id_record_t g_saved_box_id_records[MAX_BOXES] = {{0}};
 static control_identify_id_record_t g_saved_target_id_records[MAX_TARGETS] = {{0}};
@@ -322,6 +342,8 @@ static void reset_identify_runtime_state(void)
     g_identify_recog_waiting = 0U;
     g_identify_recog_wait_loops = 0U;
     g_identify_recog_wait_type = VISION_RECOGNITION_NONE;
+    g_identify_first_target_checked = 0U;
+    g_identify_abort_to_mode1 = 0U;
 
     memset(g_identified_box_flags, 0, sizeof(g_identified_box_flags));
     memset(g_identified_target_flags, 0, sizeof(g_identified_target_flags));
@@ -348,6 +370,9 @@ static void inverse_remap_exec_path_point(Position *p)
     p->col = temp;
 #endif
 }
+
+/* 前向声明：供识别分段和主路径下发时复用炸弹停留配置。 */
+static void configure_bomb_pause_for_path(const Position *path, size_t steps);
 
 static uint8 resolve_map_dir_from_delta(int32 d_row, int32 d_col, control_map_dir_t *dir_out)
 {
@@ -693,6 +718,7 @@ static uint8 identify_action_stub(const control_identify_target_t *target)
 {
     VisionRecognitionResult result = {0};
     uint8 recognized_id = 0U;
+    uint8 valid_target_id = 0U;
 
     if (target == NULL)
     {
@@ -742,10 +768,29 @@ static uint8 identify_action_stub(const control_identify_target_t *target)
     {
         if (vision_take_num_result(&result))
         {
+            valid_target_id = identify_result_to_valid_id(&result, &recognized_id);
+
+            if (target->obj_type == CONTROL_IDENTIFY_OBJ_TARGET &&
+                !g_identify_first_target_checked)
+            {
+                g_identify_first_target_checked = 1U;
+                if (valid_target_id)
+                {
+                    /* 第一个目标点识别到 0~9：说明需要按 ID 配对，后续推箱使用 Mode2。 */
+                    g_control_plan_mode = CONTROL_PLAN_MODE_2;
+                }
+                else
+                {
+                    /* 第一个目标点没有正常数字：说明无需配对，立即结束识别并转 Mode1。 */
+                    g_control_plan_mode = CONTROL_PLAN_MODE_1;
+                    g_identify_abort_to_mode1 = 1U;
+                }
+            }
+
             if (target->obj_type == CONTROL_IDENTIFY_OBJ_TARGET &&
                 target->obj_index < MAX_TARGETS &&
                 target->obj_index < Targets_count &&
-                identify_result_to_valid_id(&result, &recognized_id))
+                valid_target_id)
             {
                 targets[target->obj_index].id = recognized_id;
                 g_identify_target_id_assigned[target->obj_index] = 1U;
@@ -760,6 +805,14 @@ static uint8 identify_action_stub(const control_identify_target_t *target)
     g_identify_recog_wait_loops++;
     if (g_identify_recog_wait_loops >= CONTROL_IDENTIFY_RECOG_TIMEOUT_LOOPS)
     {
+        if (target->obj_type == CONTROL_IDENTIFY_OBJ_TARGET &&
+            !g_identify_first_target_checked)
+        {
+            /* 第一个目标点等待超时，也按“无配对需求”处理，立刻转 Mode1。 */
+            g_identify_first_target_checked = 1U;
+            g_control_plan_mode = CONTROL_PLAN_MODE_1;
+            g_identify_abort_to_mode1 = 1U;
+        }
         g_identify_recog_waiting = 0U;
         g_identify_recog_wait_loops = 0U;
         g_identify_recog_wait_type = VISION_RECOGNITION_NONE;
@@ -943,7 +996,7 @@ static uint8 start_identify_segment(size_t end_idx)
             g_identify_segment_path[i] = g_exec_path[g_identify_segment_start_idx + i];
         }
 
-        path_follow_set_pause_indices(NULL, 0U, 0U);
+        configure_bomb_pause_for_path(g_identify_segment_path, seg_steps);
         path_follow_hold_current_yaw();
         path_follow_set_path(g_identify_segment_path, seg_steps);
         g_identify_segment_running = 1U;
@@ -955,29 +1008,47 @@ static uint8 start_identify_segment(size_t end_idx)
     return 1U;
 }
 
-static void finish_identify_flow_and_relocalize(void)
+static void finish_identify_flow_and_relocalize(uint8 finalize_ids)
 {
     car_go_flag = 0U;
     car_stop_flag = 0U;
     path_follow_set_path(NULL, 0U);
     path_follow_set_pause_indices(NULL, 0U, 0U);
 
-    /* ʶ��׶ν�����ͳһ��ȫ����/Ŀ��� ID�������浽���湩�ض�λ��ָ��� */
-    finalize_identify_ids_for_pushbox();
+    /* 正常完成识别时保留并补齐 ID；Mode1 快速退出时不需要这些配对信息。 */
+    if (finalize_ids)
+    {
+        finalize_identify_ids_for_pushbox();
+    }
     vision_clear_pending_data();
 
     g_control_flow_phase = CONTROL_FLOW_PUSHBOX;
     g_plan_ready = 0U;
     reset_identify_runtime_state();
-    reset_localization_accumulator();
     g_map_req_loop_cnt = 0U;
     g_car_req_loop_cnt = 0U;
     g_wait_new_map_frame = 0U;
     g_wait_map_frame_base = 0U;
-    g_relocalize_force_fresh_pose = 1U;
     map_data_updated = false;
     car_pose_updated = false;
-    g_control_stage = CONTROL_STAGE_STARTUP_LOCALIZE;
+    reset_localization_accumulator();
+
+    if (g_control_use_vision_localization)
+    {
+        g_relocalize_force_fresh_pose = 1U;
+        g_control_stage = CONTROL_STAGE_STARTUP_LOCALIZE;
+    }
+    else
+    {
+        if (!g_map_right_yaw_ready)
+        {
+            g_map_right_yaw_deg = eulerAngle.yaw;
+            g_map_right_yaw_ready = 1U;
+        }
+        g_relocalize_force_fresh_pose = 0U;
+        mark_wait_new_map_frame();
+        g_control_stage = CONTROL_STAGE_WAIT_CAMERA_DATA;
+    }
 }
 
 static uint8 advance_identify_endpoint_or_finish(void)
@@ -995,7 +1066,7 @@ static uint8 advance_identify_endpoint_or_finish(void)
 
     if (g_identify_endpoint_cursor >= g_identify_endpoint_count)
     {
-        finish_identify_flow_and_relocalize();
+        finish_identify_flow_and_relocalize(1U);
         return 1U;
     }
 
@@ -1038,6 +1109,54 @@ static uint8 is_same_grid_cell(const Position *a, const Position *b)
         return 0U;
     }
     return (a->row == b->row && a->col == b->col) ? 1U : 0U;
+}
+
+/**
+ * @brief 为当前执行路径配置“炸弹爆炸点停留”事件。
+ *
+ * 逻辑：
+ * - 扫描路径中 id == BOMB_EXPLOSION 的点；
+ * - 在这些点到达后暂停固定时长（0.5s）；
+ * - 若当前路径无爆炸点，则清空暂停配置。
+ *
+ * @param path 路径点数组。
+ * @param steps 路径长度。
+ */
+static void configure_bomb_pause_for_path(const Position *path, size_t steps)
+{
+    size_t pause_indices[PATH_FOLLOW_MAX_PAUSE_POINTS] = {0U};
+    size_t pause_count = 0U;
+    size_t i = 0U;
+
+    if (path == NULL || steps == 0U)
+    {
+        path_follow_set_pause_indices(NULL, 0U, 0U);
+        return;
+    }
+
+    for (i = 0U; i < steps; i++)
+    {
+        if (path[i].id != BOMB_EXPLOSION)
+        {
+            continue;
+        }
+        if (pause_count >= PATH_FOLLOW_MAX_PAUSE_POINTS)
+        {
+            break;
+        }
+        pause_indices[pause_count++] = i;
+    }
+
+    if (pause_count > 0U)
+    {
+        path_follow_set_pause_indices(pause_indices,
+                                      pause_count,
+                                      CONTROL_BOMB_EXPLOSION_PAUSE_MS);
+    }
+    else
+    {
+        path_follow_set_pause_indices(NULL, 0U, 0U);
+    }
 }
 
 /**
@@ -1455,7 +1574,23 @@ static void handle_prestart_move(void)
         /* 起步动作结束后先回到静止，再进入初始定位阶段�?*/
         car_go_flag = 0U;
         car_stop_flag = 0U;
-        g_control_stage = CONTROL_STAGE_STARTUP_LOCALIZE;
+        reset_localization_accumulator();
+        g_relocalize_force_fresh_pose = 0U;
+        if (g_control_use_vision_localization)
+        {
+            g_control_stage = CONTROL_STAGE_STARTUP_LOCALIZE;
+        }
+        else
+        {
+            if (!g_map_right_yaw_ready)
+            {
+                g_map_right_yaw_deg = eulerAngle.yaw;
+                g_map_right_yaw_ready = 1U;
+            }
+            g_body_map_dir = CONTROL_MAP_DIR_RIGHT;
+            mark_wait_new_map_frame();
+            g_control_stage = CONTROL_STAGE_WAIT_CAMERA_DATA;
+        }
     }
 }
 
@@ -1474,6 +1609,24 @@ static void handle_startup_localization(void)
     float cam_x_m = 0.0f;
     float cam_y_m = 0.0f;
     float cam_yaw_deg = 0.0f;
+
+    if (!g_control_use_vision_localization)
+    {
+        /* 运行中关闭视觉定位时，当前阶段立即降级为“等地图->规划”。 */
+        if (!g_map_right_yaw_ready)
+        {
+            g_map_right_yaw_deg = eulerAngle.yaw;
+            g_map_right_yaw_ready = 1U;
+        }
+        if (g_control_flow_phase == CONTROL_FLOW_IDENTIFY)
+        {
+            g_body_map_dir = CONTROL_MAP_DIR_RIGHT;
+        }
+        g_relocalize_force_fresh_pose = 0U;
+        mark_wait_new_map_frame();
+        g_control_stage = CONTROL_STAGE_WAIT_CAMERA_DATA;
+        return;
+    }
 
     if (g_control_flow_phase == CONTROL_FLOW_PUSHBOX)
     {
@@ -1531,6 +1684,7 @@ static void handle_startup_localization(void)
     {
         g_body_map_dir = CONTROL_MAP_DIR_RIGHT;
     }
+    g_relocalize_force_fresh_pose = 0U;
     mark_wait_new_map_frame();
     g_control_stage = CONTROL_STAGE_WAIT_CAMERA_DATA;
 }
@@ -1549,16 +1703,24 @@ static void handle_wait_camera_data(void)
     float cam_yaw_deg = 0.0f;
 
     request_map_periodic();
-    request_car_periodic(CONTROL_REQ_CAR_PERIOD_WAIT);
-
-    if (car_pose_updated)
+    if (g_control_use_vision_localization)
     {
-        car_pose_updated = false;
-        if (get_camera_pose_meter(&cam_x_m, &cam_y_m, &cam_yaw_deg))
+        request_car_periodic(CONTROL_REQ_CAR_PERIOD_WAIT);
+
+        if (car_pose_updated)
         {
-            /* 等地图阶段若拿到新位姿，顺带轻量同步一次里程计�?*/
-            path_follow_reset_pose(cam_x_m, cam_y_m, cam_yaw_deg);
+            car_pose_updated = false;
+            if (get_camera_pose_meter(&cam_x_m, &cam_y_m, &cam_yaw_deg))
+            {
+                /* 等地图阶段若拿到新位姿，顺带轻量同步一次里程计。 */
+                path_follow_reset_pose(cam_x_m, cam_y_m, cam_yaw_deg);
+            }
         }
+    }
+    else
+    {
+        /* 视觉定位关闭时丢弃旧 CAR 更新标志，避免重新开启后误吃关闭期间的缓存帧。 */
+        car_pose_updated = false;
     }
 
     if (map_data_ready && map_frame_count > 0U)
@@ -1604,7 +1766,7 @@ static void handle_identify_execute_path(void)
 
     if (g_identify_endpoint_cursor >= g_identify_endpoint_count)
     {
-        finish_identify_flow_and_relocalize();
+        finish_identify_flow_and_relocalize(1U);
         return;
     }
 
@@ -1692,6 +1854,12 @@ static void handle_identify_execute_path(void)
                 return;
             }
 
+            if (g_identify_abort_to_mode1)
+            {
+                finish_identify_flow_and_relocalize(0U);
+                return;
+            }
+
             if (curr_target->obj_type == CONTROL_IDENTIFY_OBJ_BOX &&
                 curr_target->obj_index < MAX_BOXES)
             {
@@ -1730,6 +1898,116 @@ static void handle_identify_execute_path(void)
     default:
         g_control_stage = CONTROL_STAGE_ERROR;
         break;
+    }
+}
+
+/**
+ * @brief 规划阶段：暂停执行层，调用规划器，并把结果转换成执行路径。
+ *
+ * 这里集中处理“进入规划保护期/退出规划保护期”，让 control_process() 只表达
+ * 状态机的主干，不展开具体细节。
+ */
+static void handle_plan_path_stage(void)
+{
+    begin_path_plan_pause();
+    if (control_plan_path())
+    {
+        g_control_stage = CONTROL_STAGE_LOAD_PATH;
+    }
+    else
+    {
+        g_control_stage = CONTROL_STAGE_ERROR;
+    }
+    end_path_plan_pause();
+}
+
+/**
+ * @brief 下发阶段：根据当前大流程，把识别路径或推箱路径装载到 path_follow。
+ *
+ * 识别阶段会把完整识别路径切成若干段，每到一个识别点停下转向识别；
+ * 推箱阶段则直接下发完整执行路径，并配置炸弹爆炸点停留事件。
+ */
+static void handle_load_path_stage(void)
+{
+    if (!g_plan_ready || g_exec_steps < 2U)
+    {
+        g_control_stage = CONTROL_STAGE_ERROR;
+        return;
+    }
+
+    if (g_control_flow_phase == CONTROL_FLOW_IDENTIFY)
+    {
+        if (!load_identify_path_for_execution())
+        {
+            g_control_stage = CONTROL_STAGE_ERROR;
+            return;
+        }
+        g_control_stage = CONTROL_STAGE_EXECUTE_PATH;
+        return;
+    }
+
+    configure_bomb_pause_for_path(g_exec_path, g_exec_steps);
+    path_follow_hold_current_yaw();
+    path_follow_set_path(g_exec_path, g_exec_steps);
+
+    car_go_flag = 1U;
+    car_stop_flag = 0U;
+    g_control_stage = CONTROL_STAGE_EXECUTE_PATH;
+}
+
+/**
+ * @brief 推箱执行阶段：轮询 path_follow 状态，路径结束后进入完成态并保持停车。
+ */
+static void handle_pushbox_execute_path(void)
+{
+    path_follow_status_t st = {0};
+
+    path_follow_get_status(&st);
+    if (!st.active)
+    {
+        car_go_flag = 1U;
+        car_stop_flag = 1U;
+        g_control_stage = CONTROL_STAGE_FINISHED;
+    }
+}
+
+/**
+ * @brief 执行阶段总入口：识别阶段和推箱阶段的执行模型不同，在这里分流。
+ */
+static void handle_execute_path_stage(void)
+{
+    if (g_control_flow_phase == CONTROL_FLOW_IDENTIFY)
+    {
+        handle_identify_execute_path();
+        return;
+    }
+
+    handle_pushbox_execute_path();
+}
+
+/**
+ * @brief 错误阶段：安全停车，并等待新地图后重新尝试规划。
+ *
+ * 视觉定位开关关闭时，只请求地图；开关开启时继续请求 CAR 位姿，保持原有恢复流程。
+ */
+static void handle_error_stage(void)
+{
+    car_go_flag = 1U;
+    car_stop_flag = 1U;
+    request_map_periodic();
+    if (g_control_use_vision_localization)
+    {
+        request_car_periodic(CONTROL_REQ_CAR_PERIOD_WAIT);
+    }
+
+    if (map_data_updated)
+    {
+        if (g_control_flow_phase == CONTROL_FLOW_PUSHBOX)
+        {
+            apply_saved_identify_ids_to_current_map();
+        }
+        map_data_updated = false;
+        g_control_stage = CONTROL_STAGE_PLAN_PATH;
     }
 }
 
@@ -1800,9 +2078,13 @@ void control_restart(void)
 
 void control_process(void)
 {
-    path_follow_status_t st = {0};
-
-    /* 统一串口解析入口：每圈都先消�?FIFO 并更新地�?位姿缓存�?*/
+    /*
+     * 控制主循环只做两件事：
+     * 1) 先消费串口 FIFO，保证地图、车位姿、识别结果缓存尽量新；
+     * 2) 再按当前阶段调用对应 handler，handler 内部只负责推进一个阶段。
+     *
+     * 这样主状态机保留“流程骨架”，阶段细节放在命名函数里，后续调车时更容易定位问题。
+     */
     process_blob_data();
     process_vision_data();
 
@@ -1821,83 +2103,23 @@ void control_process(void)
         break;
 
     case CONTROL_STAGE_PLAN_PATH:
-        begin_path_plan_pause();
-        if (control_plan_path())
-        {
-            g_control_stage = CONTROL_STAGE_LOAD_PATH;
-        }
-        else
-        {
-            g_control_stage = CONTROL_STAGE_ERROR;
-        }
-        end_path_plan_pause();
+        handle_plan_path_stage();
         break;
 
     case CONTROL_STAGE_LOAD_PATH:
-        if (!g_plan_ready || g_exec_steps < 2U)
-        {
-            g_control_stage = CONTROL_STAGE_ERROR;
-            break;
-        }
-
-        if (g_control_flow_phase == CONTROL_FLOW_IDENTIFY)
-        {
-            if (!load_identify_path_for_execution())
-            {
-                g_control_stage = CONTROL_STAGE_ERROR;
-                break;
-            }
-            g_control_stage = CONTROL_STAGE_EXECUTE_PATH;
-        }
-        else
-        {
-            path_follow_set_pause_indices(NULL, 0U, 0U);
-            path_follow_hold_current_yaw();
-            path_follow_set_path(g_exec_path, g_exec_steps);
-
-            car_go_flag = 1U;
-            car_stop_flag = 0U;
-            g_control_stage = CONTROL_STAGE_EXECUTE_PATH;
-        }
+        handle_load_path_stage();
         break;
 
     case CONTROL_STAGE_EXECUTE_PATH:
-        if (g_control_flow_phase == CONTROL_FLOW_IDENTIFY)
-        {
-            handle_identify_execute_path();
-            break;
-        }
-
-        path_follow_get_status(&st);
-        if (!st.active)
-        {
-            /* 路径执行结束后切换到停车保持态�?*/
-            car_go_flag = 1U;
-            car_stop_flag = 1U;
-            g_control_stage = CONTROL_STAGE_FINISHED;
-        }
+        handle_execute_path_stage();
         break;
 
     case CONTROL_STAGE_FINISHED:
-        /* 完成态保持停车，等待外部调用 control_restart()�?*/
+        /* 完成态保持停车，等待外部调用 control_restart()。 */
         break;
 
     case CONTROL_STAGE_ERROR:
-        /* 错误态保持安全停车，并持续请求地图，拿到新图后自动重试规划�?*/
-        car_go_flag = 1U;
-        car_stop_flag = 1U;
-        request_map_periodic();
-        request_car_periodic(CONTROL_REQ_CAR_PERIOD_WAIT);
-
-        if (map_data_updated)
-        {
-            if (g_control_flow_phase == CONTROL_FLOW_PUSHBOX)
-            {
-                apply_saved_identify_ids_to_current_map();
-            }
-            map_data_updated = false;
-            g_control_stage = CONTROL_STAGE_PLAN_PATH;
-        }
+        handle_error_stage();
         break;
 
     case CONTROL_STAGE_IDLE:
@@ -1912,10 +2134,10 @@ control_stage_t control_get_stage(void)
 }
 
 /**
- * @brief 设置规划模式标志位�?
+ * @brief 手动设置推箱阶段规划模式。
  *
- * 为了避免非法输入破坏流程，除 CONTROL_PLAN_MODE_1 外都归一�?
- * CONTROL_PLAN_MODE_2�?
+ * 为了避免非法输入破坏流程，除 CONTROL_PLAN_MODE_1 外都按
+ * CONTROL_PLAN_MODE_2 处理；识别阶段的首个目标点结果仍可能自动覆盖该值。
  */
 void control_set_plan_mode(control_plan_mode_t mode)
 {

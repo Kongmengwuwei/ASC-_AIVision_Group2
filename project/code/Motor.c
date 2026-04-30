@@ -12,7 +12,7 @@
 
 float speed_three_array[3] = {0};
 int speed_encoder[4] = {0};
-
+int car_stop_array[4] = {0};
 
 void motor_init(void)
 {

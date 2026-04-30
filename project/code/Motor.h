@@ -66,6 +66,7 @@ extern float rx_plus_ry_cali;
 
 extern float speed_three_array[3];
 extern int speed_encoder[4];
+extern int car_stop_array[4];
 
 void motor_init(void);
 void encoder_init(void);

@@ -1499,7 +1499,7 @@ void path_follow_init(float grid_size_m, float pulses_per_meter)
     g_ctx.pos_tol_m = 0.015f;   // 位置容差，可按需要调整
     g_ctx.yaw_tol_deg = 2.0f;  // 航向容差
     g_ctx.max_v_mps = 3.0f;    // 最大线速度
-    g_ctx.max_w_rad = 360.0f;    // 角速度上限
+    g_ctx.max_w_rad = 120.0f;    // 角速度上限
     g_ctx.target_yaw_deg = 0.0f;
     g_ctx.heading_mode = PATH_FOLLOW_HEADING_FIXED;
     g_ctx.pose.x_m = 0.0f;

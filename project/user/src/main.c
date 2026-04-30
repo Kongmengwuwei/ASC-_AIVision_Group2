@@ -1,4 +1,4 @@
-/*********************************************************************************************************************
+﻿/*********************************************************************************************************************
  * RT1064DVL6A Opensourec Library 即（RT1064DVL6A 开源库）是一个基于官方 SDK 接口的第三方开源库
  * Copyright (c) 2022 SEEKFREE 逐飞科技
  *
@@ -51,17 +51,13 @@
 #define PIT_PRIORITY_1 (PIT_IRQn)
 #define PIT_PRIORITY_2 (PIT_IRQn)
 
-/*
- * 视觉识别摄像头临时测试开关：
- * 1：上电初始化后进入测试循环，只测试 loadmode.py 的 NUM/IMG 串口识别；
- * 0：关闭测试循环，恢复原来的控制主流程。
- */
-#define VISION_CAMERA_TEST_ENABLE 1
+#define VISION_CAMERA_TEST_ENABLE 0
 #define VISION_CAMERA_TEST_LOOP_MS 10U
 #define VISION_CAMERA_TEST_PERIOD_LOOPS 120U
 #define VISION_CAMERA_TEST_TIMEOUT_LOOPS 250U
 
-int car_stop_array[4] = {0};
+#define ALGORITHM_TEST_ENABLE 0
+
 
 #if VISION_CAMERA_TEST_ENABLE
 static const char *vision_test_type_name(VisionRecognitionType type)
@@ -330,14 +326,15 @@ int main(void)
   interrupt_set_priority(LPUART4_IRQn, 4);   // UART4 interrupt priority.
   interrupt_global_enable(0);
 
+  control_init();
+
+  // 视觉识别摄像头测试
 #if VISION_CAMERA_TEST_ENABLE
   vision_camera_test_loop();
 #endif
 
-  /*以下为算法测试*/
-  Menu_Show();
-  if (Algo_Test_auto || Algo_Test_hand)
-  {
+  //算法测试
+#if ALGORITHM_TEST_ENABLE
   parse_map_from_string(map_text3);
 
   boxes[0].id = 0;
@@ -352,35 +349,23 @@ int main(void)
 
   Test_Path_Init(); // 路径初始化
   }
-  /*以上为算法测试*/
-
-  control_init();
+#endif
 
   // 主循环
   while (1)
   {
-    /*以下为算法测试*/
-    if (Algo_Test_auto || Algo_Test_hand)
-    {
-      Test_Data_Save(); // 将内部测试地图数据保存回全局数组
-    }
-    /*以上为算法测试*/
+    //算法测试
+  #if ALGORITHM_TEST_ENABLE
+    Test_Data_Save(); // 将内部测试地图数据保存回全局数组
+  #endif
 
     // 控制主流程：初始定位 -> 摄像头数据到齐 -> 路径规划 -> 路径执行 -> 执行中动态校正
     control_process();
-
-    boxes[0].id = 0;
-    boxes[1].id = 1;
-    boxes[2].id = 2;
-    targets[0].id = 0;
-    targets[1].id = 1;
-    targets[2].id = 2;
 
     // 菜单系统主循环调用：响应按键事件，更新显示等。
     Menu_Switch();
     Menu_Show();
 
-    // ips200_show_float(0, 100, eulerAngle.yaw, 3, 2); // 显示当前航向角，便于调试
   }
 }
 

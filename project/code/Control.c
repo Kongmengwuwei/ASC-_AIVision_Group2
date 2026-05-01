@@ -14,6 +14,24 @@
  */
 static uint8 g_control_use_vision_localization = 1U;
 
+/*
+ * 手动选择起步发车方向。
+ * 0：地图右，对应车前方；
+ * 1：地图上，对应车左方；
+ * 2：地图左，对应车后方；
+ * 3：地图下，对应车右方。
+ *
+ * 小车只平移到对应方向，车头朝向保持不变。
+ */
+static uint8 g_control_prestart_depart_dir = 0U;
+
+/*
+ * 手动开关：识别阶段是否启用“段前提前转向”。
+ * 1：每段识别短路程出发前先转到识别朝向，到点后直接识别。
+ * 0：关闭提前转向，恢复为到达识别点后再原地转向识别。
+ */
+static uint8 g_control_identify_prerotate_enabled = 0U;
+
 /* ========================= 参数配置�?========================= */
 
 /**
@@ -50,13 +68,6 @@ static uint8 g_control_use_vision_localization = 1U;
  */
 #define CONTROL_PRESTART_OFFSET_M GRID_SIZE_M
 
-/**
- * @brief 起步方向系数�?
- *
- * - 1.0f：沿车头方向前进
- * - -1.0f：沿车头反方向后退
- */
-#define CONTROL_PRESTART_DIR_SIGN 1.0f
 /* 角度转弧度：yaw_rad = yaw_deg * CONTROL_DEG_TO_RAD */
 #define CONTROL_DEG_TO_RAD 0.01745329251994329577f
 
@@ -149,6 +160,7 @@ typedef struct
 typedef enum
 {
     CONTROL_IDENTIFY_EXEC_IDLE = 0U,
+    CONTROL_IDENTIFY_EXEC_ROTATE_BEFORE_SEGMENT,
     CONTROL_IDENTIFY_EXEC_MOVE_SEGMENT,
     CONTROL_IDENTIFY_EXEC_ROTATE_TO_TARGET,
     CONTROL_IDENTIFY_EXEC_DO_RECOGNIZE,
@@ -192,7 +204,8 @@ static uint8 g_plan_ready = 0U;
 /*
  * 推箱阶段使用的规划模式：
  * - 默认 Mode2，表示识别阶段得到 0~9 后按箱子/目标 ID 配对推箱；
- * - 若第一个目标点 NUM 识别无效或超时，会自动切到 Mode1；
+ * - 首个 IMG/NUM 识别若收到明确的非 0~9 结果，会自动切到 Mode1；
+ * - 首个 IMG/NUM 等待超时只重发请求，不直接判 Mode1，避免主循环过快导致误判；
  * - 仍保留 control_set_plan_mode() 作为外部手动覆盖入口。
  */
 static control_plan_mode_t g_control_plan_mode = CONTROL_PLAN_MODE_2;
@@ -227,9 +240,9 @@ static uint8 g_identify_target_id_assigned[MAX_TARGETS] = {0U};
 static uint8 g_identify_recog_waiting = 0U;
 static uint16 g_identify_recog_wait_loops = 0U;
 static VisionRecognitionType g_identify_recog_wait_type = VISION_RECOGNITION_NONE;
-/* 第一个目标点 NUM 识别结果用于判断后续是否按 ID 配对推箱。 */
-static uint8 g_identify_first_target_checked = 0U;
-/* 第一个目标点未得到 0~9 时置 1，当前识别阶段会立刻结束并转 Mode1。 */
+/* 首个 IMG/NUM 识别结果用于判断后续是否按 ID 配对推箱。 */
+static uint8 g_identify_first_result_checked = 0U;
+/* 首个 IMG/NUM 收到非 0~9 结果时置 1，当前识别阶段会立刻结束并转 Mode1。 */
 static uint8 g_identify_abort_to_mode1 = 0U;
 
 static control_identify_id_record_t g_saved_box_id_records[MAX_BOXES] = {{0}};
@@ -342,7 +355,7 @@ static void reset_identify_runtime_state(void)
     g_identify_recog_waiting = 0U;
     g_identify_recog_wait_loops = 0U;
     g_identify_recog_wait_type = VISION_RECOGNITION_NONE;
-    g_identify_first_target_checked = 0U;
+    g_identify_first_result_checked = 0U;
     g_identify_abort_to_mode1 = 0U;
 
     memset(g_identified_box_flags, 0, sizeof(g_identified_box_flags));
@@ -438,6 +451,22 @@ static float map_dir_to_yaw_deg(control_map_dir_t dir)
     return wrap_yaw_deg_local(base_yaw + delta_yaw);
 }
 
+static control_map_dir_t get_prestart_depart_map_dir(void)
+{
+    switch (g_control_prestart_depart_dir)
+    {
+    case 1U:
+        return CONTROL_MAP_DIR_UP;
+    case 2U:
+        return CONTROL_MAP_DIR_LEFT;
+    case 3U:
+        return CONTROL_MAP_DIR_DOWN;
+    case 0U:
+    default:
+        return CONTROL_MAP_DIR_RIGHT;
+    }
+}
+
 static void clear_saved_identify_ids(void)
 {
     memset(g_saved_box_id_records, 0, sizeof(g_saved_box_id_records));
@@ -463,6 +492,27 @@ static uint8 identify_result_to_valid_id(const VisionRecognitionResult *result, 
 
     *id_out = (uint8)result->label_value;
     return 1U;
+}
+
+static void update_plan_mode_from_first_identify_result(uint8 valid_id)
+{
+    if (g_identify_first_result_checked)
+    {
+        return;
+    }
+
+    g_identify_first_result_checked = 1U;
+    if (valid_id)
+    {
+        /* 首个 IMG/NUM 识别到 0~9：说明需要按 ID 配对，后续推箱使用 Mode2。 */
+        g_control_plan_mode = CONTROL_PLAN_MODE_2;
+    }
+    else
+    {
+        /* 首个 IMG/NUM 没有正常数字：说明无需配对，立即结束识别并转 Mode1。 */
+        g_control_plan_mode = CONTROL_PLAN_MODE_1;
+        g_identify_abort_to_mode1 = 1U;
+    }
 }
 
 static void save_identify_ids_from_current_map(void)
@@ -718,7 +768,7 @@ static uint8 identify_action_stub(const control_identify_target_t *target)
 {
     VisionRecognitionResult result = {0};
     uint8 recognized_id = 0U;
-    uint8 valid_target_id = 0U;
+    uint8 valid_id = 0U;
 
     if (target == NULL)
     {
@@ -732,6 +782,12 @@ static uint8 identify_action_stub(const control_identify_target_t *target)
     if (!g_identify_recog_waiting)
     {
         g_identify_recog_wait_loops = 0U;
+        /*
+         * 每次开始新的识别请求前都清一次视觉识别缓存。
+         * 原因：NUM/IMG 返回是异步串口行，如果上一轮迟到的失败帧还挂在 updated 标志上，
+         * 首个识别点会立刻吃到旧的失败结果，从而被误判为 Mode1。
+         */
+        vision_clear_pending_data();
         if (target->obj_type == CONTROL_IDENTIFY_OBJ_BOX)
         {
             uart_send_vision_img_request();
@@ -750,10 +806,13 @@ static uint8 identify_action_stub(const control_identify_target_t *target)
     {
         if (vision_take_img_result(&result))
         {
+            valid_id = identify_result_to_valid_id(&result, &recognized_id);
+            update_plan_mode_from_first_identify_result(valid_id);
+
             if (target->obj_type == CONTROL_IDENTIFY_OBJ_BOX &&
                 target->obj_index < MAX_BOXES &&
                 target->obj_index < Boxes_count &&
-                identify_result_to_valid_id(&result, &recognized_id))
+                valid_id)
             {
                 boxes[target->obj_index].id = recognized_id;
                 g_identify_box_id_assigned[target->obj_index] = 1U;
@@ -768,29 +827,13 @@ static uint8 identify_action_stub(const control_identify_target_t *target)
     {
         if (vision_take_num_result(&result))
         {
-            valid_target_id = identify_result_to_valid_id(&result, &recognized_id);
-
-            if (target->obj_type == CONTROL_IDENTIFY_OBJ_TARGET &&
-                !g_identify_first_target_checked)
-            {
-                g_identify_first_target_checked = 1U;
-                if (valid_target_id)
-                {
-                    /* 第一个目标点识别到 0~9：说明需要按 ID 配对，后续推箱使用 Mode2。 */
-                    g_control_plan_mode = CONTROL_PLAN_MODE_2;
-                }
-                else
-                {
-                    /* 第一个目标点没有正常数字：说明无需配对，立即结束识别并转 Mode1。 */
-                    g_control_plan_mode = CONTROL_PLAN_MODE_1;
-                    g_identify_abort_to_mode1 = 1U;
-                }
-            }
+            valid_id = identify_result_to_valid_id(&result, &recognized_id);
+            update_plan_mode_from_first_identify_result(valid_id);
 
             if (target->obj_type == CONTROL_IDENTIFY_OBJ_TARGET &&
                 target->obj_index < MAX_TARGETS &&
                 target->obj_index < Targets_count &&
-                valid_target_id)
+                valid_id)
             {
                 targets[target->obj_index].id = recognized_id;
                 g_identify_target_id_assigned[target->obj_index] = 1U;
@@ -805,13 +848,27 @@ static uint8 identify_action_stub(const control_identify_target_t *target)
     g_identify_recog_wait_loops++;
     if (g_identify_recog_wait_loops >= CONTROL_IDENTIFY_RECOG_TIMEOUT_LOOPS)
     {
-        if (target->obj_type == CONTROL_IDENTIFY_OBJ_TARGET &&
-            !g_identify_first_target_checked)
+        if (!g_identify_first_result_checked)
         {
-            /* 第一个目标点等待超时，也按“无配对需求”处理，立刻转 Mode1。 */
-            g_identify_first_target_checked = 1U;
-            g_control_plan_mode = CONTROL_PLAN_MODE_1;
-            g_identify_abort_to_mode1 = 1U;
+            /*
+             * 首个 IMG/NUM 决定后续 Mode1/Mode2，不能用“主循环轮询超时”直接判无效。
+             * control_process() 没有固定调用周期，250 次循环可能远小于一次 OpenMV 识别耗时；
+             * 超时这里只重发请求继续等，真正收到非 0~9 结果时才切 Mode1。
+             */
+            g_identify_recog_wait_loops = 0U;
+            vision_clear_pending_data();
+            if (target->obj_type == CONTROL_IDENTIFY_OBJ_BOX)
+            {
+                uart_send_vision_img_request();
+                g_identify_recog_wait_type = VISION_RECOGNITION_IMG;
+            }
+            else
+            {
+                uart_send_vision_num_request();
+                g_identify_recog_wait_type = VISION_RECOGNITION_NUM;
+            }
+            g_identify_recog_waiting = 1U;
+            return 0U;
         }
         g_identify_recog_waiting = 0U;
         g_identify_recog_wait_loops = 0U;
@@ -971,7 +1028,7 @@ static uint8 prepare_identify_endpoints(void)
     return (g_identify_endpoint_count > 0U) ? 1U : 0U;
 }
 
-static uint8 start_identify_segment(size_t end_idx)
+static uint8 begin_identify_segment_motion(size_t end_idx)
 {
     size_t i = 0U;
     size_t seg_steps = 0U;
@@ -1006,6 +1063,36 @@ static uint8 start_identify_segment(size_t end_idx)
     car_stop_flag = 0U;
     g_identify_exec_state = CONTROL_IDENTIFY_EXEC_MOVE_SEGMENT;
     return 1U;
+}
+
+static uint8 start_identify_segment(size_t end_idx)
+{
+    if (end_idx >= g_exec_steps || end_idx < g_identify_segment_start_idx)
+    {
+        return 0U;
+    }
+
+    g_identify_rotate_started = 0U;
+    memset(g_identify_targets, 0, sizeof(g_identify_targets));
+    g_identify_target_count = 0U;
+    g_identify_target_cursor = 0U;
+
+    /*
+     * 识别短段开始前先查看该段终点旁边要识别的物体。
+     * 若存在待识别目标，先在短段起点转到识别朝向，再保持该朝向行驶到识别位。
+     */
+    if (g_control_identify_prerotate_enabled &&
+        g_identify_endpoint_cursor < g_identify_endpoint_count &&
+        g_identify_endpoint_need_action[g_identify_endpoint_cursor] &&
+        collect_identify_targets_on_exec_point(&g_exec_path[end_idx]))
+    {
+        car_go_flag = 1U;
+        car_stop_flag = 0U;
+        g_identify_exec_state = CONTROL_IDENTIFY_EXEC_ROTATE_BEFORE_SEGMENT;
+        return 1U;
+    }
+
+    return begin_identify_segment_motion(end_idx);
 }
 
 static void finish_identify_flow_and_relocalize(uint8 finalize_ids)
@@ -1524,18 +1611,21 @@ static uint8 control_plan_path(void)
 }
 
 /**
- * @brief 处理“起步出发车区”阶段�?
+ * @brief 处理“起步出发车区”阶段。
  *
- * 行为说明�?
- * - 首次进入时，读取当前 IMU 航向角作为车头方�?
- * - 按该航向分解出世界坐标位移，下发一�?0.2m 偏移动作
- * - 动作执行完成后，切到初始定位阶段
+ * 行为说明：
+ * - 首次进入时，读取当前 IMU 航向角作为车头保持方向；
+ * - 根据文件顶部的 g_control_prestart_depart_dir 选择地图右/上/左/下四个发车方向；
+ * - 小车按所选方向平移一个网格距离，车头朝向不变；
+ * - 动作执行完成后，切到初始定位阶段。
  */
 static void handle_prestart_move(void)
 {
     path_follow_status_t st = {0};
-    float prestart_yaw_deg = 0.0f;
-    float prestart_yaw_rad = 0.0f;
+    control_map_dir_t prestart_dir = CONTROL_MAP_DIR_RIGHT;
+    float hold_yaw_deg = 0.0f;
+    float move_yaw_deg = 0.0f;
+    float move_yaw_rad = 0.0f;
     float start_x_m = 0.0f;
     float start_y_m = 0.0f;
     float delta_x_m = 0.0f;
@@ -1550,18 +1640,21 @@ static void handle_prestart_move(void)
         car_stop_flag = 0U;
 
         path_follow_get_status(&st);
-        prestart_yaw_deg = eulerAngle.yaw;
-        prestart_yaw_rad = prestart_yaw_deg * CONTROL_DEG_TO_RAD;
+        hold_yaw_deg = eulerAngle.yaw;
+        prestart_dir = get_prestart_depart_map_dir();
+        move_yaw_deg = map_dir_to_yaw_deg(prestart_dir);
+        move_yaw_rad = move_yaw_deg * CONTROL_DEG_TO_RAD;
         start_x_m = st.x_m;
         start_y_m = st.y_m;
-        delta_x_m = CONTROL_PRESTART_DIR_SIGN * cosf(prestart_yaw_rad) * CONTROL_PRESTART_OFFSET_M;
-        delta_y_m = CONTROL_PRESTART_DIR_SIGN * sinf(prestart_yaw_rad) * CONTROL_PRESTART_OFFSET_M;
+        delta_x_m = cosf(move_yaw_rad) * CONTROL_PRESTART_OFFSET_M;
+        delta_y_m = sinf(move_yaw_rad) * CONTROL_PRESTART_OFFSET_M;
 
         /* 防止起步目标越界（负坐标�?uint8 会变 255，导致远距离猛冲）�?*/
         target_x_m = clampf_local(start_x_m + delta_x_m, 0.0f, CONTROL_WORLD_X_MAX_M);
         target_y_m = clampf_local(start_y_m + delta_y_m, 0.0f, CONTROL_WORLD_Y_MAX_M);
 
-        path_follow_reset_pose(st.x_m, st.y_m, prestart_yaw_deg);
+        /* 发车只改变平移方向，不改变车头朝向。 */
+        path_follow_reset_pose(st.x_m, st.y_m, hold_yaw_deg);
         path_follow_hold_current_yaw();
         path_follow_start_pose_correction(target_x_m, target_y_m);
         g_prestart_move_started = 1U;
@@ -1772,6 +1865,65 @@ static void handle_identify_execute_path(void)
 
     switch (g_identify_exec_state)
     {
+    case CONTROL_IDENTIFY_EXEC_ROTATE_BEFORE_SEGMENT:
+        if (g_identify_endpoint_cursor >= g_identify_endpoint_count)
+        {
+            g_control_stage = CONTROL_STAGE_ERROR;
+            return;
+        }
+
+        if (g_identify_target_cursor >= g_identify_target_count)
+        {
+            if (!begin_identify_segment_motion(g_identify_endpoint_indices[g_identify_endpoint_cursor]))
+            {
+                g_control_stage = CONTROL_STAGE_ERROR;
+            }
+            return;
+        }
+
+        curr_target = &g_identify_targets[g_identify_target_cursor];
+        target_yaw_deg = map_dir_to_yaw_deg(curr_target->face_dir);
+        yaw_err_deg = wrap_yaw_deg_local(target_yaw_deg - eulerAngle.yaw);
+        if (fabsf(yaw_err_deg) <= CONTROL_IDENTIFY_YAW_ALIGN_TOL_DEG)
+        {
+            g_identify_rotate_started = 0U;
+            g_body_map_dir = curr_target->face_dir;
+            g_identify_recog_waiting = 0U;
+            g_identify_recog_wait_loops = 0U;
+            g_identify_recog_wait_type = VISION_RECOGNITION_NONE;
+            if (!begin_identify_segment_motion(g_identify_endpoint_indices[g_identify_endpoint_cursor]))
+            {
+                g_control_stage = CONTROL_STAGE_ERROR;
+            }
+            return;
+        }
+
+        if (!g_identify_rotate_started)
+        {
+            path_follow_start_rotate_to_yaw(target_yaw_deg);
+            car_go_flag = 1U;
+            car_stop_flag = 0U;
+            g_identify_rotate_started = 1U;
+            return;
+        }
+
+        path_follow_get_status(&st);
+        if (st.active)
+        {
+            return;
+        }
+
+        g_identify_rotate_started = 0U;
+        g_body_map_dir = curr_target->face_dir;
+        g_identify_recog_waiting = 0U;
+        g_identify_recog_wait_loops = 0U;
+        g_identify_recog_wait_type = VISION_RECOGNITION_NONE;
+        if (!begin_identify_segment_motion(g_identify_endpoint_indices[g_identify_endpoint_cursor]))
+        {
+            g_control_stage = CONTROL_STAGE_ERROR;
+        }
+        break;
+
     case CONTROL_IDENTIFY_EXEC_MOVE_SEGMENT:
         if (g_identify_segment_running)
         {
@@ -1786,8 +1938,15 @@ static void handle_identify_execute_path(void)
         endpoint_idx = g_identify_endpoint_indices[g_identify_endpoint_cursor];
         if (g_identify_endpoint_need_action[g_identify_endpoint_cursor])
         {
+            if (g_identify_target_count > 0U)
+            {
+                g_identify_exec_state = CONTROL_IDENTIFY_EXEC_DO_RECOGNIZE;
+                return;
+            }
+
             if (collect_identify_targets_on_exec_point(&g_exec_path[endpoint_idx]))
             {
+                /* 兜底：若段前未拿到目标，则到点后仍按旧逻辑原地转向识别。 */
                 g_identify_rotate_started = 0U;
                 g_identify_exec_state = CONTROL_IDENTIFY_EXEC_ROTATE_TO_TARGET;
                 return;
@@ -1924,7 +2083,7 @@ static void handle_plan_path_stage(void)
 /**
  * @brief 下发阶段：根据当前大流程，把识别路径或推箱路径装载到 path_follow。
  *
- * 识别阶段会把完整识别路径切成若干段，每到一个识别点停下转向识别；
+ * 识别阶段会把完整识别路径切成若干段，每段起点先转向，再到识别点直接识别；
  * 推箱阶段则直接下发完整执行路径，并配置炸弹爆炸点停留事件。
  */
 static void handle_load_path_stage(void)
@@ -2137,7 +2296,7 @@ control_stage_t control_get_stage(void)
  * @brief 手动设置推箱阶段规划模式。
  *
  * 为了避免非法输入破坏流程，除 CONTROL_PLAN_MODE_1 外都按
- * CONTROL_PLAN_MODE_2 处理；识别阶段的首个目标点结果仍可能自动覆盖该值。
+ * CONTROL_PLAN_MODE_2 处理；识别阶段的首个 IMG/NUM 结果仍可能自动覆盖该值。
  */
 void control_set_plan_mode(control_plan_mode_t mode)
 {

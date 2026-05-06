@@ -12,7 +12,7 @@
  *
  * 需要临时关闭视觉定位时，只改这一处即可。
  */
-static uint8 g_control_use_vision_localization = 1U;
+static uint8 g_control_use_vision_localization = ENET_1588_Timer_IRQn;
 
 /*
  * 手动选择起步发车方向。
@@ -146,6 +146,7 @@ typedef struct
     Position obj_pos_map;
     control_map_dir_t face_dir;
     control_identify_obj_t obj_type;
+    VisionRecognitionDistance recog_distance;
     uint8 obj_index;
 } control_identify_target_t;
 
@@ -387,6 +388,11 @@ static void inverse_remap_exec_path_point(Position *p)
 /* 前向声明：供识别分段和主路径下发时复用炸弹停留配置。 */
 static void configure_bomb_pause_for_path(const Position *path, size_t steps);
 
+static uint8 is_identification_marker(uint8 marker_id)
+{
+    return (marker_id == IDENTIFICATION) ? 1U : 0U;
+}
+
 static uint8 resolve_map_dir_from_delta(int32 d_row, int32 d_col, control_map_dir_t *dir_out)
 {
     if (dir_out == NULL)
@@ -394,22 +400,22 @@ static uint8 resolve_map_dir_from_delta(int32 d_row, int32 d_col, control_map_di
         return 0U;
     }
 
-    if (d_row == 0 && d_col == 1)
+    if (d_row == 0 && d_col > 0)
     {
         *dir_out = CONTROL_MAP_DIR_RIGHT;
         return 1U;
     }
-    if (d_row == 0 && d_col == -1)
+    if (d_row == 0 && d_col < 0)
     {
         *dir_out = CONTROL_MAP_DIR_LEFT;
         return 1U;
     }
-    if (d_row == -1 && d_col == 0)
+    if (d_row < 0 && d_col == 0)
     {
         *dir_out = CONTROL_MAP_DIR_UP;
         return 1U;
     }
-    if (d_row == 1 && d_col == 0)
+    if (d_row > 0 && d_col == 0)
     {
         *dir_out = CONTROL_MAP_DIR_DOWN;
         return 1U;
@@ -769,10 +775,16 @@ static uint8 identify_action_stub(const control_identify_target_t *target)
     VisionRecognitionResult result = {0};
     uint8 recognized_id = 0U;
     uint8 valid_id = 0U;
+    VisionRecognitionDistance distance = VISION_RECOGNITION_DISTANCE_ONE_GRID;
 
     if (target == NULL)
     {
         return 1U;
+    }
+    if (target->recog_distance == VISION_RECOGNITION_DISTANCE_TWO_GRID ||
+        target->recog_distance == VISION_RECOGNITION_DISTANCE_ONE_GRID)
+    {
+        distance = target->recog_distance;
     }
 
     /* ʶ�����ڼ䱣��ͣ��������ͼ�񶶶��� */
@@ -790,12 +802,14 @@ static uint8 identify_action_stub(const control_identify_target_t *target)
         vision_clear_pending_data();
         if (target->obj_type == CONTROL_IDENTIFY_OBJ_BOX)
         {
-            uart_send_vision_img_request();
+            if (!uart_send_vision_img_request_by_distance(distance))
+                return 1U;
             g_identify_recog_wait_type = VISION_RECOGNITION_IMG;
         }
         else
         {
-            uart_send_vision_num_request();
+            if (!uart_send_vision_num_request_by_distance(distance))
+                return 1U;
             g_identify_recog_wait_type = VISION_RECOGNITION_NUM;
         }
         g_identify_recog_waiting = 1U;
@@ -859,12 +873,14 @@ static uint8 identify_action_stub(const control_identify_target_t *target)
             vision_clear_pending_data();
             if (target->obj_type == CONTROL_IDENTIFY_OBJ_BOX)
             {
-                uart_send_vision_img_request();
+                if (!uart_send_vision_img_request_by_distance(distance))
+                    return 1U;
                 g_identify_recog_wait_type = VISION_RECOGNITION_IMG;
             }
             else
             {
-                uart_send_vision_num_request();
+                if (!uart_send_vision_num_request_by_distance(distance))
+                    return 1U;
                 g_identify_recog_wait_type = VISION_RECOGNITION_NUM;
             }
             g_identify_recog_waiting = 1U;
@@ -898,6 +914,66 @@ static void identify_sort_targets_by_direction(void)
     }
 }
 
+static uint8 identify_cell_has_blocker(uint8 row, uint8 col)
+{
+    size_t i = 0U;
+
+    for (i = 0U; i < Obstacles_count; i++)
+    {
+        if (obstacles[i].row == row && obstacles[i].col == col)
+            return 1U;
+    }
+    for (i = 0U; i < Bombs_count; i++)
+    {
+        if (bombs[i].row == row && bombs[i].col == col)
+            return 1U;
+    }
+    for (i = 0U; i < Boxes_count; i++)
+    {
+        if (boxes[i].row == row && boxes[i].col == col)
+            return 1U;
+    }
+    for (i = 0U; i < Targets_count; i++)
+    {
+        if (targets[i].row == row && targets[i].col == col)
+            return 1U;
+    }
+    return 0U;
+}
+
+static uint8 identify_target_has_clear_view(const Position *map_point,
+                                            const Position *object_pos)
+{
+    int32 d_row = 0;
+    int32 d_col = 0;
+    int32 abs_row = 0;
+    int32 abs_col = 0;
+    int32 manhattan = 0;
+    Position mid = {0};
+
+    if (map_point == NULL || object_pos == NULL)
+        return 0U;
+
+    d_row = (int32)object_pos->row - (int32)map_point->row;
+    d_col = (int32)object_pos->col - (int32)map_point->col;
+    abs_row = (d_row >= 0) ? d_row : -d_row;
+    abs_col = (d_col >= 0) ? d_col : -d_col;
+    manhattan = abs_row + abs_col;
+
+    if ((manhattan != 1 && manhattan != 2) ||
+        (d_row != 0 && d_col != 0))
+    {
+        return 0U;
+    }
+    if (manhattan == 1)
+        return 1U;
+
+    mid.row = (uint8)((int32)map_point->row + ((d_row > 0) ? 1 : ((d_row < 0) ? -1 : 0)));
+    mid.col = (uint8)((int32)map_point->col + ((d_col > 0) ? 1 : ((d_col < 0) ? -1 : 0)));
+
+    return identify_cell_has_blocker(mid.row, mid.col) ? 0U : 1U;
+}
+
 static uint8 collect_identify_targets_on_exec_point(const Position *exec_point)
 {
     Position map_point = {0};
@@ -929,7 +1005,12 @@ static uint8 collect_identify_targets_on_exec_point(const Position *exec_point)
         d_row = (int32)boxes[i].row - (int32)map_point.row;
         d_col = (int32)boxes[i].col - (int32)map_point.col;
         manhattan = ((d_row >= 0) ? d_row : -d_row) + ((d_col >= 0) ? d_col : -d_col);
-        if (manhattan != 1)
+        if ((manhattan != 1 && manhattan != 2) ||
+            (d_row != 0 && d_col != 0))
+        {
+            continue;
+        }
+        if (!identify_target_has_clear_view(&map_point, &boxes[i]))
         {
             continue;
         }
@@ -945,6 +1026,9 @@ static uint8 collect_identify_targets_on_exec_point(const Position *exec_point)
         g_identify_targets[g_identify_target_count].obj_pos_map = boxes[i];
         g_identify_targets[g_identify_target_count].face_dir = face_dir;
         g_identify_targets[g_identify_target_count].obj_type = CONTROL_IDENTIFY_OBJ_BOX;
+        g_identify_targets[g_identify_target_count].recog_distance =
+            (manhattan == 2) ? VISION_RECOGNITION_DISTANCE_TWO_GRID :
+                               VISION_RECOGNITION_DISTANCE_ONE_GRID;
         g_identify_targets[g_identify_target_count].obj_index = (uint8)i;
         g_identify_target_count++;
     }
@@ -959,7 +1043,12 @@ static uint8 collect_identify_targets_on_exec_point(const Position *exec_point)
         d_row = (int32)targets[i].row - (int32)map_point.row;
         d_col = (int32)targets[i].col - (int32)map_point.col;
         manhattan = ((d_row >= 0) ? d_row : -d_row) + ((d_col >= 0) ? d_col : -d_col);
-        if (manhattan != 1)
+        if ((manhattan != 1 && manhattan != 2) ||
+            (d_row != 0 && d_col != 0))
+        {
+            continue;
+        }
+        if (!identify_target_has_clear_view(&map_point, &targets[i]))
         {
             continue;
         }
@@ -975,6 +1064,9 @@ static uint8 collect_identify_targets_on_exec_point(const Position *exec_point)
         g_identify_targets[g_identify_target_count].obj_pos_map = targets[i];
         g_identify_targets[g_identify_target_count].face_dir = face_dir;
         g_identify_targets[g_identify_target_count].obj_type = CONTROL_IDENTIFY_OBJ_TARGET;
+        g_identify_targets[g_identify_target_count].recog_distance =
+            (manhattan == 2) ? VISION_RECOGNITION_DISTANCE_TWO_GRID :
+                               VISION_RECOGNITION_DISTANCE_ONE_GRID;
         g_identify_targets[g_identify_target_count].obj_index = (uint8)i;
         g_identify_target_count++;
     }
@@ -1001,7 +1093,7 @@ static uint8 prepare_identify_endpoints(void)
 
     for (i = 0U; i < g_exec_steps; i++)
     {
-        if (g_exec_path[i].id == IDENTIFICATION)
+        if (is_identification_marker(g_exec_path[i].id))
         {
             if (g_identify_endpoint_count >= MAX_CAR_PATH)
             {

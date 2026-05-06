@@ -1061,6 +1061,39 @@ void vision_uart_rx_interrupt_handler(void)
     }
 }
 
+/*
+ * 根据识别类型和识别距离选择主控要发送给摄像头的命令。
+ *
+ * 新协议里第 1 个字符表示距离：
+ * - '1'：两格距离模型；
+ * - '2'：一格距离模型。
+ *
+ * 第 2 个字符表示模型类型：
+ * - 'I'：图像识别，摄像头返回 IMG,...；
+ * - 'N'：数字识别，摄像头返回 NUM,...。
+ */
+static const char *vision_get_request_command(VisionRecognitionType type,
+                                              VisionRecognitionDistance distance)
+{
+    if (VISION_RECOGNITION_IMG == type) {
+        if (VISION_RECOGNITION_DISTANCE_TWO_GRID == distance) {
+            return UART_CMD_VISION_IMG_TWO_GRID;
+        }
+        if (VISION_RECOGNITION_DISTANCE_ONE_GRID == distance) {
+            return UART_CMD_VISION_IMG_ONE_GRID;
+        }
+    } else if (VISION_RECOGNITION_NUM == type) {
+        if (VISION_RECOGNITION_DISTANCE_TWO_GRID == distance) {
+            return UART_CMD_VISION_NUM_TWO_GRID;
+        }
+        if (VISION_RECOGNITION_DISTANCE_ONE_GRID == distance) {
+            return UART_CMD_VISION_NUM_ONE_GRID;
+        }
+    }
+
+    return NULL;
+}
+
 /* 发送地图请求命令（"MAP"） */
 void uart_send_map_request(void)
 {
@@ -1074,17 +1107,44 @@ void uart_send_car_request(void)
 }
 
 /* 向视觉识别端请求一次数字识别。发送前清掉半包数据，避免旧残留误触发本次结果。 */
+bool uart_send_vision_request(VisionRecognitionType type, VisionRecognitionDistance distance)
+{
+    const char *cmd = vision_get_request_command(type, distance);
+
+    if (cmd == NULL) {
+        return false;
+    }
+
+    /*
+     * 发送新请求前只清空视觉识别串口的 FIFO、行缓冲和 updated 标志。
+     * 地图/车姿 UART1 使用的是另一套 FIFO 和 stream_buf，这里不会碰它们。
+     */
+    vision_clear_pending_data();
+    uart_write_string(VISION_UART_INDEX, cmd);
+    return true;
+}
+
+bool uart_send_vision_num_request_by_distance(VisionRecognitionDistance distance)
+{
+    return uart_send_vision_request(VISION_RECOGNITION_NUM, distance);
+}
+
+bool uart_send_vision_img_request_by_distance(VisionRecognitionDistance distance)
+{
+    return uart_send_vision_request(VISION_RECOGNITION_IMG, distance);
+}
+
+/* 兼容旧调用：默认使用一格距离数字识别模型，即发送 "2N\n"。 */
 void uart_send_vision_num_request(void)
 {
-    vision_clear_pending_data();
-    uart_write_string(VISION_UART_INDEX, UART_CMD_VISION_NUM);
+    (void)uart_send_vision_num_request_by_distance(VISION_RECOGNITION_DISTANCE_ONE_GRID);
 }
 
 /* 向视觉识别端请求一次图案识别。发送前清掉半包数据，避免旧残留误触发本次结果。 */
+/* 兼容旧调用：默认使用一格距离图像识别模型，即发送 "2I\n"。 */
 void uart_send_vision_img_request(void)
 {
-    vision_clear_pending_data();
-    uart_write_string(VISION_UART_INDEX, UART_CMD_VISION_IMG);
+    (void)uart_send_vision_img_request_by_distance(VISION_RECOGNITION_DISTANCE_ONE_GRID);
 }
 
 /* 清空视觉识别接收缓存和“有新结果”标志，但保留最近一次结果内容供调试查看。 */

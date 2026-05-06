@@ -2507,8 +2507,47 @@ static int rebuild_car_path_from_prev(Position start,
     return len;
 }
 
-/* 在 dist 图上选择“对象四邻中最近站位”，避免重复求最短路。 */
-static int pick_best_adjacent_stand_by_dist(Position object_pos,
+static int identify_stand_has_clear_view(const planning_state_t *state,
+                                         Position object_pos,
+                                         Position stand)
+{
+    int dr = (int)stand.row - (int)object_pos.row;
+    int dc = (int)stand.col - (int)object_pos.col;
+    int abs_dr = dr;
+    int abs_dc = dc;
+    int dist;
+    Position mid;
+
+    if (!state || !is_valid_cell(object_pos) || !is_valid_cell(stand))
+        return 0;
+    if (abs_dr < 0)
+        abs_dr = -abs_dr;
+    if (abs_dc < 0)
+        abs_dc = -abs_dc;
+    dist = abs_dr + abs_dc;
+    if ((dist != 1 && dist != 2) || (abs_dr != 0 && abs_dc != 0))
+        return 0;
+    if (dist == 1)
+        return 1;
+
+    mid.row = (uint8)((int)object_pos.row + ((dr > 0) ? 1 : ((dr < 0) ? -1 : 0)));
+    mid.col = (uint8)((int)object_pos.col + ((dc > 0) ? 1 : ((dc < 0) ? -1 : 0)));
+    mid.id = 0;
+
+    if (find_position_index(state->obstacles_state, state->obstacles_cnt, mid) >= 0)
+        return 0;
+    if (find_position_index(state->bombs_state, state->bombs_cnt, mid) >= 0)
+        return 0;
+    if (find_position_index(state->boxes_state, state->boxes_cnt, mid) >= 0)
+        return 0;
+    if (find_position_index(state->targets_state, state->targets_cnt, mid) >= 0)
+        return 0;
+    return 1;
+}
+
+/* 在 dist 图上选择“对象四方向 1/2 格中最近站位”，避免重复求最短路。 */
+static int pick_best_adjacent_stand_by_dist(const planning_state_t *state,
+                                            Position object_pos,
                                             const int *dist,
                                             Position *out_stand,
                                             int *out_steps)
@@ -2516,27 +2555,38 @@ static int pick_best_adjacent_stand_by_dist(Position object_pos,
     const int dr[4] = {-1, 1, 0, 0};
     const int dc[4] = {0, 0, -1, 1};
     int k;
+    int distance;
     int best_steps = INT_MAX;
+    int best_distance = INT_MAX;
     Position best_stand = {0, 0, 0};
 
-    if (!dist || !is_valid_cell(object_pos))
+    if (!state || !dist || !is_valid_cell(object_pos))
         return 0;
 
-    for (k = 0; k < 4; k++)
+    for (distance = 1; distance <= 2; distance++)
     {
-        Position stand = {(uint8)((int)object_pos.row + dr[k]), (uint8)((int)object_pos.col + dc[k]), 0};
-        int idx;
-        int steps;
-        if (!is_valid_cell(stand))
-            continue;
-        idx = (int)stand.row * MAP_COLS + (int)stand.col;
-        steps = dist[idx];
-        if (steps < 0)
-            continue;
-        if (steps < best_steps)
+        for (k = 0; k < 4; k++)
         {
-            best_steps = steps;
-            best_stand = stand;
+            Position stand = {(uint8)((int)object_pos.row + dr[k] * distance),
+                              (uint8)((int)object_pos.col + dc[k] * distance),
+                              0};
+            int idx;
+            int steps;
+            if (!is_valid_cell(stand))
+                continue;
+            if (!identify_stand_has_clear_view(state, object_pos, stand))
+                continue;
+            idx = (int)stand.row * MAP_COLS + (int)stand.col;
+            steps = dist[idx];
+            if (steps < 0)
+                continue;
+            if (steps < best_steps ||
+                (steps == best_steps && distance < best_distance))
+            {
+                best_steps = steps;
+                best_distance = distance;
+                best_stand = stand;
+            }
         }
     }
 
@@ -2582,7 +2632,7 @@ static int estimate_bomb_action_lb_by_dist(const planning_state_t *state, const 
     return best;
 }
 
-/* 识别点统一标记为 IDENTIFICATION，不再区分方向。 */
+/* 识别点统一标记，具体一格/两格距离交给控制流程实时判断。 */
 static uint8 identify_marker_by_relative(Position stand, Position object_pos)
 {
     (void)stand;
@@ -2703,7 +2753,7 @@ static int identify_need_proactive_unlock(const planning_state_t *state,
     return 0;
 }
 
-/* 规划小车到“目标点四邻任一可达格”的最短路径。 */
+/* 规划小车到“目标点四方向 1/2 格任一可达格”的最短路径。 */
 static int build_best_adjacent_identify_path(const planning_state_t *state,
                                              Position object_pos,
                                              Position *out_path,
@@ -2713,7 +2763,9 @@ static int build_best_adjacent_identify_path(const planning_state_t *state,
     const int dr[4] = {-1, 1, 0, 0};
     const int dc[4] = {0, 0, -1, 1};
     int k;
+    int distance;
     int best_len = 0;
+    int best_distance = INT_MAX;
     Position best_path[MAP_ROWS * MAP_COLS];
     Position stand;
 
@@ -2722,31 +2774,39 @@ static int build_best_adjacent_identify_path(const planning_state_t *state,
     if (!is_valid_cell(state->car_state) || !is_valid_cell(object_pos))
         return 0;
 
-    for (k = 0; k < 4; k++)
+    for (distance = 1; distance <= 2; distance++)
     {
-        Position tmp_path[MAP_ROWS * MAP_COLS];
-        int len;
-
-        stand.row = (uint8)((int)object_pos.row + dr[k]);
-        stand.col = (uint8)((int)object_pos.col + dc[k]);
-        stand.id = 0;
-        if (!is_valid_cell(stand))
-            continue;
-
-        len = build_car_shortest_path(state,
-                                      state->car_state,
-                                      stand,
-                                      tmp_path,
-                                      MAP_ROWS * MAP_COLS);
-        if (len <= 0)
-            continue;
-
-        if (best_len == 0 || len < best_len)
+        for (k = 0; k < 4; k++)
         {
-            best_len = len;
-            memcpy(best_path, tmp_path, (size_t)len * sizeof(Position));
-            if (out_stand)
-                *out_stand = stand;
+            Position tmp_path[MAP_ROWS * MAP_COLS];
+            int len;
+
+            stand.row = (uint8)((int)object_pos.row + dr[k] * distance);
+            stand.col = (uint8)((int)object_pos.col + dc[k] * distance);
+            stand.id = 0;
+            if (!is_valid_cell(stand))
+                continue;
+            if (!identify_stand_has_clear_view(state, object_pos, stand))
+                continue;
+
+            len = build_car_shortest_path(state,
+                                          state->car_state,
+                                          stand,
+                                          tmp_path,
+                                          MAP_ROWS * MAP_COLS);
+            if (len <= 0)
+                continue;
+
+            if (best_len == 0 ||
+                len < best_len ||
+                (len == best_len && distance < best_distance))
+            {
+                best_len = len;
+                best_distance = distance;
+                memcpy(best_path, tmp_path, (size_t)len * sizeof(Position));
+                if (out_stand)
+                    *out_stand = stand;
+            }
         }
     }
 
@@ -2770,6 +2830,7 @@ static int collect_identify_wall_candidates(const planning_state_t *state,
     const int dr[4] = {-1, 1, 0, 0};
     const int dc[4] = {0, 0, -1, 1};
     int i, k;
+    int distance;
     int cnt = 0;
     (void)box_done;
     (void)box_cnt;
@@ -2782,32 +2843,42 @@ static int collect_identify_wall_candidates(const planning_state_t *state,
     for (i = 0; i < state->boxes_cnt; i++)
     {
         Position obj = state->boxes_state[i];
-        for (k = 0; k < 4; k++)
+        for (distance = 1; distance <= 2; distance++)
         {
-            Position stand = {(uint8)((int)obj.row + dr[k]), (uint8)((int)obj.col + dc[k]), 0};
-            Position block_bomb;
-            if (!is_valid_cell(stand))
-                continue;
-            if (state_has_obstacle_at(state, stand))
-                append_unique_wall_candidate(out_walls, &cnt, max_walls, stand);
-            if (state_find_bomb_at(state, stand, &block_bomb))
-                append_bomb_local_unlock_walls(state, block_bomb, out_walls, &cnt, max_walls);
+            for (k = 0; k < 4; k++)
+            {
+                Position stand = {(uint8)((int)obj.row + dr[k] * distance),
+                                  (uint8)((int)obj.col + dc[k] * distance),
+                                  0};
+                Position block_bomb;
+                if (!is_valid_cell(stand))
+                    continue;
+                if (state_has_obstacle_at(state, stand))
+                    append_unique_wall_candidate(out_walls, &cnt, max_walls, stand);
+                if (state_find_bomb_at(state, stand, &block_bomb))
+                    append_bomb_local_unlock_walls(state, block_bomb, out_walls, &cnt, max_walls);
+            }
         }
     }
 
     for (i = 0; i < state->targets_cnt; i++)
     {
         Position obj = state->targets_state[i];
-        for (k = 0; k < 4; k++)
+        for (distance = 1; distance <= 2; distance++)
         {
-            Position stand = {(uint8)((int)obj.row + dr[k]), (uint8)((int)obj.col + dc[k]), 0};
-            Position block_bomb;
-            if (!is_valid_cell(stand))
-                continue;
-            if (state_has_obstacle_at(state, stand))
-                append_unique_wall_candidate(out_walls, &cnt, max_walls, stand);
-            if (state_find_bomb_at(state, stand, &block_bomb))
-                append_bomb_local_unlock_walls(state, block_bomb, out_walls, &cnt, max_walls);
+            for (k = 0; k < 4; k++)
+            {
+                Position stand = {(uint8)((int)obj.row + dr[k] * distance),
+                                  (uint8)((int)obj.col + dc[k] * distance),
+                                  0};
+                Position block_bomb;
+                if (!is_valid_cell(stand))
+                    continue;
+                if (state_has_obstacle_at(state, stand))
+                    append_unique_wall_candidate(out_walls, &cnt, max_walls, stand);
+                if (state_find_bomb_at(state, stand, &block_bomb))
+                    append_bomb_local_unlock_walls(state, block_bomb, out_walls, &cnt, max_walls);
+            }
         }
     }
 
@@ -3019,7 +3090,8 @@ static int execute_identify_plan_with_skip(const planning_state_t *initial_state
 
             if (box_done[i])
                 continue;
-            if (!pick_best_adjacent_stand_by_dist(state.boxes_state[i],
+            if (!pick_best_adjacent_stand_by_dist(&state,
+                                                  state.boxes_state[i],
                                                   dist,
                                                   &stand,
                                                   &steps))
@@ -3043,7 +3115,8 @@ static int execute_identify_plan_with_skip(const planning_state_t *initial_state
 
             if (target_done[i])
                 continue;
-            if (!pick_best_adjacent_stand_by_dist(state.targets_state[i],
+            if (!pick_best_adjacent_stand_by_dist(&state,
+                                                  state.targets_state[i],
                                                   dist,
                                                   &stand,
                                                   &steps))
@@ -3233,14 +3306,22 @@ static void plan_mode_identify_auto(void)
         {
             Position stand;
             int steps;
-            if (pick_best_adjacent_stand_by_dist(init_state.boxes_state[i], dist, &stand, &steps))
+            if (pick_best_adjacent_stand_by_dist(&init_state,
+                                                 init_state.boxes_state[i],
+                                                 dist,
+                                                 &stand,
+                                                 &steps))
                 box_score[i] = steps;
         }
         for (i = 0; i < init_state.targets_cnt; i++)
         {
             Position stand;
             int steps;
-            if (pick_best_adjacent_stand_by_dist(init_state.targets_state[i], dist, &stand, &steps))
+            if (pick_best_adjacent_stand_by_dist(&init_state,
+                                                 init_state.targets_state[i],
+                                                 dist,
+                                                 &stand,
+                                                 &steps))
                 target_score[i] = steps;
         }
     }

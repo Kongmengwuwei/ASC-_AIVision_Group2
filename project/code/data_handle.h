@@ -54,8 +54,24 @@
  * - "IMG,<label>,<score>\n"
  * 其中 score 是 0~100 的置信度百分比；识别失败返回 "<cmd>,-1,-1"。
  */
-#define UART_CMD_VISION_NUM "NUM\n"
-#define UART_CMD_VISION_IMG "IMG\n"
+/*
+ * 视觉识别摄像头命令协议。
+ *
+ * 主控每次只发送一条命令，并且必须以 '\n' 结尾：
+ * - "1I\n"：两格距离图像识别模型；
+ * - "2I\n"：一格距离图像识别模型；
+ * - "1N\n"：两格距离数字识别模型；
+ * - "2N\n"：一格距离数字识别模型。
+ *
+ * 返回协议仍按模型类型区分：
+ * - 图像识别返回 "IMG,<标签>,<可信度>\n"；
+ * - 数字识别返回 "NUM,<标签>,<可信度>\n"；
+ * - 识别失败返回 "IMG,-1,-1\n" 或 "NUM,-1,-1\n"。
+ */
+#define UART_CMD_VISION_IMG_TWO_GRID "1I\n"
+#define UART_CMD_VISION_IMG_ONE_GRID "2I\n"
+#define UART_CMD_VISION_NUM_TWO_GRID "1N\n"
+#define UART_CMD_VISION_NUM_ONE_GRID "2N\n"
 
 /* 地图字符语义（供上层业务使用） */
 #define MAP_SYMBOL_OBSTACLE '#'
@@ -70,6 +86,12 @@ typedef enum {
     VISION_RECOGNITION_NUM = 1U,
     VISION_RECOGNITION_IMG = 2U
 } VisionRecognitionType;
+
+typedef enum {
+    VISION_RECOGNITION_DISTANCE_NONE = 0U,
+    VISION_RECOGNITION_DISTANCE_TWO_GRID = 1U,
+    VISION_RECOGNITION_DISTANCE_ONE_GRID = 2U
+} VisionRecognitionDistance;
 
 typedef struct {
     VisionRecognitionType type;       /* 本条结果来自数字模型还是图案模型。 */
@@ -97,9 +119,17 @@ void vision_uart_rx_interrupt_handler(void);
 void uart_send_map_request(void);
 /* 发送 "CAR" 请求命令 */
 void uart_send_car_request(void);
+/* 按“识别类型 + 识别距离”发送新协议命令，命令末尾已包含 '\n'。 */
+bool uart_send_vision_request(VisionRecognitionType type, VisionRecognitionDistance distance);
+/* 向视觉摄像头发送数字识别请求：distance=1 两格，distance=2 一格。 */
+bool uart_send_vision_num_request_by_distance(VisionRecognitionDistance distance);
+/* 向视觉摄像头发送图像识别请求：distance=1 两格，distance=2 一格。 */
+bool uart_send_vision_img_request_by_distance(VisionRecognitionDistance distance);
 /* 向 loadmode.py 发送数字识别请求 "NUM\n"。 */
+/* 兼容旧调用：默认使用一格距离数字识别模型，即发送 "2N\n"。 */
 void uart_send_vision_num_request(void);
 /* 向 loadmode.py 发送图案识别请求 "IMG\n"。 */
+/* 兼容旧调用：默认使用一格距离图像识别模型，即发送 "2I\n"。 */
 void uart_send_vision_img_request(void);
 /* 读取并清除“最新数字识别结果已更新”标志。 */
 bool vision_take_num_result(VisionRecognitionResult *out_result);

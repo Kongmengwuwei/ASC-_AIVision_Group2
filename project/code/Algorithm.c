@@ -1011,7 +1011,6 @@ int get_candidate_walls(const Position *obstacles, int obstacles_cnt,
 
 /*
  * 路径特殊点标记策略（写入 Position.id）：
- * - IDENTIFICATION：路径起点；
  * - TURNING_POINT：发生转向的关键点；
  * - BOMB_EXPLOSION：炸弹爆破事件点（优先级最高）。 */
 static int marker_priority(uint8_t marker_id)
@@ -1044,8 +1043,6 @@ static void annotate_path_special_ids(Position *path, int path_len, int bomb_eve
     {
         path[i].id = 0;
     }
-
-    mark_path_id(path, path_len, 0, IDENTIFICATION);
 
     for (int i = 1; i < path_len - 1; i++)
     {

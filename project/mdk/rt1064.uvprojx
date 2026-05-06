@@ -595,6 +595,16 @@
               <FilePath>..\code\姿态解算使用说明.txt</FilePath>
             </File>
             <File>
+              <FileName>wifi.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\code\wifi.c</FilePath>
+            </File>
+            <File>
+              <FileName>wifi.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\code\wifi.h</FilePath>
+            </File>
+            <File>
               <FileName>Control.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\code\Control.c</FilePath>

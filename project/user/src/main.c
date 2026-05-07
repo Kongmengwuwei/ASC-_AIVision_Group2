@@ -44,11 +44,16 @@
 #include "PID.h"
 #include "PID_config.h"
 #include "Control.h"
+#include "wifi.h"
 #include <string.h>
 
 #define PIT_PRIORITY_0 (PIT_IRQn)
 #define PIT_PRIORITY_1 (PIT_IRQn)
 #define PIT_PRIORITY_2 (PIT_IRQn)
+
+#define WIFI_TEST_SSID          "LEGENDOPPOA5"
+#define WIFI_TEST_PASSWORD      "ajyhotpoint"
+#define WIFI_TEST_TARGET_IP     "10.102.251.146"
 
 int car_stop_array[4] = {0};
 
@@ -59,6 +64,43 @@ int main(void)
 
   // 模块初始化
   system_delay_ms(300); // 等待主板其他外设上电完成
+
+  /*
+   * WiFi SPI 测试流程 1：
+   * 默认启用，上电后只连接 WiFi 并打印模块信息。
+   * 获取到模块 IP 信息并完成上位机连接后，将这里的 #if 1 改为 #if 0。
+   */
+#if 0
+  wifi_test(WIFI_TEST_SSID, WIFI_TEST_PASSWORD);
+
+  while (1)
+  {
+    //system_delay_ms(1000);
+  }
+#endif
+
+  /*
+   * WiFi SPI 测试流程 2：
+   * 上位机与模块准备好后，将这里的 #if 0 改为 #if 1。
+   * 该流程会正常初始化 UDP 连接，并周期发送 HELLOWORLD。
+   */
+#if 1
+  while (wifi_init(WIFI_TEST_SSID, WIFI_TEST_PASSWORD, WIFI_TEST_TARGET_IP))
+  {
+    printf("\r\n wifi init failed");
+    system_delay_ms(100);
+  }
+
+  printf("\r\n wifi init success");
+
+  while (1)
+  {
+    wifi_printf("HELLOWORLD");
+    wifi_receive_update();
+    //system_delay_ms(1000);
+  }
+#endif
+
   Menu_Init();          // 菜单系统初始化(包含按键，显示屏等相关初始化)
   uart_blob_init();     // 摄像头串口接收与解析模块初始化
   flash_init();         // Flash模块初始化

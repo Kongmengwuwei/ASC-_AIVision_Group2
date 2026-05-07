@@ -1,0 +1,50 @@
+Wi-Fi SPI 使用说明：
+
+相关文件：
+wifi.h和wifi.c
+驱动：zf_device_wifi_spi.c/.h
+
+初始化：
+wifi_init("WIFI_NAME", "WIFI_PASSWORD", NULL);
+
+如果第三个参数传 `NULL` 或空字符串，会使用 `zf_device_wifi_spi.h` 中的默认 IP：
+
+wifi_init() 调用后会自动更新全局结构体：
+wifi_info.connect_state;   // 1 已连接，0 未连接
+wifi_info.ssid;            // Wi-Fi 名称
+wifi_info.password;        // Wi-Fi 密码
+wifi_info.ip;              // 目标 IP
+wifi_info.target_port;     // 目标端口
+wifi_info.local_port;      // 本机端口
+方便查看相关数据
+后续可以直接把这些字段接入菜单显示。
+
+发送数据：
+
+wifi_printf("HELLOWORLD");
+wifi_printf("speed:%d yaw:%.2f\r\n", speed, yaw);
+
+wifi_printf() 用法类似 `printf`，内部会自动发送 UDP 数据。
+
+
+调试获取模块信息：
+
+wifi_test("WIFI_NAME", "WIFI_PASSWORD");
+连接成功后会通过串口打印：
+
+版本
+mac地址
+ip地址
+
+这个函数主要用于单独调试模块信息，第一次连可以用，后续还是看结构体里的数据方便一点。
+
+
+接收缓存：
+现在还没有用以后大概也许可能会用
+主循环中可周期调用：
+wifi_receive_update();
+然后读取缓存：
+const uint8 *buf = wifi_get_receive_buffer();
+uint32 len = wifi_get_receive_length();
+清空缓存：
+wifi_clear_receive_buffer();

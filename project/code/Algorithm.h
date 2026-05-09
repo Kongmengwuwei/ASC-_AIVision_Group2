@@ -22,6 +22,7 @@ typedef struct
     int g_cost;
     int h_cost;
     int parent_index;
+    int path_len;
     uint8_t open_or_close;
 } a_star_param;
 
@@ -31,6 +32,7 @@ typedef struct
     int g_cost;
     int h_cost;
     int parent_index;
+    int path_len;
     uint8_t open_or_close;
     uint8_t is_push;
 } a_star_3d_param;
@@ -71,5 +73,14 @@ int integrated_path_output(int row_cnt, int col_cnt,
                            int box_index,
                            Position car_start,
                            path_plan_result *result);
+
+/* 仅判断综合规划是否可达；用于上层可行性筛选，避免生成完整路径。 */
+int integrated_path_exists(int row_cnt, int col_cnt,
+                           const Position *obstacles, int obstacles_cnt,
+                           const Position *bombs, int bombs_cnt,
+                           const Position *boxes, int boxes_cnt,
+                           const Position *targets, int targets_cnt,
+                           int box_index,
+                           Position car_start);
 
 #endif

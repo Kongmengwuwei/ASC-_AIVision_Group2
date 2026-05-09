@@ -44,6 +44,7 @@
 #include "PID.h"
 #include "PID_config.h"
 #include "Control.h"
+#include "wifi.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -51,12 +52,12 @@
 #define PIT_PRIORITY_1 (PIT_IRQn)
 #define PIT_PRIORITY_2 (PIT_IRQn)
 
+#define ALGORITHM_TEST_ENABLE 0     // 1: 启用算法测试，使用预设地图数据进行路径规划测试；0: 关闭算法测试，正常运行控制流程
 
 int main(void)
 {
   clock_init(SYSTEM_CLOCK_600M); // 不可删除
   debug_init();                  // 调试端口初始化
-
   // 模块初始化
   system_delay_ms(300); // 等待主板其他外设上电完成
   Menu_Init();          // 菜单系统初始化(包含按键，显示屏等相关初始化)
@@ -66,6 +67,7 @@ int main(void)
   encoder_init();       // 电机编码器模块初始化
   imu963ra_init();      // IMU模块初始化
   Attitude_Init();      // 姿态解算模块初始化
+  wifi_init("HDUASC_saidao", "zyz520520", NULL);          // Wi-Fi模块初始化
 
   PID_Init(&ULpid, &ULPidInitStruct);
   PID_Init(&URpid, &URPidInitStruct);
@@ -78,7 +80,7 @@ int main(void)
   Kinematics_Init();
   path_follow_init(GRID_SIZE_M, (float)pulse_per_meter);
 
-  // 中断初始化
+  //中断初始化
   pit_ms_init(PIT_CH0, 20);                  // PIT0 periodic interrupt: 20 ms.
   interrupt_set_priority(PIT_PRIORITY_0, 2); // PIT0 interrupt priority.
   pit_ms_init(PIT_CH1, 10);                  // PIT1 periodic interrupt: 10 ms.
@@ -90,11 +92,6 @@ int main(void)
   interrupt_global_enable(0);
 
   control_init();
-
-  // 视觉识别摄像头测试
-#if VISION_CAMERA_TEST_ENABLE
-  vision_camera_test_loop();
-#endif
 
   //算法测试
 #if ALGORITHM_TEST_ENABLE
@@ -111,7 +108,6 @@ int main(void)
   Plan_path_Identify(); // 路径规划
 
   Test_Path_Init(); // 路径初始化
-  }
 #endif
 
   // 主循环

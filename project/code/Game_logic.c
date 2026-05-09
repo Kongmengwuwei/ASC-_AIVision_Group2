@@ -590,7 +590,10 @@ static int plan_box_with_candidates(const planning_state_t *state,
                                     path_plan_result *out_plan)
 {
     Position blocked_obstacles[grid_size];
-    int blocked_obstacles_cnt;
+    const Position *plan_obstacles;
+    int plan_obstacles_cnt;
+    int blocked_obstacles_cnt = 0;
+    int has_forbidden_bomb = 0;
     int i;
 
     if (!state || !targets || targets_cnt <= 0 || !out_plan)
@@ -598,29 +601,87 @@ static int plan_box_with_candidates(const planning_state_t *state,
     if (box_index < 0 || box_index >= state->boxes_cnt)
         return -1;
 
-    blocked_obstacles_cnt = state->obstacles_cnt;
-    memcpy(blocked_obstacles,
-           state->obstacles_state,
-           (size_t)blocked_obstacles_cnt * sizeof(Position));
-
     for (i = 0; i < state->bombs_cnt; i++)
     {
         Position b = state->bombs_state[i];
         if (!position_in_set(b, allowed_bombs, allowed_bombs_cnt))
         {
+            if (!has_forbidden_bomb)
+            {
+                blocked_obstacles_cnt = state->obstacles_cnt;
+                if (blocked_obstacles_cnt > grid_size)
+                    blocked_obstacles_cnt = grid_size;
+                memcpy(blocked_obstacles,
+                       state->obstacles_state,
+                       (size_t)blocked_obstacles_cnt * sizeof(Position));
+                has_forbidden_bomb = 1;
+            }
             if (blocked_obstacles_cnt < grid_size)
                 blocked_obstacles[blocked_obstacles_cnt++] = b;
         }
     }
 
+    plan_obstacles = has_forbidden_bomb ? blocked_obstacles : state->obstacles_state;
+    plan_obstacles_cnt = has_forbidden_bomb ? blocked_obstacles_cnt : state->obstacles_cnt;
+
     return integrated_path_output(MAP_ROWS, MAP_COLS,
-                                  blocked_obstacles, blocked_obstacles_cnt,
+                                  plan_obstacles, plan_obstacles_cnt,
                                   allowed_bombs, allowed_bombs_cnt,
                                   state->boxes_state, state->boxes_cnt,
                                   targets, targets_cnt,
                                   box_index,
                                   car_start,
                                   out_plan);
+}
+
+static int plan_box_exists_with_candidates(const planning_state_t *state,
+                                           int box_index,
+                                           const Position *allowed_bombs, int allowed_bombs_cnt,
+                                           const Position *targets, int targets_cnt,
+                                           Position car_start)
+{
+    Position blocked_obstacles[grid_size];
+    const Position *plan_obstacles;
+    int plan_obstacles_cnt;
+    int blocked_obstacles_cnt = 0;
+    int has_forbidden_bomb = 0;
+    int i;
+
+    if (!state || !targets || targets_cnt <= 0)
+        return -1;
+    if (box_index < 0 || box_index >= state->boxes_cnt)
+        return -1;
+
+    for (i = 0; i < state->bombs_cnt; i++)
+    {
+        Position b = state->bombs_state[i];
+        if (!position_in_set(b, allowed_bombs, allowed_bombs_cnt))
+        {
+            if (!has_forbidden_bomb)
+            {
+                blocked_obstacles_cnt = state->obstacles_cnt;
+                if (blocked_obstacles_cnt > grid_size)
+                    blocked_obstacles_cnt = grid_size;
+                memcpy(blocked_obstacles,
+                       state->obstacles_state,
+                       (size_t)blocked_obstacles_cnt * sizeof(Position));
+                has_forbidden_bomb = 1;
+            }
+            if (blocked_obstacles_cnt < grid_size)
+                blocked_obstacles[blocked_obstacles_cnt++] = b;
+        }
+    }
+
+    plan_obstacles = has_forbidden_bomb ? blocked_obstacles : state->obstacles_state;
+    plan_obstacles_cnt = has_forbidden_bomb ? blocked_obstacles_cnt : state->obstacles_cnt;
+
+    return integrated_path_exists(MAP_ROWS, MAP_COLS,
+                                  plan_obstacles, plan_obstacles_cnt,
+                                  allowed_bombs, allowed_bombs_cnt,
+                                  state->boxes_state, state->boxes_cnt,
+                                  targets, targets_cnt,
+                                  box_index,
+                                  car_start);
 }
 
 /* 妫€鏌モ€滄寚瀹氱瀛?>鎸囧畾鐩爣鈥濆湪绂佺敤鐐稿脊涓嬫槸鍚﹀彲鐩存帹锛堟彁渚?relaxed car 鍏滃簳锛夈€?*/
@@ -656,15 +717,14 @@ static int try_reach_with_car_start(const planning_state_t *state,
                                     Position car_start)
 {
     Position one_target[1];
-    path_plan_result plan;
     int steps;
 
     if (!is_car_start_candidate_free(state, car_start))
         return 0;
 
     one_target[0] = target;
-    steps = plan_box_with_candidates(state, box_index, 0, 0, one_target, 1, car_start, &plan);
-    return (steps > 0 && same_cell(plan.box_target, target)) ? 1 : 0;
+    steps = plan_box_exists_with_candidates(state, box_index, 0, 0, one_target, 1, car_start);
+    return (steps > 0) ? 1 : 0;
 }
 
 static int box_reachable_no_bomb_relaxed(const planning_state_t *state,
@@ -1215,7 +1275,6 @@ static int pair_has_box_action_now(const planning_state_t *state,
     Position one_target[1];
     Position all_bombs[MAX_BOMBS];
     int all_bombs_cnt;
-    path_plan_result plan;
     int steps;
 
     if (!state || !pair || !pair->valid || pair->target_done)
@@ -1243,15 +1302,14 @@ static int pair_has_box_action_now(const planning_state_t *state,
     all_bombs_cnt = state->bombs_cnt;
     memcpy(all_bombs, state->bombs_state, (size_t)all_bombs_cnt * sizeof(Position));
 
-    steps = plan_box_with_candidates(state,
-                                     box_index,
-                                     all_bombs,
-                                     all_bombs_cnt,
-                                     one_target,
-                                     1,
-                                     state->car_state,
-                                     &plan);
-    cached_reachable = (steps > 0 && same_cell(plan.box_target, pair->target_ref)) ? 1 : 0;
+    steps = plan_box_exists_with_candidates(state,
+                                            box_index,
+                                            all_bombs,
+                                            all_bombs_cnt,
+                                            one_target,
+                                            1,
+                                            state->car_state);
+    cached_reachable = (steps > 0) ? 1 : 0;
     store_pair_reach_cache(state_sig,
                            pair->box_id_ref,
                            pair->target_ref,
@@ -1752,10 +1810,16 @@ static int collect_box_action_candidates(const planning_state_t *state,
                                          int max_actions)
 {
     int p;
+    int oi;
+    int eval_cnt = 0;
     int out_cnt = 0;
     int best_steps_seen = INT_MAX;
     Position all_bombs[MAX_BOMBS];
     int all_bombs_cnt;
+    int pair_order[MAX_TARGETS];
+    int pair_box_index[MAX_TARGETS];
+    int pair_lb[MAX_TARGETS];
+    int pair_score[MAX_TARGETS];
 
     if (!state || !pairs || !out_actions || max_actions <= 0)
         return 0;
@@ -1763,14 +1827,11 @@ static int collect_box_action_candidates(const planning_state_t *state,
     all_bombs_cnt = state->bombs_cnt;
     memcpy(all_bombs, state->bombs_state, (size_t)all_bombs_cnt * sizeof(Position));
 
-    for (p = 0; p < pairs->count && out_cnt < max_actions; p++)
+    for (p = 0; p < pairs->count && eval_cnt < MAX_TARGETS; p++)
     {
         const pair_task_t *pair = &pairs->item[p];
         int box_index;
-        Position one_target[1];
-        path_plan_result plan;
-        int steps;
-        round_action_t candidate;
+        int lb;
 
         if (!pair->valid || pair->target_done)
             continue;
@@ -1785,13 +1846,59 @@ static int collect_box_action_candidates(const planning_state_t *state,
         if (!box_can_match_target(state->boxes_state[box_index], pair->target_ref, require_same_id))
             continue;
 
-        /* 下界剪枝：若曼哈顿下界已不优于当前最好步数，跳过昂贵规划。 */
+        /* 先按轻量估计排序，让后续安全下界剪枝尽早拿到较小上界。 */
+        lb = manhattan_cell_dist(state->boxes_state[box_index], pair->target_ref);
+        pair_order[eval_cnt] = p;
+        pair_box_index[eval_cnt] = box_index;
+        pair_lb[eval_cnt] = lb;
+        pair_score[eval_cnt] = lb + manhattan_cell_dist(state->car_state, state->boxes_state[box_index]);
+        eval_cnt++;
+    }
+
+    for (oi = 0; oi < eval_cnt; oi++)
+    {
+        int j;
+        int best = oi;
+        for (j = oi + 1; j < eval_cnt; j++)
         {
-            int lb = manhattan_cell_dist(state->car_state, state->boxes_state[box_index]) +
-                     manhattan_cell_dist(state->boxes_state[box_index], pair->target_ref);
-            if (best_steps_seen < INT_MAX && lb >= best_steps_seen)
-                continue;
+            if (pair_score[j] < pair_score[best] ||
+                (pair_score[j] == pair_score[best] && pair_order[j] < pair_order[best]))
+            {
+                best = j;
+            }
         }
+        if (best != oi)
+        {
+            int tmp_order = pair_order[oi];
+            int tmp_box = pair_box_index[oi];
+            int tmp_lb = pair_lb[oi];
+            int tmp_score = pair_score[oi];
+            pair_order[oi] = pair_order[best];
+            pair_box_index[oi] = pair_box_index[best];
+            pair_lb[oi] = pair_lb[best];
+            pair_score[oi] = pair_score[best];
+            pair_order[best] = tmp_order;
+            pair_box_index[best] = tmp_box;
+            pair_lb[best] = tmp_lb;
+            pair_score[best] = tmp_score;
+        }
+    }
+
+    for (oi = 0; oi < eval_cnt && out_cnt < max_actions; oi++)
+    {
+        const pair_task_t *pair;
+        int box_index;
+        Position one_target[1];
+        path_plan_result plan;
+        int steps;
+        round_action_t candidate;
+
+        if (best_steps_seen < INT_MAX && pair_lb[oi] >= best_steps_seen)
+            continue;
+
+        p = pair_order[oi];
+        pair = &pairs->item[p];
+        box_index = pair_box_index[oi];
 
         one_target[0] = pair->target_ref;
         steps = plan_box_with_candidates(state,
@@ -2168,13 +2275,43 @@ static int is_blocked_for_return(const planning_state_t *state, int row, int col
     return 0;
 }
 
+/* 判断最终返场路径上的某格是否可通行。
+ * 所有箱子完成后，场地障碍物会消失，因此可按需忽略 obstacles_state。 */
+static int is_blocked_for_final_return(const planning_state_t *state,
+                                       int row,
+                                       int col,
+                                       int ignore_obstacles)
+{
+    Position p;
+    if (!state)
+        return 1;
+    if (row < 0 || row >= MAP_ROWS || col < 0 || col >= MAP_COLS)
+        return 1;
+
+    p.row = (uint8)row;
+    p.col = (uint8)col;
+    p.id = 0;
+
+    if (!ignore_obstacles &&
+        find_position_index(state->obstacles_state, state->obstacles_cnt, p) >= 0)
+    {
+        return 1;
+    }
+    if (find_position_index(state->bombs_state, state->bombs_cnt, p) >= 0)
+        return 1;
+    if (find_position_index(state->boxes_state, state->boxes_cnt, p) >= 0)
+        return 1;
+    return 0;
+}
+
 /* 规划“返回发车点”的最短车行路径：
  * 发车点按用户坐标定义为 (x,y) = (0,4),(0,5),(13,4),(13,5)，
  * 转换到 Position(row,col) 为 (4,0),(5,0),(4,13),(5,13)。 */
 static int build_shortest_return_path_to_depot(const planning_state_t *state,
                                                 Position *out_path,
                                                 int max_path,
-                                                Position *out_depot)
+                                                Position *out_depot,
+                                                int ignore_obstacles)
 {
     const Position depots[4] = {
         {4, 0, 0},
@@ -2226,7 +2363,7 @@ static int build_shortest_return_path_to_depot(const planning_state_t *state,
             int nidx;
             if (nr < 0 || nr >= MAP_ROWS || nc < 0 || nc >= MAP_COLS)
                 continue;
-            if (is_blocked_for_return(state, nr, nc))
+            if (is_blocked_for_final_return(state, nr, nc, ignore_obstacles))
                 continue;
 
             nidx = nr * MAP_COLS + nc;
@@ -2245,7 +2382,7 @@ static int build_shortest_return_path_to_depot(const planning_state_t *state,
         int didx;
         if (drow < 0 || drow >= MAP_ROWS || dcol < 0 || dcol >= MAP_COLS)
             continue;
-        if (is_blocked_for_return(state, drow, dcol))
+        if (is_blocked_for_final_return(state, drow, dcol, ignore_obstacles))
             continue;
         didx = drow * MAP_COLS + dcol;
         if (dist[didx] < 0)
@@ -2299,11 +2436,17 @@ static void append_return_to_depot(planning_state_t *state,
     Position ret_path[MAP_ROWS * MAP_COLS];
     Position depot;
     int ret_len;
+    int ignore_obstacles;
 
     if (!state || !merged_path || !merged_len)
         return;
 
-    ret_len = build_shortest_return_path_to_depot(state, ret_path, MAP_ROWS * MAP_COLS, &depot);
+    ignore_obstacles = (state->boxes_cnt <= 0) ? 1 : 0;
+    ret_len = build_shortest_return_path_to_depot(state,
+                                                  ret_path,
+                                                  MAP_ROWS * MAP_COLS,
+                                                  &depot,
+                                                  ignore_obstacles);
     if (ret_len <= 0)
         return;
 
@@ -3437,14 +3580,66 @@ static void plan_mode1_simple(void)
     while (state.boxes_cnt > 0 && state.targets_cnt > 0 && safety_round < 128)
     {
         int b;
+        int oi;
+        int box_eval_cnt;
+        int box_order[MAX_BOXES];
+        int box_lb[MAX_BOXES];
+        int box_score[MAX_BOXES];
         int best_valid = 0;
         int best_steps = 0;
         int best_box_index = -1;
         path_plan_result best_plan;
 
-        for (b = 0; b < state.boxes_cnt; b++)
+        box_eval_cnt = state.boxes_cnt;
+        if (box_eval_cnt > MAX_BOXES)
+            box_eval_cnt = MAX_BOXES;
+        for (b = 0; b < box_eval_cnt; b++)
+        {
+            int t;
+            int min_target_lb = INT_MAX;
+            box_order[b] = b;
+            for (t = 0; t < state.targets_cnt; t++)
+            {
+                int d = manhattan_cell_dist(state.boxes_state[b], state.targets_state[t]);
+                if (d < min_target_lb)
+                    min_target_lb = d;
+            }
+            if (min_target_lb == INT_MAX)
+                min_target_lb = 0;
+            box_lb[b] = min_target_lb;
+            box_score[b] = min_target_lb + manhattan_cell_dist(state.car_state, state.boxes_state[b]);
+        }
+
+        for (oi = 0; oi < box_eval_cnt; oi++)
+        {
+            int j;
+            int best = oi;
+            for (j = oi + 1; j < box_eval_cnt; j++)
+            {
+                if (box_score[j] < box_score[best])
+                    best = j;
+            }
+            if (best != oi)
+            {
+                int tmp_order = box_order[oi];
+                int tmp_lb = box_lb[oi];
+                int tmp_score = box_score[oi];
+                box_order[oi] = box_order[best];
+                box_lb[oi] = box_lb[best];
+                box_score[oi] = box_score[best];
+                box_order[best] = tmp_order;
+                box_lb[best] = tmp_lb;
+                box_score[best] = tmp_score;
+            }
+        }
+
+        for (oi = 0; oi < box_eval_cnt; oi++)
         {
             path_plan_result plan;
+            b = box_order[oi];
+            if (best_valid && box_lb[oi] >= best_steps)
+                continue;
+
             int steps = integrated_path_output(MAP_ROWS, MAP_COLS,
                                                state.obstacles_state, state.obstacles_cnt,
                                                state.bombs_state, state.bombs_cnt,

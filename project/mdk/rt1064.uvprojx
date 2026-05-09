@@ -604,6 +604,16 @@
               <FileType>5</FileType>
               <FilePath>..\code\Control.h</FilePath>
             </File>
+            <File>
+              <FileName>wifi.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\code\wifi.c</FilePath>
+            </File>
+            <File>
+              <FileName>wifi.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\code\wifi.h</FilePath>
+            </File>
           </Files>
         </Group>
         <Group>

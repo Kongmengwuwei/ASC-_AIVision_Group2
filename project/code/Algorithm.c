@@ -419,6 +419,7 @@ static int a_star_path_plan(int row_cnt, int col_cnt,
     a_star[start_index].h_cost = diagonal_distance(start, target);
     a_star[start_index].f_cost = a_star[start_index].g_cost + a_star[start_index].h_cost;
     a_star[start_index].parent_index = -1;
+    a_star[start_index].path_len = 1;
     a_star[start_index].open_or_close = 1; // 1: open
 
     heap_push(a_star, &open_set, start_index);
@@ -466,6 +467,9 @@ static int a_star_path_plan(int row_cnt, int col_cnt,
 
         if (current_index == target_index)
         {
+            if (!out_path)
+                return a_star[target_index].path_len;
+
             // 宸叉壘鍒拌矾寰勶紝鍚戝鍥炴函
             int path_len = 0;
             int curr = target_index;
@@ -527,6 +531,7 @@ static int a_star_path_plan(int row_cnt, int col_cnt,
                     a_star[neighbor_index].g_cost = tentative_g_cost;
                     a_star[neighbor_index].h_cost = diagonal_distance((Position){nr, nc}, target);
                     a_star[neighbor_index].f_cost = a_star[neighbor_index].g_cost + a_star[neighbor_index].h_cost;
+                    a_star[neighbor_index].path_len = a_star[current_index].path_len + 1;
                     a_star[neighbor_index].open_or_close = 1;
                     heap_push(a_star, &open_set, neighbor_index);
                 }
@@ -536,7 +541,8 @@ static int a_star_path_plan(int row_cnt, int col_cnt,
                     a_star[neighbor_index].parent_index = current_index;
                     a_star[neighbor_index].g_cost = tentative_g_cost;
                     a_star[neighbor_index].f_cost = a_star[neighbor_index].g_cost + a_star[neighbor_index].h_cost;
-                                        heap_update(a_star, &open_set, neighbor_index);
+                    a_star[neighbor_index].path_len = a_star[current_index].path_len + 1;
+                    heap_update(a_star, &open_set, neighbor_index);
                 }
             }
         }
@@ -697,13 +703,37 @@ int a_star_path_plan_3d(int row_cnt, int col_cnt,
     const int dir_row_3d[] = {1, -1, 0, 0};
     const int dir_col_3d[] = {0, 0, 1, -1};
     int min_target_distance_from_start = 999999;
+    int cell_cnt = row_cnt * col_cnt;
+    uint8_t target_cell[grid_size];
+    int min_target_h[grid_size];
+
+    if (cell_cnt > grid_size)
+        cell_cnt = grid_size;
+    memset(target_cell, 0, sizeof(target_cell));
+    for (int i = 0; i < cell_cnt; i++)
+        min_target_h[i] = 999999;
 
     for (int t = 0; t < targets_cnt; t++)
     {
-        int h = manhattan_distance_cells(box_start, targets[t]);
-        if (h < min_target_distance_from_start)
-            min_target_distance_from_start = h;
+        if (targets[t].row < row_cnt && targets[t].col < col_cnt)
+            target_cell[(int)targets[t].row * col_cnt + (int)targets[t].col] = 1;
     }
+    for (int idx = 0; idx < cell_cnt; idx++)
+    {
+        Position cell = {(uint8)(idx / col_cnt), (uint8)(idx % col_cnt), 0};
+        for (int t = 0; t < targets_cnt; t++)
+        {
+            int h;
+            if (targets[t].row >= row_cnt || targets[t].col >= col_cnt)
+                continue;
+            h = manhattan_distance_cells(cell, targets[t]);
+            if (h < min_target_h[idx])
+                min_target_h[idx] = h;
+        }
+    }
+    min_target_distance_from_start = min_target_h[(int)box_start.row * col_cnt + (int)box_start.col];
+    if (min_target_distance_from_start == 999999)
+        return -1;
 
     // 浠?涓柟鍚戜腑閫夋嫨鎺ㄥ悜
     for (int f = 0; f < 4; f++)
@@ -714,7 +744,6 @@ int a_star_path_plan_3d(int row_cnt, int col_cnt,
         int first_push_col = box_start.col + dir_col_3d[f];
 
         local_boxes[box_index] = box_start;
-        Position temp_path[grid_size];
 
         if (check_push_destination_blocked(grid, row_cnt, col_cnt,
                                            local_boxes, boxes_cnt,
@@ -727,7 +756,7 @@ int a_star_path_plan_3d(int row_cnt, int col_cnt,
                                         local_boxes, boxes_cnt,
                                         car_start, (Position){push_point_row, push_point_col},
                                         1,
-                                        temp_path);
+                                        0);
 
         if (walk_len >= 0)
         {
@@ -739,6 +768,7 @@ int a_star_path_plan_3d(int row_cnt, int col_cnt,
             a_star_3d[state_index].h_cost = min_target_distance_from_start * COST_PUSH; // 璋冩暣姣斾緥锛屼紭鍏堣€冭檻绠卞瓙缁堢偣
             a_star_3d[state_index].f_cost = a_star_3d[state_index].g_cost + a_star_3d[state_index].h_cost;
             a_star_3d[state_index].parent_index = -1;
+            a_star_3d[state_index].path_len = walk_len;
             a_star_3d[state_index].open_or_close = 1;
             a_star_3d[state_index].is_push = 0; // 娌℃帹杩囷紝鍒氳浆绉诲埌鎺ㄤ綅
 
@@ -757,14 +787,20 @@ int a_star_path_plan_3d(int row_cnt, int col_cnt,
         int col = (curr_index / 4) % col_cnt; // box col
         int face = curr_index % 4;            // push face
         int reached = 0;
-        for (int t = 0; t < targets_cnt; t++)
+        int box_cell_index = row * col_cnt + col;
+        if (target_cell[box_cell_index])
         {
-            if (row == targets[t].row && col == targets[t].col)
+            reached = 1;
+            if (best_target_out)
             {
-                reached = 1;
-                if (best_target_out)
-                    *best_target_out = targets[t];
-                break;
+                for (int t = 0; t < targets_cnt; t++)
+                {
+                    if (row == targets[t].row && col == targets[t].col)
+                    {
+                        *best_target_out = targets[t];
+                        break;
+                    }
+                }
             }
         }
         if (reached)
@@ -791,16 +827,9 @@ int a_star_path_plan_3d(int row_cnt, int col_cnt,
                     a_star_3d[next_index].parent_index = curr_index;
                     a_star_3d[next_index].g_cost = tentative_g;
 
-                    int min_h = 999999;
-                    for (int t = 0; t < targets_cnt; t++)
-                    {
-                        int h = manhattan_distance_cells((Position){next_row, next_col}, targets[t]);
-                        if (h < min_h)
-                            min_h = h;
-                    }
-
-                    a_star_3d[next_index].h_cost = min_h * COST_PUSH;
+                    a_star_3d[next_index].h_cost = min_target_h[next_row * col_cnt + next_col] * COST_PUSH;
                     a_star_3d[next_index].f_cost = tentative_g + a_star_3d[next_index].h_cost;
+                    a_star_3d[next_index].path_len = a_star_3d[curr_index].path_len + 1;
                     a_star_3d[next_index].is_push = 1; // 鐩磋蛋
 
                     if (a_star_3d[next_index].open_or_close == 0)
@@ -840,14 +869,13 @@ int a_star_path_plan_3d(int row_cnt, int col_cnt,
                 continue;
 
             Position car_from = {row - dir_row_3d[face], col - dir_col_3d[face]};
-            Position temp_path[grid_size];
 
             int walk_len = a_star_path_plan(row_cnt, col_cnt,
                                             obstacles, obstacles_cnt, bombs, bombs_cnt,
                                             local_boxes, boxes_cnt,
                                             car_from, (Position){target_face_row, target_face_col},
                                             1,
-                                            temp_path);
+                                            0);
 
             if (walk_len >= 0)
             {
@@ -858,6 +886,7 @@ int a_star_path_plan_3d(int row_cnt, int col_cnt,
                     a_star_3d[next_index].g_cost = tentative_g;
                     a_star_3d[next_index].h_cost = a_star_3d[curr_index].h_cost; // 绠卞瓙娌″姩
                     a_star_3d[next_index].f_cost = tentative_g + a_star_3d[next_index].h_cost;
+                    a_star_3d[next_index].path_len = a_star_3d[curr_index].path_len + walk_len;
                     a_star_3d[next_index].is_push = 0; // 鎹㈠悜鎺?
                     if (a_star_3d[next_index].open_or_close == 0)
                     {
@@ -875,6 +904,8 @@ int a_star_path_plan_3d(int row_cnt, int col_cnt,
 
     if (target_3d_index == -1)
         return -1;
+    if (!full_car_path)
+        return a_star_3d[target_3d_index].path_len;
 
     int sp_path[grid_size * 4];
     int sp_path_len = 0;
@@ -1160,6 +1191,208 @@ int evaluate_bomb_shortcut(int row_cnt, int col_cnt,
         *out_bomb_event_index = phase1_steps - 1;
 
     return phase1_steps + phase2_steps;
+}
+
+int integrated_path_exists(int row_cnt, int col_cnt,
+                           const Position *obstacles, int obstacles_cnt,
+                           const Position *bombs, int bombs_cnt,
+                           const Position *boxes, int boxes_cnt,
+                           const Position *targets, int targets_cnt,
+                           int box_index,
+                           Position car_start)
+{
+    Position simple_target;
+    int simple_len;
+
+    if (!boxes || !targets || targets_cnt <= 0)
+        return -1;
+    if (box_index < 0 || box_index >= boxes_cnt)
+        return -1;
+
+    simple_len = a_star_path_plan_3d(row_cnt, col_cnt,
+                                     obstacles, obstacles_cnt,
+                                     bombs, bombs_cnt,
+                                     boxes, boxes_cnt,
+                                     targets, targets_cnt,
+                                     box_index,
+                                     car_start,
+                                     0,
+                                     &simple_target);
+    if (simple_len > 0)
+        return simple_len;
+    if (bombs_cnt <= 0)
+        return -1;
+
+    {
+        Position candidate_walls[grid_size];
+        Position eval_walls[grid_size];
+        int eval_bomb_indices[MAX_BOMBS];
+        Position nearest_target = targets[0];
+        int nearest_dist = 0x3fffffff;
+        int wall_cnt;
+        int eval_wall_cnt = 0;
+        int eval_bomb_cnt = 0;
+
+        for (int ti = 0; ti < targets_cnt; ti++)
+        {
+            int d = manhattan_dist(boxes[box_index], targets[ti]);
+            if (d < nearest_dist)
+            {
+                nearest_dist = d;
+                nearest_target = targets[ti];
+            }
+        }
+
+        wall_cnt = get_candidate_walls(obstacles, obstacles_cnt,
+                                       boxes[box_index], nearest_target,
+                                       candidate_walls);
+        if (wall_cnt <= 0)
+        {
+            wall_cnt = obstacles_cnt;
+            if (wall_cnt > grid_size)
+                wall_cnt = grid_size;
+            for (int i = 0; i < wall_cnt; i++)
+                candidate_walls[i] = obstacles[i];
+        }
+        if (wall_cnt <= 0)
+            return -1;
+
+        eval_wall_cnt = select_top_walls_by_score(candidate_walls,
+                                                  wall_cnt,
+                                                  FAST_BOMB_MAX_WALLS_WHEN_BLOCKED,
+                                                  boxes[box_index],
+                                                  targets,
+                                                  targets_cnt,
+                                                  car_start,
+                                                  eval_walls);
+        if (eval_wall_cnt <= 0)
+            eval_wall_cnt = wall_cnt;
+        if (eval_wall_cnt == wall_cnt)
+        {
+            memcpy(eval_walls, candidate_walls, (size_t)wall_cnt * sizeof(Position));
+        }
+
+        eval_bomb_cnt = select_top_bomb_indices_by_score(bombs,
+                                                         bombs_cnt,
+                                                         bombs_cnt,
+                                                         boxes[box_index],
+                                                         car_start,
+                                                         eval_bomb_indices);
+        if (eval_bomb_cnt <= 0)
+        {
+            for (int i = 0; i < bombs_cnt && i < MAX_BOMBS; i++)
+                eval_bomb_indices[i] = i;
+            eval_bomb_cnt = bombs_cnt;
+            if (eval_bomb_cnt > MAX_BOMBS)
+                eval_bomb_cnt = MAX_BOMBS;
+        }
+
+        for (int bi = 0; bi < eval_bomb_cnt; bi++)
+        {
+            int b = eval_bomb_indices[bi];
+            for (int w = 0; w < eval_wall_cnt; w++)
+            {
+                Position temp_path[grid_size * 8];
+                Position actual_bomb_target;
+                Position actual_box_target;
+                int bomb_event_index = -1;
+                int bomb_steps = evaluate_bomb_shortcut(row_cnt, col_cnt,
+                                                        obstacles, obstacles_cnt,
+                                                        bombs, bombs_cnt,
+                                                        boxes, boxes_cnt,
+                                                        targets, targets_cnt,
+                                                        box_index, b,
+                                                        eval_walls[w],
+                                                        0,
+                                                        car_start,
+                                                        temp_path,
+                                                        &actual_bomb_target,
+                                                        &actual_box_target,
+                                                        &bomb_event_index);
+                if (bomb_steps > 0)
+                    return bomb_steps;
+            }
+        }
+
+        if (eval_wall_cnt < wall_cnt || eval_bomb_cnt < bombs_cnt)
+        {
+            Position fallback_walls[grid_size];
+            int fallback_bomb_indices[MAX_BOMBS];
+            int fallback_wall_cnt = wall_cnt;
+            int fallback_bomb_cnt = bombs_cnt;
+            int full_combo = bombs_cnt * wall_cnt;
+
+            if (fallback_bomb_cnt > MAX_BOMBS)
+                fallback_bomb_cnt = MAX_BOMBS;
+
+            if (full_combo > 72)
+            {
+                fallback_wall_cnt = select_top_walls_by_score(candidate_walls,
+                                                              wall_cnt,
+                                                              24,
+                                                              boxes[box_index],
+                                                              targets,
+                                                              targets_cnt,
+                                                              car_start,
+                                                              fallback_walls);
+                if (fallback_wall_cnt <= 0 || fallback_wall_cnt > wall_cnt)
+                {
+                    fallback_wall_cnt = wall_cnt;
+                    memcpy(fallback_walls, candidate_walls, (size_t)wall_cnt * sizeof(Position));
+                }
+
+                fallback_bomb_cnt = select_top_bomb_indices_by_score(bombs,
+                                                                      bombs_cnt,
+                                                                      6,
+                                                                      boxes[box_index],
+                                                                      car_start,
+                                                                      fallback_bomb_indices);
+                if (fallback_bomb_cnt <= 0 || fallback_bomb_cnt > bombs_cnt)
+                {
+                    fallback_bomb_cnt = bombs_cnt;
+                    if (fallback_bomb_cnt > MAX_BOMBS)
+                        fallback_bomb_cnt = MAX_BOMBS;
+                    for (int i = 0; i < fallback_bomb_cnt; i++)
+                        fallback_bomb_indices[i] = i;
+                }
+            }
+            else
+            {
+                memcpy(fallback_walls, candidate_walls, (size_t)wall_cnt * sizeof(Position));
+                for (int i = 0; i < fallback_bomb_cnt; i++)
+                    fallback_bomb_indices[i] = i;
+            }
+
+            for (int bi = 0; bi < fallback_bomb_cnt; bi++)
+            {
+                int b = fallback_bomb_indices[bi];
+                for (int w = 0; w < fallback_wall_cnt; w++)
+                {
+                    Position temp_path[grid_size * 8];
+                    Position actual_bomb_target;
+                    Position actual_box_target;
+                    int bomb_event_index = -1;
+                    int bomb_steps = evaluate_bomb_shortcut(row_cnt, col_cnt,
+                                                            obstacles, obstacles_cnt,
+                                                            bombs, bombs_cnt,
+                                                            boxes, boxes_cnt,
+                                                            targets, targets_cnt,
+                                                            box_index, b,
+                                                            fallback_walls[w],
+                                                            0,
+                                                            car_start,
+                                                            temp_path,
+                                                            &actual_bomb_target,
+                                                            &actual_box_target,
+                                                            &bomb_event_index);
+                    if (bomb_steps > 0)
+                        return bomb_steps;
+                }
+            }
+        }
+    }
+
+    return -1;
 }
 
 /*

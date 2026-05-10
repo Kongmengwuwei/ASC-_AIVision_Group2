@@ -171,7 +171,9 @@ static int is_valid_cell(Position p)
 
 static int is_identification_marker(uint8 marker_id)
 {
-    return marker_id == IDENTIFICATION;
+    return marker_id == IDENTIFICATION_ONE_GRID ||
+           marker_id == IDENTIFICATION_TWO_GRID ||
+           marker_id == IDENTIFICATION_MIXED_GRID;
 }
 
 static uint8 marker_priority(uint8 marker_id)
@@ -187,6 +189,12 @@ static uint8 marker_priority(uint8 marker_id)
 
 static uint8 merge_marker(uint8 old_marker, uint8 new_marker)
 {
+    if (is_identification_marker(old_marker) &&
+        is_identification_marker(new_marker) &&
+        old_marker != new_marker)
+    {
+        return IDENTIFICATION_MIXED_GRID;
+    }
     return (marker_priority(new_marker) >= marker_priority(old_marker)) ? new_marker : old_marker;
 }
 
@@ -2775,12 +2783,12 @@ static int estimate_bomb_action_lb_by_dist(const planning_state_t *state, const 
     return best;
 }
 
-/* 识别点统一标记，具体一格/两格距离交给控制流程实时判断。 */
+/* 按识别站位到物体的距离标注路径点，控制流程据此选择一格/两格识别命令。 */
 static uint8 identify_marker_by_relative(Position stand, Position object_pos)
 {
-    (void)stand;
-    (void)object_pos;
-    return IDENTIFICATION;
+    return (manhattan_cell_dist(stand, object_pos) == 2) ?
+           IDENTIFICATION_TWO_GRID :
+           IDENTIFICATION_ONE_GRID;
 }
 
 /* 无炸弹前提下，判断该格是否可作为推箱相关通行格。 */

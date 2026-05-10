@@ -1048,7 +1048,9 @@ static int marker_priority(uint8_t marker_id)
 {
     if (marker_id == BOMB_EXPLOSION)
         return 3;
-    if (marker_id == IDENTIFICATION)
+    if (marker_id == IDENTIFICATION_ONE_GRID ||
+        marker_id == IDENTIFICATION_TWO_GRID ||
+        marker_id == IDENTIFICATION_MIXED_GRID)
         return 2;
     if (marker_id == TURNING_POINT)
         return 1;

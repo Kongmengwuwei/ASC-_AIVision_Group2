@@ -15,10 +15,13 @@
 #define MAX_BOMBS 10
 #define MAX_CAR_PATH 1000
 
-//路径特殊点ID定义
-#define BOMB_EXPLOSION 1        // 炸弹爆炸位置标记
-#define TURNING_POINT  2        // 路径转折点标记
-#define IDENTIFICATION 3        // 识别位置统一标记
+// 路径特殊点ID定义
+#define BOMB_EXPLOSION 1                // 炸弹爆炸位置标记
+#define TURNING_POINT  2                // 路径转折点标记
+#define IDENTIFICATION_ONE_GRID 3       // 一格距离识别位置标记
+#define IDENTIFICATION_TWO_GRID 4       // 两格距离识别位置标记
+#define IDENTIFICATION_MIXED_GRID 5     // 同一识别位置同时包含一格和两格目标
+#define IDENTIFICATION IDENTIFICATION_ONE_GRID // 兼容旧代码：默认按一格识别点处理
 
 typedef struct
 {

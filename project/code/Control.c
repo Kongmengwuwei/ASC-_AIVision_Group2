@@ -12,7 +12,7 @@
  *
  * 需要临时关闭视觉定位时，只改这一处即可。
  */
-static uint8 g_control_use_vision_localization = ENET_1588_Timer_IRQn;
+static uint8 g_control_use_vision_localization = 0U;
 
 /*
  * 手动选择起步发车方向。
@@ -62,11 +62,11 @@ static uint8 g_control_identify_prerotate_enabled = 0U;
 #define CONTROL_RELOCALIZE_MIN_SAMPLES_PUSHBOX 4U
 
 /**
- * @brief 起步位移距离（米）�?
+ * @brief 起步位移距离（米）。
  *
- * 这里采用与地图网格一致的 `GRID_SIZE_M`，即 0.2m�?
+ * 发车阶段只做一小段平移，用于让车离开初始区域；当前配置为 0.3m。
  */
-#define CONTROL_PRESTART_OFFSET_M GRID_SIZE_M
+#define CONTROL_PRESTART_OFFSET_M 0.30f
 
 /* 角度转弧度：yaw_rad = yaw_deg * CONTROL_DEG_TO_RAD */
 #define CONTROL_DEG_TO_RAD 0.01745329251994329577f
@@ -390,7 +390,46 @@ static void configure_bomb_pause_for_path(const Position *path, size_t steps);
 
 static uint8 is_identification_marker(uint8 marker_id)
 {
-    return (marker_id == IDENTIFICATION) ? 1U : 0U;
+    return (marker_id == IDENTIFICATION_ONE_GRID ||
+            marker_id == IDENTIFICATION_TWO_GRID ||
+            marker_id == IDENTIFICATION_MIXED_GRID) ? 1U : 0U;
+}
+
+static VisionRecognitionDistance identify_distance_from_marker(uint8 marker_id)
+{
+    if (marker_id == IDENTIFICATION_TWO_GRID)
+    {
+        return VISION_RECOGNITION_DISTANCE_TWO_GRID;
+    }
+    if (marker_id == IDENTIFICATION_ONE_GRID)
+    {
+        return VISION_RECOGNITION_DISTANCE_ONE_GRID;
+    }
+    return VISION_RECOGNITION_DISTANCE_NONE;
+}
+
+static uint8 identify_distance_matches_marker(VisionRecognitionDistance marker_distance,
+                                              int32 manhattan)
+{
+    if (marker_distance == VISION_RECOGNITION_DISTANCE_NONE)
+    {
+        return (manhattan == 1 || manhattan == 2) ? 1U : 0U;
+    }
+    if (marker_distance == VISION_RECOGNITION_DISTANCE_ONE_GRID)
+    {
+        return (manhattan == 1) ? 1U : 0U;
+    }
+    if (marker_distance == VISION_RECOGNITION_DISTANCE_TWO_GRID)
+    {
+        return (manhattan == 2) ? 1U : 0U;
+    }
+    return 0U;
+}
+
+static VisionRecognitionDistance identify_distance_from_manhattan(int32 manhattan)
+{
+    return (manhattan == 2) ? VISION_RECOGNITION_DISTANCE_TWO_GRID :
+                              VISION_RECOGNITION_DISTANCE_ONE_GRID;
 }
 
 static uint8 resolve_map_dir_from_delta(int32 d_row, int32 d_col, control_map_dir_t *dir_out)
@@ -982,6 +1021,7 @@ static uint8 collect_identify_targets_on_exec_point(const Position *exec_point)
     int32 d_col = 0;
     int32 manhattan = 0;
     control_map_dir_t face_dir = CONTROL_MAP_DIR_RIGHT;
+    VisionRecognitionDistance marker_distance = VISION_RECOGNITION_DISTANCE_NONE;
 
     if (exec_point == NULL)
     {
@@ -993,6 +1033,7 @@ static uint8 collect_identify_targets_on_exec_point(const Position *exec_point)
     g_identify_target_cursor = 0U;
 
     map_point = *exec_point;
+    marker_distance = identify_distance_from_marker(exec_point->id);
     inverse_remap_exec_path_point(&map_point);
 
     for (i = 0U; i < Boxes_count; i++)
@@ -1005,7 +1046,7 @@ static uint8 collect_identify_targets_on_exec_point(const Position *exec_point)
         d_row = (int32)boxes[i].row - (int32)map_point.row;
         d_col = (int32)boxes[i].col - (int32)map_point.col;
         manhattan = ((d_row >= 0) ? d_row : -d_row) + ((d_col >= 0) ? d_col : -d_col);
-        if ((manhattan != 1 && manhattan != 2) ||
+        if (!identify_distance_matches_marker(marker_distance, manhattan) ||
             (d_row != 0 && d_col != 0))
         {
             continue;
@@ -1027,8 +1068,8 @@ static uint8 collect_identify_targets_on_exec_point(const Position *exec_point)
         g_identify_targets[g_identify_target_count].face_dir = face_dir;
         g_identify_targets[g_identify_target_count].obj_type = CONTROL_IDENTIFY_OBJ_BOX;
         g_identify_targets[g_identify_target_count].recog_distance =
-            (manhattan == 2) ? VISION_RECOGNITION_DISTANCE_TWO_GRID :
-                               VISION_RECOGNITION_DISTANCE_ONE_GRID;
+            (marker_distance != VISION_RECOGNITION_DISTANCE_NONE) ?
+            marker_distance : identify_distance_from_manhattan(manhattan);
         g_identify_targets[g_identify_target_count].obj_index = (uint8)i;
         g_identify_target_count++;
     }
@@ -1043,7 +1084,7 @@ static uint8 collect_identify_targets_on_exec_point(const Position *exec_point)
         d_row = (int32)targets[i].row - (int32)map_point.row;
         d_col = (int32)targets[i].col - (int32)map_point.col;
         manhattan = ((d_row >= 0) ? d_row : -d_row) + ((d_col >= 0) ? d_col : -d_col);
-        if ((manhattan != 1 && manhattan != 2) ||
+        if (!identify_distance_matches_marker(marker_distance, manhattan) ||
             (d_row != 0 && d_col != 0))
         {
             continue;
@@ -1065,8 +1106,8 @@ static uint8 collect_identify_targets_on_exec_point(const Position *exec_point)
         g_identify_targets[g_identify_target_count].face_dir = face_dir;
         g_identify_targets[g_identify_target_count].obj_type = CONTROL_IDENTIFY_OBJ_TARGET;
         g_identify_targets[g_identify_target_count].recog_distance =
-            (manhattan == 2) ? VISION_RECOGNITION_DISTANCE_TWO_GRID :
-                               VISION_RECOGNITION_DISTANCE_ONE_GRID;
+            (marker_distance != VISION_RECOGNITION_DISTANCE_NONE) ?
+            marker_distance : identify_distance_from_manhattan(manhattan);
         g_identify_targets[g_identify_target_count].obj_index = (uint8)i;
         g_identify_target_count++;
     }

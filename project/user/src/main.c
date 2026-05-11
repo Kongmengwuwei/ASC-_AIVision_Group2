@@ -137,6 +137,15 @@ void pit_0_handler(void)
 /* PIT1 周期中断（10ms）：编码器采样 + 速度环控制输出。 */
 void pit_1_handler(void)
 {
+  enum
+  {
+    MOTOR_DRIVE_STATE_IDLE = 0U,
+    MOTOR_DRIVE_STATE_ACTIVE = 1U,
+    MOTOR_DRIVE_STATE_UNKNOWN = 0xFFU
+  };
+  static uint8 last_motor_drive_state = MOTOR_DRIVE_STATE_UNKNOWN;
+  uint8 motor_drive_state = (car_go_flag == 1U) ? MOTOR_DRIVE_STATE_ACTIVE : MOTOR_DRIVE_STATE_IDLE;
+
   // 采样编码器
   encoder_get();
 
@@ -188,9 +197,17 @@ void pit_1_handler(void)
   }
   else
   {
-    // 未进入运行态，直接关闭四路 PWM
-    motor_pwm(0, 0, 0, 0);
+    // 未进入运行态时，只在进入停止状态的边沿关闭 PWM，不改 DIR。
+    if (last_motor_drive_state != MOTOR_DRIVE_STATE_IDLE)
+    {
+      pwm_set_duty(MOTOR1_PWM, 0U);
+      pwm_set_duty(MOTOR2_PWM, 0U);
+      pwm_set_duty(MOTOR3_PWM, 0U);
+      pwm_set_duty(MOTOR4_PWM, 0U);
+    }
   }
+
+  last_motor_drive_state = motor_drive_state;
 }
 
 /* PIT2 周期中断（2ms）：姿态解算 */

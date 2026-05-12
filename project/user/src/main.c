@@ -134,7 +134,6 @@ void pit_0_handler(void)
   key_scanner();
 }
 
-/* PIT1 周期中断（10ms）：编码器采样 + 速度环控制输出。 */
 void pit_1_handler(void)
 {
   enum

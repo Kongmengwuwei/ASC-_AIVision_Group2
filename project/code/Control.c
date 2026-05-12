@@ -2778,9 +2778,6 @@ void control_restart(void)
     g_plan_ready = 0U;
     g_exec_steps = 0U;
     memset(g_exec_path, 0, sizeof(g_exec_path));
-    memset(g_exec_raw_path, 0, sizeof(g_exec_raw_path));
-    memset(g_exec_dynamic_blockers, 0, sizeof(g_exec_dynamic_blockers));
-    g_exec_dynamic_blocker_count = 0U;
     reset_localization_accumulator();
     g_prestart_move_started = 0U;
     g_map_right_yaw_deg = 0.0f;

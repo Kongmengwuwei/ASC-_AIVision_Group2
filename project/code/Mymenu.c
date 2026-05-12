@@ -1,6 +1,6 @@
 ﻿#include "Mymenu.h"
 
-Menu_Item Root; // 根目录
+Menu_Item Root;     // 根目录
 Menu_Item *pointer; // 指针
 
 int32_t test1 = 1234; // 测试数据
@@ -8,15 +8,15 @@ float test2 = 123.45; // 测试数据
 uint8_t test3 = 1;    // 测试数据
 bool test4 = true;    // 测试数据
 
-uint8 car_go_flag = 0;          // 运行标志 
-uint8 car_stop_flag = 0;        // 停车标志
+uint8 car_go_flag = 0;   // 运行标志
+uint8 car_stop_flag = 0; // 停车标志
 
 static bool startup_start_switch = false;
 static bool startup_reset_switch = false;
 
 #if ALGORITHM_TEST_ENABLE
-    char move_cmd = 'X'; // 移动命令缓存
-    uint8 move_ret = 0;  // 移动结果缓存
+char move_cmd = 'X'; // 移动命令缓存
+uint8 move_ret = 0;  // 移动结果缓存
 #endif
 
 // 创建菜单
@@ -38,7 +38,6 @@ void Menu_Create(void)
     Create_Menu_File_dynamic(Folder3, "File2", &test2, float_Box);
     Create_Menu_File_dynamic(Folder3, "File3", &test3, uint8_Box);
     Create_Menu_File_dynamic(Folder4, "File4", &test4, bool_Box);
-
 }
 
 static void Menu_Sync_Control_State(void)
@@ -85,7 +84,7 @@ void Menu_Init(void)
     ips200_init(IPS200_TYPE_SPI);
 
     // 按键初始化
-    key_init(20); 
+    key_init(20);
 
     // 菜单节点初始化
     Root.name = "MENU";
@@ -104,7 +103,7 @@ void Menu_Init(void)
     // 菜单初始化处理
     if (Root.sons != 0)
         pointer = Root.First_Son; // 指针默认指向第一个节点
-    All_Folder_Menu_Init(&Root); // 初始化所有文件夹菜单
+    All_Folder_Menu_Init(&Root);  // 初始化所有文件夹菜单
 }
 
 // 显示菜单标题
@@ -507,10 +506,10 @@ void Show_Map(void)
     ips200_show_string(start_x + (map_cols + 1) * cell_size, start_y + FONT_H * 2, "BOM:");
     ips200_show_uint(start_x + (map_cols + 1) * cell_size + FONT_W * 5, start_y + FONT_H * 2, Bombs_count, 2);
 
-    #if ALGORITHM_TEST_ENABLE
-        ips200_show_char(start_x + (map_cols + 1) * cell_size, start_y + FONT_H * 5, move_cmd);
-        ips200_show_int(start_x + (map_cols + 1) * cell_size + FONT_W * 3, start_y + FONT_H * 5, move_ret, 1);
-    #endif
+#if ALGORITHM_TEST_ENABLE
+    ips200_show_char(start_x + (map_cols + 1) * cell_size, start_y + FONT_H * 5, move_cmd);
+    ips200_show_int(start_x + (map_cols + 1) * cell_size + FONT_W * 3, start_y + FONT_H * 5, move_ret, 1);
+#endif
     ips200_show_uint(start_x + (map_cols + 1) * cell_size, start_y + FONT_H * 6, s_path_index, 3);
     ips200_show_char(start_x + (map_cols + 1) * cell_size + FONT_W * 3, start_y + FONT_H * 6, '/');
     ips200_show_uint(start_x + (map_cols + 1) * cell_size + FONT_W * 4, start_y + FONT_H * 6, Car_path_count, 3);
@@ -518,7 +517,7 @@ void Show_Map(void)
 
 void State_Show(void)
 {
-    ips200_show_string(0,176,"State:");
+    ips200_show_string(0, 176, "State:");
 
     switch (g_control_stage)
     {
@@ -715,54 +714,56 @@ void Menu_Switch(void)
 
     if (k1 == KEY_SHORT_PRESS)
     {
-        #ifndef ALGORITHM_TEST_ENABLE
+#ifndef ALGORITHM_TEST_ENABLE
         // 常规模式下菜单操作：选中文件时增大数据，未选中时指针上移
         if (pointer->selected == false)
             Key_Up();
         else
             Key_Plus();
-        #endif
+#endif
     }
     else if (k2 == KEY_SHORT_PRESS)
     {
-        #ifndef ALGORITHM_TEST_ENABLE
+#ifndef ALGORITHM_TEST_ENABLE
         // 常规模式下菜单操作：选中文件时减小数据，未选中时指针下移
         if (pointer->selected == false)
             Key_Down();
         else
             Key_Sub();
-        #endif
+#endif
     }
     else if (k3 == KEY_SHORT_PRESS)
     {
         // control_set_start_enabled(1);
 
-        #if ALGORITHM_TEST_ENABLE
+#if ALGORITHM_TEST_ENABLE
         // 算法测试自动一次性执行完整路径
-        if (Algo_Test_auto)move_ret = Test_Path_ALL();
-        #else
+        if (Algo_Test_auto)
+            move_ret = Test_Path_ALL();
+#else
         // 常规模式下菜单操作：进入文件夹或选中/取消选中文件
         if (pointer->kind == MENU_Folder)
             Key_Enter();
         else if (pointer->selected == false)
             Key_Select();
-        else 
+        else
             Key_SetupCtrl_Sub();
-        #endif
+#endif
     }
 
     else if (k4 == KEY_SHORT_PRESS)
     {
-        #if ALGORITHM_TEST_ENABLE
+#if ALGORITHM_TEST_ENABLE
         // 算法测试自动执行路径一步
-        if (Algo_Test_auto)move_ret = Test_Path_Step(&move_cmd);
-        #else
+        if (Algo_Test_auto)
+            move_ret = Test_Path_Step(&move_cmd);
+#else
         // 常规模式下菜单操作：选中文件时调整步进值，未选中时退出文件夹
         if (pointer->kind != MENU_Folder && pointer->selected == true)
             Key_Deselect();
         else
             Key_Exit();
-        #endif
+#endif
     }
 
     key_clear_state(KEY_1);

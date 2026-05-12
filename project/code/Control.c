@@ -12,7 +12,7 @@
  *
  * 需要临时关闭视觉定位时，只改这一处即可。
  */
-static uint8 g_control_use_vision_localization = ENET_1588_Timer_IRQn;
+static uint8 g_control_use_vision_localization = 1;
 
 /*
  * 手动选择起步发车方向。

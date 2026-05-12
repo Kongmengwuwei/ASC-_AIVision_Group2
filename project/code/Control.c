@@ -23,7 +23,7 @@ static uint8 g_control_use_vision_localization = 0U;
  *
  * 小车只平移到对应方向，车头朝向保持不变。
  */
-static uint8 g_control_prestart_depart_dir = 0U;
+uint8 g_control_prestart_depart_dir = 0U;
 
 /*
  * 手动开关：识别阶段是否启用“段前提前转向”。
@@ -86,10 +86,16 @@ static uint8 g_control_identify_prerotate_enabled = 0U;
 #if CONTROL_COORD_TRANSPOSE_COMPENSATE
 #define CONTROL_WORLD_X_MAX_M ((float)(MAP_COLS - 1) * GRID_SIZE_M)
 #define CONTROL_WORLD_Y_MAX_M ((float)(MAP_ROWS - 1) * GRID_SIZE_M)
+#define CONTROL_EXEC_ROWS MAP_COLS
+#define CONTROL_EXEC_COLS MAP_ROWS
 #else
 #define CONTROL_WORLD_X_MAX_M ((float)(MAP_ROWS - 1) * GRID_SIZE_M)
 #define CONTROL_WORLD_Y_MAX_M ((float)(MAP_COLS - 1) * GRID_SIZE_M)
+#define CONTROL_EXEC_ROWS MAP_ROWS
+#define CONTROL_EXEC_COLS MAP_COLS
 #endif
+
+#define CONTROL_LOS_BLOCK_MARGIN_CELLS 0.0f
 
 
 /* ========================= 内部数据结构 ========================= */
@@ -175,6 +181,8 @@ typedef enum
  */
 control_stage_t g_control_stage = CONTROL_STAGE_IDLE;
 
+static volatile uint8 g_control_start_enabled = 0U;
+
 /**
  * @brief 路径规划保护期标志�?
  *
@@ -189,6 +197,11 @@ static volatile uint8 g_path_plan_paused = 0U;
  * @brief 执行层路径缓存（最终下发给 path_follow）�?
  */
 static Position g_exec_path[MAX_CAR_PATH] = {{0}};
+
+static Position g_exec_raw_path[MAX_CAR_PATH] = {{0}};
+
+static Position g_exec_dynamic_blockers[MAX_CAR_PATH] = {{0}};
+static size_t g_exec_dynamic_blocker_count = 0U;
 
 /**
  * @brief 执行层路径有效点数�?
@@ -1331,6 +1344,359 @@ static uint8 is_same_grid_cell(const Position *a, const Position *b)
     return (a->row == b->row && a->col == b->col) ? 1U : 0U;
 }
 
+static uint8 map_cell_is_valid_int(int32 row, int32 col)
+{
+    return (row >= 0 && row < (int32)MAP_ROWS &&
+            col >= 0 && col < (int32)MAP_COLS) ? 1U : 0U;
+}
+
+static void add_exec_dynamic_blocker(Position p)
+{
+    size_t i;
+
+    if (p.row >= MAP_ROWS || p.col >= MAP_COLS)
+    {
+        return;
+    }
+
+    for (i = 0U; i < g_exec_dynamic_blocker_count; i++)
+    {
+        if (is_same_grid_cell(&g_exec_dynamic_blockers[i], &p))
+        {
+            return;
+        }
+    }
+
+    if (g_exec_dynamic_blocker_count < MAX_CAR_PATH)
+    {
+        g_exec_dynamic_blockers[g_exec_dynamic_blocker_count++] = p;
+    }
+}
+
+static uint8 find_mover_index(Position p,
+                              const Position *movers,
+                              size_t mover_count,
+                              size_t *index_out)
+{
+    size_t i;
+
+    if (movers == NULL || index_out == NULL)
+    {
+        return 0U;
+    }
+
+    for (i = 0U; i < mover_count; i++)
+    {
+        if (is_same_grid_cell(&movers[i], &p))
+        {
+            *index_out = i;
+            return 1U;
+        }
+    }
+    return 0U;
+}
+
+static void collect_dynamic_blockers_from_car_path(const map_runtime_snapshot_t *map_snapshot)
+{
+    Position movers[MAX_BOXES + MAX_BOMBS];
+    size_t mover_count = 0U;
+    size_t box_count;
+    size_t bomb_count;
+    size_t i;
+
+    g_exec_dynamic_blocker_count = 0U;
+    memset(g_exec_dynamic_blockers, 0, sizeof(g_exec_dynamic_blockers));
+
+    if (map_snapshot == NULL || Car_path_count < 2U)
+    {
+        return;
+    }
+
+    box_count = map_snapshot->boxes_count;
+    if (box_count > MAX_BOXES)
+    {
+        box_count = MAX_BOXES;
+    }
+    bomb_count = map_snapshot->bombs_count;
+    if (bomb_count > MAX_BOMBS)
+    {
+        bomb_count = MAX_BOMBS;
+    }
+
+    for (i = 0U; i < box_count; i++)
+    {
+        movers[mover_count++] = map_snapshot->boxes_buf[i];
+        add_exec_dynamic_blocker(map_snapshot->boxes_buf[i]);
+    }
+    for (i = 0U; i < bomb_count; i++)
+    {
+        movers[mover_count++] = map_snapshot->bombs_buf[i];
+        add_exec_dynamic_blocker(map_snapshot->bombs_buf[i]);
+    }
+
+    for (i = 1U; i < Car_path_count; i++)
+    {
+        Position prev = car_path[i - 1U];
+        Position curr = car_path[i];
+        int32 d_row = (int32)curr.row - (int32)prev.row;
+        int32 d_col = (int32)curr.col - (int32)prev.col;
+        size_t mover_idx = 0U;
+        int32 next_row;
+        int32 next_col;
+
+        if (((d_row == 0) ? 0 : ((d_row > 0) ? d_row : -d_row)) +
+            ((d_col == 0) ? 0 : ((d_col > 0) ? d_col : -d_col)) != 1)
+        {
+            continue;
+        }
+
+        if (!find_mover_index(curr, movers, mover_count, &mover_idx))
+        {
+            continue;
+        }
+
+        next_row = (int32)curr.row + d_row;
+        next_col = (int32)curr.col + d_col;
+        if (!map_cell_is_valid_int(next_row, next_col))
+        {
+            continue;
+        }
+
+        movers[mover_idx].row = (uint8)next_row;
+        movers[mover_idx].col = (uint8)next_col;
+        movers[mover_idx].id = curr.id;
+        add_exec_dynamic_blocker(movers[mover_idx]);
+    }
+}
+
+static uint8 is_exec_hard_marker(uint8 marker_id)
+{
+    if (marker_id == BOMB_EXPLOSION)
+    {
+        return 1U;
+    }
+    return is_identification_marker(marker_id);
+}
+
+static uint8 exec_marker_priority(uint8 marker_id)
+{
+    if (marker_id == BOMB_EXPLOSION)
+    {
+        return 3U;
+    }
+    if (is_identification_marker(marker_id))
+    {
+        return 2U;
+    }
+    if (marker_id == TURNING_POINT)
+    {
+        return 1U;
+    }
+    return 0U;
+}
+
+static uint8 merge_exec_marker(uint8 old_marker, uint8 new_marker)
+{
+    if (is_identification_marker(old_marker) &&
+        is_identification_marker(new_marker) &&
+        old_marker != new_marker)
+    {
+        return IDENTIFICATION_MIXED_GRID;
+    }
+
+    return (exec_marker_priority(new_marker) >= exec_marker_priority(old_marker)) ?
+           new_marker : old_marker;
+}
+
+static uint8 exec_path_point_is_valid(const Position *p)
+{
+    if (p == NULL)
+    {
+        return 0U;
+    }
+    return (p->row < CONTROL_EXEC_ROWS && p->col < CONTROL_EXEC_COLS) ? 1U : 0U;
+}
+
+static uint8 line_clip_axis(float start_v,
+                            float delta_v,
+                            float min_v,
+                            float max_v,
+                            float *t_min,
+                            float *t_max)
+{
+    float t1;
+    float t2;
+    float temp;
+
+    if (t_min == NULL || t_max == NULL)
+    {
+        return 0U;
+    }
+
+    if (fabsf(delta_v) <= 1e-6f)
+    {
+        return (start_v >= min_v && start_v <= max_v) ? 1U : 0U;
+    }
+
+    t1 = (min_v - start_v) / delta_v;
+    t2 = (max_v - start_v) / delta_v;
+    if (t1 > t2)
+    {
+        temp = t1;
+        t1 = t2;
+        t2 = temp;
+    }
+
+    if (t1 > *t_min)
+    {
+        *t_min = t1;
+    }
+    if (t2 < *t_max)
+    {
+        *t_max = t2;
+    }
+
+    return (*t_min <= *t_max) ? 1U : 0U;
+}
+
+static uint8 line_intersects_exec_cell(const Position *from,
+                                       const Position *to,
+                                       const Position *cell)
+{
+    float x0;
+    float y0;
+    float dx;
+    float dy;
+    float half = 0.5f + CONTROL_LOS_BLOCK_MARGIN_CELLS;
+    float min_x;
+    float max_x;
+    float min_y;
+    float max_y;
+    float t_min = 0.0f;
+    float t_max = 1.0f;
+
+    if (from == NULL || to == NULL || cell == NULL)
+    {
+        return 0U;
+    }
+
+    x0 = (float)from->row;
+    y0 = (float)from->col;
+    dx = (float)to->row - x0;
+    dy = (float)to->col - y0;
+    min_x = (float)cell->row - half;
+    max_x = (float)cell->row + half;
+    min_y = (float)cell->col - half;
+    max_y = (float)cell->col + half;
+
+    if (!line_clip_axis(x0, dx, min_x, max_x, &t_min, &t_max))
+    {
+        return 0U;
+    }
+    if (!line_clip_axis(y0, dy, min_y, max_y, &t_min, &t_max))
+    {
+        return 0U;
+    }
+
+    return (t_max >= 0.0f && t_min <= 1.0f) ? 1U : 0U;
+}
+
+static uint8 blocker_intersects_exec_segment(Position blocker_map,
+                                             const Position *from,
+                                             const Position *to)
+{
+    Position blocker_exec = blocker_map;
+
+    remap_exec_path_point(&blocker_exec);
+    if (!exec_path_point_is_valid(&blocker_exec))
+    {
+        return 0U;
+    }
+    if (is_same_grid_cell(&blocker_exec, from) ||
+        is_same_grid_cell(&blocker_exec, to))
+    {
+        return 0U;
+    }
+
+    return line_intersects_exec_cell(from, to, &blocker_exec);
+}
+
+static uint8 blocker_array_intersects_exec_segment(const Position *blockers,
+                                                   size_t blocker_count,
+                                                   size_t blocker_capacity,
+                                                   const Position *from,
+                                                   const Position *to)
+{
+    size_t i;
+
+    if (blockers == NULL)
+    {
+        return 0U;
+    }
+    if (blocker_count > blocker_capacity)
+    {
+        blocker_count = blocker_capacity;
+    }
+
+    for (i = 0U; i < blocker_count; i++)
+    {
+        if (blocker_intersects_exec_segment(blockers[i], from, to))
+        {
+            return 1U;
+        }
+    }
+    return 0U;
+}
+
+static uint8 exec_segment_has_clear_line(const map_runtime_snapshot_t *map_snapshot,
+                                         const Position *from,
+                                         const Position *to)
+{
+    if (map_snapshot == NULL || from == NULL || to == NULL)
+    {
+        return 0U;
+    }
+    if (!exec_path_point_is_valid(from) || !exec_path_point_is_valid(to))
+    {
+        return 0U;
+    }
+
+    if (blocker_array_intersects_exec_segment(map_snapshot->obstacles_buf,
+                                              map_snapshot->obstacles_count,
+                                              MAX_OBSTACLES,
+                                              from,
+                                              to))
+    {
+        return 0U;
+    }
+    if (blocker_array_intersects_exec_segment(map_snapshot->bombs_buf,
+                                              map_snapshot->bombs_count,
+                                              MAX_BOMBS,
+                                              from,
+                                              to))
+    {
+        return 0U;
+    }
+    if (blocker_array_intersects_exec_segment(map_snapshot->boxes_buf,
+                                              map_snapshot->boxes_count,
+                                              MAX_BOXES,
+                                              from,
+                                              to))
+    {
+        return 0U;
+    }
+    if (blocker_array_intersects_exec_segment(g_exec_dynamic_blockers,
+                                              g_exec_dynamic_blocker_count,
+                                              MAX_CAR_PATH,
+                                              from,
+                                              to))
+    {
+        return 0U;
+    }
+
+    return 1U;
+}
+
 /**
  * @brief 为当前执行路径配置“炸弹爆炸点停留”事件。
  *
@@ -1426,6 +1792,62 @@ static uint8 is_collinear_forward(const Position *a,
  * - 1：转换成�?
  * - 0：输入参数无效或视觉位姿尚未就绪
  */
+/* Greedily keeps the farthest visible waypoint while preserving hard events. */
+static uint8 smooth_exec_path_from_raw(const map_runtime_snapshot_t *map_snapshot,
+                                       const Position *raw_path,
+                                       size_t raw_steps)
+{
+    size_t anchor_idx = 0U;
+    size_t out_steps = 0U;
+
+    if (map_snapshot == NULL || raw_path == NULL || raw_steps < 2U)
+    {
+        return 0U;
+    }
+
+    memset(g_exec_path, 0, sizeof(g_exec_path));
+    g_exec_path[out_steps++] = raw_path[0];
+
+    while ((anchor_idx + 1U) < raw_steps)
+    {
+        size_t limit_idx = raw_steps - 1U;
+        size_t scan_idx;
+        size_t best_idx;
+
+        for (scan_idx = anchor_idx + 1U; scan_idx < raw_steps; scan_idx++)
+        {
+            if (is_exec_hard_marker(raw_path[scan_idx].id))
+            {
+                limit_idx = scan_idx;
+                break;
+            }
+        }
+
+        best_idx = limit_idx;
+        while (best_idx > (anchor_idx + 1U))
+        {
+            if (exec_segment_has_clear_line(map_snapshot,
+                                            &raw_path[anchor_idx],
+                                            &raw_path[best_idx]))
+            {
+                break;
+            }
+            best_idx--;
+        }
+
+        if (out_steps >= MAX_CAR_PATH)
+        {
+            return 0U;
+        }
+        g_exec_path[out_steps++] = raw_path[best_idx];
+        anchor_idx = best_idx;
+    }
+
+    g_exec_steps = out_steps;
+    return (g_exec_steps >= 2U) ? 1U : 0U;
+}
+
+/* Convert camera pose to path_follow meter coordinates. */
 static uint8 get_camera_pose_meter(float *x_m, float *y_m, float *yaw_deg)
 {
     float row_f = 0.0f;
@@ -1626,68 +2048,73 @@ static void snapshot_restore(const map_runtime_snapshot_t *snap)
  * - 1：成功生成执行路�?
  * - 0：规划路径无�?
  */
-static uint8 build_exec_path_from_planner(void)
+static uint8 build_exec_path_from_planner(const map_runtime_snapshot_t *map_snapshot)
 {
     size_t i = 0U;
-    size_t out_steps = 0U;
+    size_t raw_steps = 0U;
     Position mapped = {0};
 
     g_exec_steps = 0U;
     memset(g_exec_path, 0, sizeof(g_exec_path));
+    memset(g_exec_raw_path, 0, sizeof(g_exec_raw_path));
 
-    if (Car_path_count < 2U || Car_path_count > MAX_CAR_PATH)
+    if (map_snapshot == NULL ||
+        Car_path_count < 2U || Car_path_count > MAX_CAR_PATH)
     {
         return 0U;
     }
 
     /* 路径下发前统一做：坐标映射 + 重复点剔�?+ 直线段压缩�?*/
+    collect_dynamic_blockers_from_car_path(map_snapshot);
+
     for (i = 0U; i < Car_path_count; i++)
     {
         mapped = car_path[i];
         remap_exec_path_point(&mapped);
 
-        if (out_steps == 0U)
+        if (raw_steps == 0U)
         {
-            g_exec_path[out_steps++] = mapped;
+            g_exec_raw_path[raw_steps++] = mapped;
             continue;
         }
 
-        if (is_same_grid_cell(&g_exec_path[out_steps - 1U], &mapped))
+        if (is_same_grid_cell(&g_exec_raw_path[raw_steps - 1U], &mapped))
         {
             /* 同格重复点：若新点带事件 id，覆盖保留�?*/
             if (mapped.id != 0U)
             {
-                g_exec_path[out_steps - 1U].id = mapped.id;
+                g_exec_raw_path[raw_steps - 1U].id =
+                    merge_exec_marker(g_exec_raw_path[raw_steps - 1U].id, mapped.id);
             }
             continue;
         }
 
-        if (out_steps >= 2U &&
-            g_exec_path[out_steps - 1U].id == 0U &&
-            mapped.id == 0U &&
-            is_collinear_forward(&g_exec_path[out_steps - 2U],
-                                 &g_exec_path[out_steps - 1U],
+        if (raw_steps >= 2U &&
+            !is_exec_hard_marker(g_exec_raw_path[raw_steps - 1U].id) &&
+            !is_exec_hard_marker(mapped.id) &&
+            is_collinear_forward(&g_exec_raw_path[raw_steps - 2U],
+                                 &g_exec_raw_path[raw_steps - 1U],
                                  &mapped))
         {
             /* 直线同向延长：用新终点替换旧终点，实现“一段到底”�?*/
-            g_exec_path[out_steps - 1U] = mapped;
+            mapped.id = merge_exec_marker(g_exec_raw_path[raw_steps - 1U].id, mapped.id);
+            g_exec_raw_path[raw_steps - 1U] = mapped;
             continue;
         }
 
-        if (out_steps >= MAX_CAR_PATH)
+        if (raw_steps >= MAX_CAR_PATH)
         {
             return 0U;
         }
-        g_exec_path[out_steps++] = mapped;
+        g_exec_raw_path[raw_steps++] = mapped;
     }
 
-    if (out_steps < 2U)
+    if (raw_steps < 2U)
     {
         return 0U;
     }
 
-    g_exec_steps = out_steps;
-    return 1U;
+    return smooth_exec_path_from_raw(map_snapshot, g_exec_raw_path, raw_steps);
 }
 
 /**
@@ -1732,7 +2159,7 @@ static uint8 control_plan_path(void)
         return 0U;
     }
 
-    if (!build_exec_path_from_planner())
+    if (!build_exec_path_from_planner(&map_snapshot))
     {
         snapshot_restore(&map_snapshot);
         return 0U;
@@ -2305,12 +2732,16 @@ static void handle_error_stage(void)
 
 void control_init(void)
 {
-    g_control_stage = CONTROL_STAGE_PRESTART_MOVE;
+    g_control_start_enabled = 0U;
+    g_control_stage = CONTROL_STAGE_IDLE;
     g_control_flow_phase = CONTROL_FLOW_IDENTIFY;
     g_path_plan_paused = 0U;
     g_plan_ready = 0U;
     g_exec_steps = 0U;
     memset(g_exec_path, 0, sizeof(g_exec_path));
+    memset(g_exec_raw_path, 0, sizeof(g_exec_raw_path));
+    memset(g_exec_dynamic_blockers, 0, sizeof(g_exec_dynamic_blockers));
+    g_exec_dynamic_blocker_count = 0U;
 
     reset_localization_accumulator();
     g_prestart_move_started = 0U;
@@ -2340,11 +2771,16 @@ void control_init(void)
 
 void control_restart(void)
 {
-    g_control_stage = CONTROL_STAGE_PRESTART_MOVE;
+    g_control_start_enabled = 0U;
+    g_control_stage = CONTROL_STAGE_IDLE;
     g_control_flow_phase = CONTROL_FLOW_IDENTIFY;
     g_path_plan_paused = 0U;
     g_plan_ready = 0U;
     g_exec_steps = 0U;
+    memset(g_exec_path, 0, sizeof(g_exec_path));
+    memset(g_exec_raw_path, 0, sizeof(g_exec_raw_path));
+    memset(g_exec_dynamic_blockers, 0, sizeof(g_exec_dynamic_blockers));
+    g_exec_dynamic_blocker_count = 0U;
     reset_localization_accumulator();
     g_prestart_move_started = 0U;
     g_map_right_yaw_deg = 0.0f;
@@ -2368,6 +2804,26 @@ void control_restart(void)
     car_pose_updated = false;
 }
 
+void control_set_start_enabled(uint8 enabled)
+{
+    if (enabled)
+    {
+        g_control_start_enabled = 1U;
+        if (g_control_stage == CONTROL_STAGE_IDLE)
+        {
+            g_control_stage = CONTROL_STAGE_PRESTART_MOVE;
+        }
+        return;
+    }
+
+    control_restart();
+}
+
+uint8 control_get_start_enabled(void)
+{
+    return g_control_start_enabled;
+}
+
 void control_process(void)
 {
     /*
@@ -2379,6 +2835,14 @@ void control_process(void)
      */
     process_blob_data();
     process_vision_data();
+
+    if (!g_control_start_enabled)
+    {
+        car_go_flag = 0U;
+        car_stop_flag = 0U;
+        g_control_stage = CONTROL_STAGE_IDLE;
+        return;
+    }
 
     switch (g_control_stage)
     {

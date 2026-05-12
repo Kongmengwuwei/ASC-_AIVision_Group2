@@ -6,18 +6,7 @@
 #include "Map_Path_Data.h"
 #include "path_follow.h"
 
-/**
- * @file Control.h
- * @brief 视觉推箱车主控制流程接口。
- *
- * 该模块负责把上层任务拆成固定阶段并串起来执行：
- * 1) 启动出发车区动作（沿车头方向移动 0.2m）
- * 2) 启动初始定位
- * 3) 等待摄像头地图数据
- * 4) 路径规划
- * 5) 路径下发并执行
- * 6) 路径执行与完结
- */
+extern uint8 g_control_prestart_depart_dir;
 
 /**
  * @brief 控制流程阶段定义。
@@ -25,7 +14,7 @@
 typedef enum
 {
     CONTROL_STAGE_IDLE = 0,         /**< 空闲态：流程未启动。 */
-    CONTROL_STAGE_PRESTART_MOVE,    /**< 起步态：先沿车头方向运动 0.2m，驶出发车区。 */
+    CONTROL_STAGE_PRESTART_MOVE,    /**< 起步态：先沿设定方向运动 0.3m，驶出发车区。 */
     CONTROL_STAGE_STARTUP_LOCALIZE, /**< 初始定位态：采集相机位姿并对齐里程计。 */
     CONTROL_STAGE_WAIT_CAMERA_DATA, /**< 等待地图态：周期请求并等待摄像头地图帧。 */
     CONTROL_STAGE_PLAN_PATH,        /**< 规划态：调用 Game_logic 进行路径规划。 */
@@ -34,6 +23,8 @@ typedef enum
     CONTROL_STAGE_FINISHED,         /**< 完成态：整段路径执行完毕并保持停车。 */
     CONTROL_STAGE_ERROR             /**< 错误态：规划/下发失败，等待新地图后重试。 */
 } control_stage_t;
+
+extern control_stage_t g_control_stage;
 
 /**
  * @brief 路径规划模式枚举。
@@ -53,8 +44,6 @@ typedef enum
     CONTROL_PLAN_MODE_2 = 1U,
     CONTROL_PLAN_MODE_IDENTIFY = 2U
 } control_plan_mode_t;
-
-extern control_stage_t g_control_stage;
 
 /**
  * @brief 初始化控制状态机（上电后调用一次）。
@@ -85,6 +74,10 @@ void control_process(void);
  * - 需要基于新场景重新开始
  */
 void control_restart(void);
+
+void control_set_start_enabled(uint8 enabled);
+
+uint8 control_get_start_enabled(void);
 
 /**
  * @brief 获取当前控制阶段。

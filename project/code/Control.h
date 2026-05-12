@@ -6,18 +6,7 @@
 #include "Map_Path_Data.h"
 #include "path_follow.h"
 
-/**
- * @file Control.h
- * @brief 视觉推箱车主控制流程接口。
- *
- * 该模块负责把上层任务拆成固定阶段并串起来执行：
- * 1) 启动出发车区动作（沿车头方向移动 0.2m）
- * 2) 启动初始定位
- * 3) 等待摄像头地图数据
- * 4) 路径规划
- * 5) 路径下发并执行
- * 6) 路径执行与完结
- */
+extern uint8 g_control_prestart_depart_dir;
 
 /**
  * @brief 控制流程阶段定义。
@@ -85,6 +74,10 @@ void control_process(void);
  * - 需要基于新场景重新开始
  */
 void control_restart(void);
+
+void control_set_start_enabled(uint8 enabled);
+
+uint8 control_get_start_enabled(void);
 
 /**
  * @brief 获取当前控制阶段。

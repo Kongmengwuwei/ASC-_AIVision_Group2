@@ -1,38 +1,77 @@
 ﻿#include "Mymenu.h"
 
-Menu_Item Root; // 根目录
+Menu_Item Root;     // 根目录
 Menu_Item *pointer; // 指针
-
-char move_cmd = 'X'; // 移动命令缓存
-uint8 move_ret = 0; // 移动结果缓存
 
 int32_t test1 = 1234; // 测试数据
 float test2 = 123.45; // 测试数据
 uint8_t test3 = 1;    // 测试数据
 bool test4 = true;    // 测试数据
 
-bool Algo_Test_auto = false;    // 自动算法测试开关
-bool Algo_Test_hand = false;    // 手动算法测试开关
-uint8 car_go_flag = 0;          // 运行标志 
-uint8 car_stop_flag = 0;        // 停车标志
+uint8 car_go_flag = 0;   // 运行标志
+uint8 car_stop_flag = 0; // 停车标志
+
+static bool startup_start_switch = false;
+static bool startup_reset_switch = false;
+
+#if ALGORITHM_TEST_ENABLE
+char move_cmd = 'X'; // 移动命令缓存
+uint8 move_ret = 0;  // 移动结果缓存
+#endif
 
 // 创建菜单
 void Menu_Create(void)
 {
     // 在此动态创建文件夹 //
-    Menu_Item *Folder1 = Create_Menu_Folder_dynamic(&Root, "Mode");
-    Menu_Item *Folder2 = Create_Menu_Folder_dynamic(&Root, "Data");
-    Menu_Item *Folder3 = Create_Menu_Folder_dynamic(&Root, "Folder3");
-    Menu_Item *Folder4 = Create_Menu_Folder_dynamic(&Root, "Folder4");
-    Menu_Item *Folder5 = Create_Menu_Folder_dynamic(&Root, "Folder5");
+    Menu_Item *Folder1 = Create_Menu_Folder_dynamic(&Root, "Startup");
+    Menu_Item *Folder2 = Create_Menu_Folder_dynamic(&Root, "Mode");
+    Menu_Item *Folder3 = Create_Menu_Folder_dynamic(&Root, "Data");
+    Menu_Item *Folder4 = Create_Menu_Folder_dynamic(&Root, "Folder3");
+    Menu_Item *Folder5 = Create_Menu_Folder_dynamic(&Root, "Folder4");
 
     // 在此动态创建文件 //
-    Create_Menu_File_dynamic(Folder1, "ALgo_Auto", &Algo_Test_auto, bool_Box);
-    Create_Menu_File_dynamic(Folder1, "ALgo_Hand", &Algo_Test_hand, bool_Box);
-    Create_Menu_File_dynamic(Folder2, "File2", &test2, float_Box);
+    Create_Menu_File_dynamic(Folder1, "Start", &startup_start_switch, bool_Box);
+    Create_Menu_File_dynamic(Folder1, "Reset", &startup_reset_switch, bool_Box);
+
+    Create_Menu_File_dynamic(Folder2, "Start_DIR", &g_control_prestart_depart_dir, uint8_Box);
+
+    Create_Menu_File_dynamic(Folder3, "File2", &test2, float_Box);
     Create_Menu_File_dynamic(Folder3, "File3", &test3, uint8_Box);
     Create_Menu_File_dynamic(Folder4, "File4", &test4, bool_Box);
-    Create_Menu_File_dynamic(Folder5, "File5", &test1, int32_Box);
+}
+
+static void Menu_Sync_Control_State(void)
+{
+    startup_start_switch = (control_get_start_enabled() != 0U);
+    startup_reset_switch = false;
+}
+
+static bool Menu_Handle_Startup_Bool(Menu_Item *item, bool value)
+{
+    if (item == NULL || item->kind != bool_Box)
+    {
+        return false;
+    }
+
+    if (item->data == &startup_start_switch)
+    {
+        startup_start_switch = value;
+        control_set_start_enabled(value ? 1U : 0U);
+        return true;
+    }
+
+    if (item->data == &startup_reset_switch)
+    {
+        if (value)
+        {
+            control_restart();
+            startup_start_switch = false;
+        }
+        startup_reset_switch = false;
+        return true;
+    }
+
+    return false;
 }
 
 // 菜单初始化
@@ -45,7 +84,7 @@ void Menu_Init(void)
     ips200_init(IPS200_TYPE_SPI);
 
     // 按键初始化
-    key_init(20); 
+    key_init(20);
 
     // 菜单节点初始化
     Root.name = "MENU";
@@ -64,7 +103,7 @@ void Menu_Init(void)
     // 菜单初始化处理
     if (Root.sons != 0)
         pointer = Root.First_Son; // 指针默认指向第一个节点
-    All_Folder_Menu_Init(&Root); // 初始化所有文件夹菜单
+    All_Folder_Menu_Init(&Root);  // 初始化所有文件夹菜单
 }
 
 // 显示菜单标题
@@ -154,7 +193,7 @@ void Show_Number(void)
             if (*(bool *)(s->data))
                 ips200_show_string(FONT_W * (COLS_SUM_LEN - FOLDER_NUMBER_LEN - 1), SHOW_START_Y + FONT_H * i, "On");
             else
-                ips200_show_string(FONT_W * (COLS_SUM_LEN - FOLDER_NUMBER_LEN - 1), SHOW_START_Y + FONT_H * i, "Off");
+                ips200_show_string(FONT_W * (COLS_SUM_LEN - FOLDER_NUMBER_LEN - 1), SHOW_START_Y + FONT_H * i, "Of");
         default:
             break;
         }
@@ -467,8 +506,10 @@ void Show_Map(void)
     ips200_show_string(start_x + (map_cols + 1) * cell_size, start_y + FONT_H * 2, "BOM:");
     ips200_show_uint(start_x + (map_cols + 1) * cell_size + FONT_W * 5, start_y + FONT_H * 2, Bombs_count, 2);
 
+#if ALGORITHM_TEST_ENABLE
     ips200_show_char(start_x + (map_cols + 1) * cell_size, start_y + FONT_H * 5, move_cmd);
     ips200_show_int(start_x + (map_cols + 1) * cell_size + FONT_W * 3, start_y + FONT_H * 5, move_ret, 1);
+#endif
     ips200_show_uint(start_x + (map_cols + 1) * cell_size, start_y + FONT_H * 6, s_path_index, 3);
     ips200_show_char(start_x + (map_cols + 1) * cell_size + FONT_W * 3, start_y + FONT_H * 6, '/');
     ips200_show_uint(start_x + (map_cols + 1) * cell_size + FONT_W * 4, start_y + FONT_H * 6, Car_path_count, 3);
@@ -476,7 +517,7 @@ void Show_Map(void)
 
 void State_Show(void)
 {
-    ips200_show_string(0,176,"State:");
+    ips200_show_string(0, 176, "State:");
 
     switch (g_control_stage)
     {
@@ -515,6 +556,8 @@ void Menu_Show(void)
 {
     Menu_Item *r = pointer->Father;
     Menu_Item *s = r->First_Son;
+
+    Menu_Sync_Control_State();
 
     Show_title();
     for (int i = 1; i < r->sons + 1; i++)
@@ -567,7 +610,11 @@ void Key_Plus(void) // 数据增大
         *(float *)pointer->data += SetupNumber[SetupIndex];
         break;
     case bool_Box:
-        *(bool *)pointer->data = true;
+        if (!Menu_Handle_Startup_Bool(pointer, true))
+        {
+            *(bool *)pointer->data = true;
+        }
+        break;
     default:
         break;
     }
@@ -598,7 +645,10 @@ void Key_Sub(void) // 数据减小
         *(float *)pointer->data -= SetupNumber[SetupIndex];
         break;
     case bool_Box:
-        *(bool *)pointer->data = false;
+        if (!Menu_Handle_Startup_Bool(pointer, false))
+        {
+            *(bool *)pointer->data = false;
+        }
         break;
     default:
         break;
@@ -634,10 +684,15 @@ void Key_Exit(void) // 退出文件夹
         ips200_show_string(0, 112, "                              ");
     }
 }
-void Key_Select(void) // 选中/取消选中
+void Key_Select(void) // 取消选中
 {
     if (pointer->kind != MENU_Folder)
-        pointer->selected = !pointer->selected;
+        pointer->selected = 1;
+}
+void Key_Deselect(void) // 取消选中
+{
+    if (pointer->kind != MENU_Folder)
+        pointer->selected = 0;
 }
 void Key_SetupCtrl_Plus(void) // 步进值增大
 {
@@ -652,65 +707,63 @@ void Key_SetupCtrl_Sub(void) // 步进值减小(可返回最大值)
 void Menu_Switch(void)
 {
     // 按键在此更改
-    key_state_enum k2 = key_get_state(KEY_1);
-    key_state_enum k1 = key_get_state(KEY_2);
-    key_state_enum k3 = key_get_state(KEY_3);
-    key_state_enum k4 = key_get_state(KEY_4);
+    key_state_enum k1 = key_get_state(KEY_1);
+    key_state_enum k3 = key_get_state(KEY_2);
+    key_state_enum k4 = key_get_state(KEY_3);
+    key_state_enum k2 = key_get_state(KEY_4);
 
     if (k1 == KEY_SHORT_PRESS)
     {
-        if (Algo_Test_hand)Move_car('W'); // 算法测试用小车向上移动
-
-        //常规模式下菜单操作：选中文件时增大数据，未选中时指针上移
-        if (!Algo_Test_hand && !Algo_Test_auto)
-        {
-            if (pointer->selected == false)
-                Key_Up();
-            else
-                Key_Plus();
-        }
+#ifndef ALGORITHM_TEST_ENABLE
+        // 常规模式下菜单操作：选中文件时增大数据，未选中时指针上移
+        if (pointer->selected == false)
+            Key_Up();
+        else
+            Key_Plus();
+#endif
     }
     else if (k2 == KEY_SHORT_PRESS)
     {
-        if (Algo_Test_hand)Move_car('S'); // 算法测试用小车向下移动
-
-        //常规模式下菜单操作：选中文件时减小数据，未选中时指针下移
-        if (!Algo_Test_hand && !Algo_Test_auto)
-        {       
-            if (pointer->selected == false)
-                Key_Down();
-            else
-                Key_Sub();
-        }
+#ifndef ALGORITHM_TEST_ENABLE
+        // 常规模式下菜单操作：选中文件时减小数据，未选中时指针下移
+        if (pointer->selected == false)
+            Key_Down();
+        else
+            Key_Sub();
+#endif
     }
     else if (k3 == KEY_SHORT_PRESS)
     {
-        if (Algo_Test_hand)Move_car('A'); // 算法测试用小车向左移动
-        if (Algo_Test_auto)move_ret = Test_Path_ALL(); // 算法测试自动一次性执行完整路径
+        // control_set_start_enabled(1);
 
-        //常规模式下菜单操作：文件夹进入，文件选中/取消选中
-        if (!Algo_Test_hand && !Algo_Test_auto)
-        {
-            if (pointer->kind == MENU_Folder)
-                Key_Enter();
-            else
-                Key_Select();
-        }
+#if ALGORITHM_TEST_ENABLE
+        // 算法测试自动一次性执行完整路径
+        if (Algo_Test_auto)
+            move_ret = Test_Path_ALL();
+#else
+        // 常规模式下菜单操作：进入文件夹或选中/取消选中文件
+        if (pointer->kind == MENU_Folder)
+            Key_Enter();
+        else if (pointer->selected == false)
+            Key_Select();
+        else
+            Key_SetupCtrl_Sub();
+#endif
     }
 
     else if (k4 == KEY_SHORT_PRESS)
     {
-        if (Algo_Test_hand)Move_car('D'); // 算法测试用小车向右移动
-        if (Algo_Test_auto)move_ret = Test_Path_Step(&move_cmd); // 算法测试自动执行路径一步
-
+#if ALGORITHM_TEST_ENABLE
+        // 算法测试自动执行路径一步
+        if (Algo_Test_auto)
+            move_ret = Test_Path_Step(&move_cmd);
+#else
         // 常规模式下菜单操作：选中文件时调整步进值，未选中时退出文件夹
-        if (!Algo_Test_hand && !Algo_Test_auto)
-        {
-            if (pointer->kind != MENU_Folder && pointer->selected == true)
-                Key_SetupCtrl_Sub();
-            else
-                Key_Exit();
-        }
+        if (pointer->kind != MENU_Folder && pointer->selected == true)
+            Key_Deselect();
+        else
+            Key_Exit();
+#endif
     }
 
     key_clear_state(KEY_1);

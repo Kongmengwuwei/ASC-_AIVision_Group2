@@ -23,7 +23,7 @@ static uint8 g_control_use_vision_localization = ENET_1588_Timer_IRQn;
  *
  * 小车只平移到对应方向，车头朝向保持不变。
  */
-static uint8 g_control_prestart_depart_dir = 0U;
+uint8 g_control_prestart_depart_dir = 0U;
 
 /*
  * 手动开关：识别阶段是否启用“段前提前转向”。
@@ -66,7 +66,7 @@ static uint8 g_control_identify_prerotate_enabled = 0U;
  *
  * 这里采用与地图网格一致的 `GRID_SIZE_M`，即 0.2m�?
  */
-#define CONTROL_PRESTART_OFFSET_M GRID_SIZE_M
+#define CONTROL_PRESTART_OFFSET_M 0.30f
 
 /* 角度转弧度：yaw_rad = yaw_deg * CONTROL_DEG_TO_RAD */
 #define CONTROL_DEG_TO_RAD 0.01745329251994329577f
@@ -174,6 +174,8 @@ typedef enum
  * @brief 控制状态机当前阶段�?
  */
 control_stage_t g_control_stage = CONTROL_STAGE_IDLE;
+
+static volatile uint8 g_control_start_enabled = 0U;
 
 /**
  * @brief 路径规划保护期标志�?
@@ -2264,7 +2266,8 @@ static void handle_error_stage(void)
 
 void control_init(void)
 {
-    g_control_stage = CONTROL_STAGE_PRESTART_MOVE;
+    g_control_start_enabled = 0U;
+    g_control_stage = CONTROL_STAGE_IDLE;
     g_control_flow_phase = CONTROL_FLOW_IDENTIFY;
     g_path_plan_paused = 0U;
     g_plan_ready = 0U;
@@ -2299,11 +2302,13 @@ void control_init(void)
 
 void control_restart(void)
 {
-    g_control_stage = CONTROL_STAGE_PRESTART_MOVE;
+    g_control_start_enabled = 0U;
+    g_control_stage = CONTROL_STAGE_IDLE;
     g_control_flow_phase = CONTROL_FLOW_IDENTIFY;
     g_path_plan_paused = 0U;
     g_plan_ready = 0U;
     g_exec_steps = 0U;
+    memset(g_exec_path, 0, sizeof(g_exec_path));
     reset_localization_accumulator();
     g_prestart_move_started = 0U;
     g_map_right_yaw_deg = 0.0f;
@@ -2327,6 +2332,26 @@ void control_restart(void)
     car_pose_updated = false;
 }
 
+void control_set_start_enabled(uint8 enabled)
+{
+    if (enabled)
+    {
+        g_control_start_enabled = 1U;
+        if (g_control_stage == CONTROL_STAGE_IDLE)
+        {
+            g_control_stage = CONTROL_STAGE_PRESTART_MOVE;
+        }
+        return;
+    }
+
+    control_restart();
+}
+
+uint8 control_get_start_enabled(void)
+{
+    return g_control_start_enabled;
+}
+
 void control_process(void)
 {
     /*
@@ -2338,6 +2363,14 @@ void control_process(void)
      */
     process_blob_data();
     process_vision_data();
+
+    if (!g_control_start_enabled)
+    {
+        car_go_flag = 0U;
+        car_stop_flag = 0U;
+        g_control_stage = CONTROL_STAGE_IDLE;
+        return;
+    }
 
     switch (g_control_stage)
     {

@@ -63,6 +63,8 @@ void path_follow_set_external_position(float x_m, float y_m, uint8 valid);
 void path_follow_update(float yaw_deg, path_follow_output_t *out);
 void path_follow_get_status(path_follow_status_t *status);
 void path_follow_draw_status(void);
+void path_follow_request_bluetooth_report(void);
+void path_follow_service_bluetooth_report(void);
 float path_follow_heading_deg(Position from, Position to);
 void distance_speed_strategy(void);
 void path_follow_reset_scurve_band_defaults(void);

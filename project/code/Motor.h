@@ -5,17 +5,30 @@
 
 
 #define MAX_DUTY            	(50)                                               // 最大 MAX_DUTY% 占空比
-#define MOTOR1_DIR              (C7)                           //上左
+//#define MOTOR1_DIR              (C7)                           //上左
+//#define MOTOR1_PWM              (PWM2_MODULE0_CHA_C6)
+
+//#define MOTOR2_DIR              (C9)                          //上右
+//#define MOTOR2_PWM              (PWM2_MODULE1_CHA_C8)
+
+//#define MOTOR3_DIR              (C11)                          //下左
+//#define MOTOR3_PWM              (PWM2_MODULE2_CHA_C10)
+
+//#define MOTOR4_DIR              (D3)                           //下右
+//#define MOTOR4_PWM              (PWM2_MODULE3_CHA_D2)
+
+#define MOTOR1_DIR              (B24)   // 原来是 C7
 #define MOTOR1_PWM              (PWM2_MODULE0_CHA_C6)
 
-#define MOTOR2_DIR              (C9)                          //上右
+#define MOTOR2_DIR              (B25)   // 原来是 C9
 #define MOTOR2_PWM              (PWM2_MODULE1_CHA_C8)
 
-#define MOTOR3_DIR              (C11)                          //下左
+#define MOTOR3_DIR              (B26)   // 原来是 C11
 #define MOTOR3_PWM              (PWM2_MODULE2_CHA_C10)
 
-#define MOTOR4_DIR              (D3)                           //下右
+#define MOTOR4_DIR              (B28)   // 原来是 D3
 #define MOTOR4_PWM              (PWM2_MODULE3_CHA_D2)
+
 
 
 #define ENCODER_1                   (QTIMER1_ENCODER2)

@@ -16,6 +16,13 @@ int car_stop_array[4] = {0};
 
 void motor_init(void)
 {
+	
+	/* 先把旧 DIR 脚切到高阻输入，避免继续驱动原网络 */
+    gpio_init(C7, GPI, GPIO_LOW, GPI_FLOATING_IN);
+    gpio_init(C9, GPI, GPIO_LOW, GPI_FLOATING_IN);
+    gpio_init(C11, GPI, GPIO_LOW, GPI_FLOATING_IN);
+    gpio_init(D3, GPI, GPIO_LOW, GPI_FLOATING_IN);
+	
 	gpio_init(MOTOR1_DIR, GPO, GPIO_HIGH, GPO_PUSH_PULL);                            // GPIO 初始化为输出 默认上拉输出高
     pwm_init(MOTOR1_PWM, 17000, 0);                                                  // PWM 通道初始化频率 17KHz 占空比初始为 0
     
@@ -202,7 +209,7 @@ void motor_pwm(int up_left_speed,int up_right_speed,int down_left_speed,int down
      }
 	 else if (up_left_speed == 0)
 	 {
-		gpio_set_level(MOTOR1_DIR, GPIO_LOW);                     // DIR输出高电平
+		gpio_set_level(MOTOR1_DIR, GPIO_HIGH);                     // DIR输出高电平
 		 pwm_set_duty(MOTOR1_PWM, 0);                                 // 停止
 	 }
 
@@ -234,7 +241,7 @@ void motor_pwm(int up_left_speed,int up_right_speed,int down_left_speed,int down
 	 }
 	 else if (down_left_speed == 0)
 	 {
-		 gpio_set_level(MOTOR3_DIR, GPIO_LOW);                       // DIR输出高电平
+		 gpio_set_level(MOTOR3_DIR, GPIO_HIGH);                       // DIR输出高电平
 		 pwm_set_duty(MOTOR3_PWM, 0);                                 // 停止
 	 }
 

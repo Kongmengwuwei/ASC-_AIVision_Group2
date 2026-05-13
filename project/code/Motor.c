@@ -16,17 +16,17 @@ int car_stop_array[4] = {0};
 
 void motor_init(void)
 {
-	gpio_init(MOTOR1_DIR, GPO, GPIO_HIGH, GPO_PUSH_PULL);                            // GPIO 初始化为输出 默认上拉输出高
-    pwm_init(MOTOR1_PWM, 17000, 0);                                                  // PWM 通道初始化频率 17KHz 占空比初始为 0
-    
-    gpio_init(MOTOR2_DIR, GPO, GPIO_HIGH, GPO_PUSH_PULL);                            // GPIO 初始化为输出 默认上拉输出高
-    pwm_init(MOTOR2_PWM, 17000, 0);                                                  // PWM 通道初始化频率 17KHz 占空比初始为 0
+	pwm_init(MOTOR1_IN1, 17000, 0);													 // GPIO 初始化为输出 默认上拉输出高
+	pwm_init(MOTOR1_IN2, 17000, 0);													 // PWM 通道初始化频率 17KHz 占空比初始为 0
 
-    gpio_init(MOTOR3_DIR, GPO, GPIO_HIGH, GPO_PUSH_PULL);                            // GPIO 初始化为输出 默认上拉输出高
-    pwm_init(MOTOR3_PWM, 17000, 0);                                                  // PWM 通道初始化频率 17KHz 占空比初始为 0
+	pwm_init(MOTOR2_IN1, 17000, 0);													 // PWM 通道初始化频率 17KHz 占空比初始为 0
+    pwm_init(MOTOR2_IN2, 17000, 0);                                                  // PWM 通道初始化频率 17KHz 占空比初始为 0
 
-    gpio_init(MOTOR4_DIR, GPO, GPIO_HIGH, GPO_PUSH_PULL);                            // GPIO 初始化为输出 默认上拉输出高
-    pwm_init(MOTOR4_PWM, 17000, 0);                                                  // PWM 通道初始化频率 17KHz 占空比初始为 0
+    pwm_init(MOTOR3_IN1, 17000, 0);                                                  // PWM 通道初始化频率 17KHz 占空比初始为 0
+    pwm_init(MOTOR3_IN2, 17000, 0);                                                  // PWM 通道初始化频率 17KHz 占空比初始为 0
+
+    pwm_init(MOTOR4_IN1, 17000, 0);                                                  // PWM 通道初始化频率 17KHz 占空比初始为 0
+    pwm_init(MOTOR4_IN2, 17000, 0);                                                  // PWM 通道初始化频率 17KHz 占空比初始为 0
 }
 
 void encoder_init(void)
@@ -129,130 +129,72 @@ int16 Lowpass(int16 X_last,int16 X_new)
 			 
 		return new_value;
 } 
-// // Complementary filter smooths encoder counts
-// static int encoder_round_to_int(float value)
-// {
-//     return (value >= 0.0f) ? (int)(value + 0.5f) : (int)(value - 0.5f);
-// }
-
-// void encoder_read_filtered(int *enc1, int *enc2, int *enc3, int *enc4)
-// {
-//     int raw[4];
-//     raw[0] = encoder_get_count(ENCODER_1);
-//     encoder_clear_count(ENCODER_1);
-
-//     raw[1] = -encoder_get_count(ENCODER_2);
-//     encoder_clear_count(ENCODER_2);
-    
-//     raw[2] = -encoder_get_count(ENCODER_3);
-//     encoder_clear_count(ENCODER_3);
-
-//     raw[3] = encoder_get_count(ENCODER_4);
-//     encoder_clear_count(ENCODER_4);
-
-//     static float filtered[4];
-//     static uint8 initialized = 0;
-
-//     if (!initialized)
-//     {
-//         for (uint8 i = 0; i < 4; i++)
-//         {
-//             filtered[i] = raw[i];
-//         }
-//         initialized = 1;
-//     }
-//     else
-//     {
-//         for (uint8 i = 0; i < 4; i++)
-//         {
-//             filtered[i] += ENCODER_FILTER_ALPHA * ((float)raw[i] - filtered[i]);
-//         }
-//     }
-
-//     if (enc1)
-//     {
-//         *enc1 = encoder_round_to_int(filtered[0]);
-//     }
-//     if (enc2)
-//     {
-//         *enc2 = encoder_round_to_int(filtered[1]);
-//     }
-//     if (enc3)
-//     {
-//         *enc3 = encoder_round_to_int(filtered[2]);
-//     }
-//     if (enc4)
-//     {
-//         *enc4 = encoder_round_to_int(filtered[3]);
-//     }
-// }
 
 void motor_pwm(int up_left_speed,int up_right_speed,int down_left_speed,int down_right_speed)
 {
-	if(up_left_speed > 0)                                                           // 正转
+	if(up_left_speed > 0)
     {
-		gpio_set_level(MOTOR1_DIR, GPIO_LOW);                     // DIR输出高电平
-        pwm_set_duty(MOTOR1_PWM, up_left_speed);                   // 计算占空比
-     }
-     else if (up_left_speed < 0)                                                                  // 反转
-     {
-		gpio_set_level(MOTOR1_DIR, GPIO_HIGH);                    // DIR输出低电平
-        pwm_set_duty(MOTOR1_PWM, -up_left_speed);                // 计算占空比
+		pwm_set_duty(MOTOR1_IN1, up_left_speed);
+		pwm_set_duty(MOTOR1_IN2, 0);
+	}
+	else if (up_left_speed < 0)
+	{
+		pwm_set_duty(MOTOR1_IN1, 0);
+		pwm_set_duty(MOTOR1_IN2, -up_left_speed);
+	}
+	else if (up_left_speed == 0)
+	{
+		pwm_set_duty(MOTOR1_IN1, 10000);
+		pwm_set_duty(MOTOR1_IN2, 10000);
+	}
 
-     }
-	 else if (up_left_speed == 0)
-	 {
-		gpio_set_level(MOTOR1_DIR, GPIO_LOW);                     // DIR输出高电平
-		 pwm_set_duty(MOTOR1_PWM, 0);                                 // 停止
-	 }
+	if (up_right_speed > 0)
+	{
+		pwm_set_duty(MOTOR2_IN1, up_right_speed); 
+		pwm_set_duty(MOTOR2_IN2, 0);
+	}
+	else if (up_right_speed < 0)
+	{
+		pwm_set_duty(MOTOR2_IN1, 0);
+		pwm_set_duty(MOTOR2_IN2, -up_right_speed);
+	}
+	else if (up_right_speed == 0)
+	{
+		pwm_set_duty(MOTOR2_IN1, 10000);
+		pwm_set_duty(MOTOR2_IN2, 10000);
+	}
 
-	 if (up_right_speed > 0)
-	 {
-		 gpio_set_level(MOTOR2_DIR, GPIO_HIGH);                       // DIR输出高电平
-         pwm_set_duty(MOTOR2_PWM, up_right_speed);                   // 计算占空比
-	 }
-	 else if (up_right_speed < 0)
-	 {
-		 gpio_set_level(MOTOR2_DIR, GPIO_LOW);                     // DIR输出低电平
-         pwm_set_duty(MOTOR2_PWM, -up_right_speed);                // 计算占空比
-	 }
-	 else if (up_right_speed == 0)
-	 {
-		 gpio_set_level(MOTOR2_DIR, GPIO_HIGH);                       // DIR输出高电平
-		 pwm_set_duty(MOTOR2_PWM, 0);                                 // 停止
-	 }
+	if (down_left_speed > 0)
+	{
+		pwm_set_duty(MOTOR3_IN1, down_left_speed);
+		pwm_set_duty(MOTOR3_IN2, 0);
+	}
+	else if (down_left_speed < 0)
+	{
+		pwm_set_duty(MOTOR3_IN1, 0);
+		pwm_set_duty(MOTOR3_IN2, -down_left_speed);
+	}
+	else if (down_left_speed == 0)
+	{
+		pwm_set_duty(MOTOR3_IN1, 10000);
+		pwm_set_duty(MOTOR3_IN2, 10000);
+	}
 
-	 if (down_left_speed > 0)
-	 {
-		 gpio_set_level(MOTOR3_DIR, GPIO_LOW);                       // DIR输出高电平
-         pwm_set_duty(MOTOR3_PWM, down_left_speed);                   // 计算占空比
-	 }
-	 else if (down_left_speed < 0)
-	 {
-		 gpio_set_level(MOTOR3_DIR, GPIO_HIGH);                      // DIR输出低电平
-         pwm_set_duty(MOTOR3_PWM, -down_left_speed);                // 计算占空比
-	 }
-	 else if (down_left_speed == 0)
-	 {
-		 gpio_set_level(MOTOR3_DIR, GPIO_LOW);                       // DIR输出高电平
-		 pwm_set_duty(MOTOR3_PWM, 0);                                 // 停止
-	 }
-
-	 if (down_right_speed > 0)
-	 {
-		 gpio_set_level(MOTOR4_DIR, GPIO_HIGH);                       // DIR输出高电平
-         pwm_set_duty(MOTOR4_PWM, down_right_speed);                  // 计算占空比
-	 }
-	 else if (down_right_speed < 0)
-	 {
-		 gpio_set_level(MOTOR4_DIR, GPIO_LOW);                       // DIR输出低电平
-         pwm_set_duty(MOTOR4_PWM, -down_right_speed);                // 计算占空比
-	 }
-	 else if (down_right_speed == 0)
-	 {
-		 gpio_set_level(MOTOR4_DIR, GPIO_HIGH);                       // DIR输出高电平
-		 pwm_set_duty(MOTOR4_PWM, 0);                                 // 停止	
-	 }
+	if (down_right_speed > 0)
+	{
+		pwm_set_duty(MOTOR4_IN1, down_right_speed);
+		pwm_set_duty(MOTOR4_IN2, 0);
+	}
+	else if (down_right_speed < 0)
+	{
+		pwm_set_duty(MOTOR4_IN1, 0);
+		pwm_set_duty(MOTOR4_IN2, -down_right_speed); // 计算占空比
+	}
+	else if (down_right_speed == 0)
+	{
+		pwm_set_duty(MOTOR4_IN1, 10000);
+		pwm_set_duty(MOTOR4_IN2, 10000);
+	}
 }
 
 int Limit_int(int left_limit, int target_num, int right_limit)

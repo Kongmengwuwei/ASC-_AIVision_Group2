@@ -1,4 +1,4 @@
-﻿#include "Mymenu.h"
+#include "Mymenu.h"
 
 Menu_Item Root;     // 根目录
 Menu_Item *pointer; // 指针
@@ -45,6 +45,7 @@ static void Menu_Sync_Control_State(void)
     startup_start_switch = (control_get_start_enabled() != 0U);
     startup_reset_switch = false;
 }
+
 
 static bool Menu_Handle_Startup_Bool(Menu_Item *item, bool value)
 {

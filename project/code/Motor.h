@@ -4,19 +4,18 @@
 #include "zf_common_typedef.h"
 
 
-#define MAX_DUTY            	(50)                                               // 最大 MAX_DUTY% 占空比
-#define MOTOR1_DIR              (C7)                           //上左
-#define MOTOR1_PWM              (PWM2_MODULE0_CHA_C6)
+#define MAX_DUTY            	(50)  // 最大 MAX_DUTY% 占空比
+#define MOTOR1_IN1                  (PWM2_MODULE0_CHB_C7)
+#define MOTOR1_IN2                  (PWM2_MODULE0_CHA_C6)
 
-#define MOTOR2_DIR              (C9)                          //上右
-#define MOTOR2_PWM              (PWM2_MODULE1_CHA_C8)
+#define MOTOR2_IN1                  (PWM2_MODULE1_CHB_C9)
+#define MOTOR2_IN2                  (PWM2_MODULE1_CHA_C8)
 
-#define MOTOR3_DIR              (C11)                          //下左
-#define MOTOR3_PWM              (PWM2_MODULE2_CHA_C10)
+#define MOTOR3_IN1                  (PWM2_MODULE2_CHB_C11)
+#define MOTOR3_IN2                  (PWM2_MODULE2_CHA_C10)
 
-#define MOTOR4_DIR              (D3)                           //下右
-#define MOTOR4_PWM              (PWM2_MODULE3_CHA_D2)
-
+#define MOTOR4_IN1                  (PWM2_MODULE3_CHB_D3)
+#define MOTOR4_IN2                  (PWM2_MODULE3_CHA_D2)
 
 #define ENCODER_1                   (QTIMER1_ENCODER2)
 #define ENCODER_1_A                 (QTIMER1_ENCODER2_CH1_C2)

@@ -1,6 +1,9 @@
 #include "Control.h"
+#include "data_handle.h"
 #include "Game_logic.h"
+#include "Map_Path_Data.h"
 #include "Mymenu.h"
+#include "path_follow.h"
 #include "Attitude.h"
 #include <math.h>
 #include <string.h>
@@ -64,7 +67,7 @@ static uint8 g_control_identify_prerotate_enabled = 0U;
 /**
  * @brief 起步位移距离（米）�?
  *
- * 这里采用与地图网格一致的 `GRID_SIZE_M`，即 0.2m�?
+ * 这里采用与地图网格一致的 `GRID_SIZE_M`，即 0.3m�?
  */
 #define CONTROL_PRESTART_OFFSET_M 0.30f
 
@@ -340,6 +343,13 @@ static void mark_wait_new_map_frame(void)
     g_wait_map_frame_base = map_frame_count;
 }
 
+static void reset_identify_recognition_wait(void)
+{
+    g_identify_recog_waiting = 0U;
+    g_identify_recog_wait_loops = 0U;
+    g_identify_recog_wait_type = VISION_RECOGNITION_NONE;
+}
+
 static void reset_identify_runtime_state(void)
 {
     g_identify_segment_start_idx = 0U;
@@ -355,9 +365,7 @@ static void reset_identify_runtime_state(void)
     g_identify_target_cursor = 0U;
     g_identify_rotate_started = 0U;
     g_identify_exec_state = CONTROL_IDENTIFY_EXEC_IDLE;
-    g_identify_recog_waiting = 0U;
-    g_identify_recog_wait_loops = 0U;
-    g_identify_recog_wait_type = VISION_RECOGNITION_NONE;
+    reset_identify_recognition_wait();
     g_identify_first_result_checked = 0U;
     g_identify_abort_to_mode1 = 0U;
 
@@ -480,6 +488,40 @@ static void clear_saved_identify_ids(void)
     memset(g_saved_box_id_records, 0, sizeof(g_saved_box_id_records));
     memset(g_saved_target_id_records, 0, sizeof(g_saved_target_id_records));
     g_saved_identify_ids_ready = 0U;
+}
+
+static void reset_control_runtime_state(void)
+{
+    g_control_start_enabled = 0U;
+    g_control_stage = CONTROL_STAGE_IDLE;
+    g_control_flow_phase = CONTROL_FLOW_IDENTIFY;
+    g_path_plan_paused = 0U;
+    g_plan_ready = 0U;
+    g_exec_steps = 0U;
+    memset(g_exec_path, 0, sizeof(g_exec_path));
+
+    reset_localization_accumulator();
+    g_prestart_move_started = 0U;
+    g_map_right_yaw_deg = 0.0f;
+    g_map_right_yaw_ready = 0U;
+    g_body_map_dir = CONTROL_MAP_DIR_RIGHT;
+    g_wait_new_map_frame = 0U;
+    g_wait_map_frame_base = 0U;
+    g_relocalize_force_fresh_pose = 0U;
+    reset_identify_runtime_state();
+    clear_saved_identify_ids();
+    vision_clear_pending_data();
+
+    g_map_req_loop_cnt = 0U;
+    g_car_req_loop_cnt = 0U;
+
+    path_follow_set_pause_indices(NULL, 0U, 0U);
+    path_follow_set_path(NULL, 0U);
+
+    car_go_flag = 0U;
+    car_stop_flag = 0U;
+    map_data_updated = false;
+    car_pose_updated = false;
 }
 
 static uint8 identify_result_to_valid_id(const VisionRecognitionResult *result, uint8 *id_out)
@@ -772,6 +814,38 @@ static void finalize_identify_ids_for_pushbox(void)
     save_identify_ids_from_current_map();
 }
 
+static uint8 start_identify_recognition_request(const control_identify_target_t *target,
+                                                VisionRecognitionDistance distance)
+{
+    if (target == NULL)
+    {
+        return 0U;
+    }
+
+    g_identify_recog_wait_loops = 0U;
+    vision_clear_pending_data();
+
+    if (target->obj_type == CONTROL_IDENTIFY_OBJ_BOX)
+    {
+        if (!uart_send_vision_img_request_by_distance(distance))
+        {
+            return 0U;
+        }
+        g_identify_recog_wait_type = VISION_RECOGNITION_IMG;
+    }
+    else
+    {
+        if (!uart_send_vision_num_request_by_distance(distance))
+        {
+            return 0U;
+        }
+        g_identify_recog_wait_type = VISION_RECOGNITION_NUM;
+    }
+
+    g_identify_recog_waiting = 1U;
+    return 1U;
+}
+
 static uint8 identify_action_stub(const control_identify_target_t *target)
 {
     VisionRecognitionResult result = {0};
@@ -795,26 +869,15 @@ static uint8 identify_action_stub(const control_identify_target_t *target)
 
     if (!g_identify_recog_waiting)
     {
-        g_identify_recog_wait_loops = 0U;
         /*
          * 每次开始新的识别请求前都清一次视觉识别缓存。
          * 原因：NUM/IMG 返回是异步串口行，如果上一轮迟到的失败帧还挂在 updated 标志上，
          * 首个识别点会立刻吃到旧的失败结果，从而被误判为 Mode1。
          */
-        vision_clear_pending_data();
-        if (target->obj_type == CONTROL_IDENTIFY_OBJ_BOX)
+        if (!start_identify_recognition_request(target, distance))
         {
-            if (!uart_send_vision_img_request_by_distance(distance))
-                return 1U;
-            g_identify_recog_wait_type = VISION_RECOGNITION_IMG;
+            return 1U;
         }
-        else
-        {
-            if (!uart_send_vision_num_request_by_distance(distance))
-                return 1U;
-            g_identify_recog_wait_type = VISION_RECOGNITION_NUM;
-        }
-        g_identify_recog_waiting = 1U;
         return 0U;
     }
 
@@ -833,9 +896,7 @@ static uint8 identify_action_stub(const control_identify_target_t *target)
                 boxes[target->obj_index].id = recognized_id;
                 g_identify_box_id_assigned[target->obj_index] = 1U;
             }
-            g_identify_recog_waiting = 0U;
-            g_identify_recog_wait_loops = 0U;
-            g_identify_recog_wait_type = VISION_RECOGNITION_NONE;
+            reset_identify_recognition_wait();
             return 1U;
         }
     }
@@ -854,9 +915,7 @@ static uint8 identify_action_stub(const control_identify_target_t *target)
                 targets[target->obj_index].id = recognized_id;
                 g_identify_target_id_assigned[target->obj_index] = 1U;
             }
-            g_identify_recog_waiting = 0U;
-            g_identify_recog_wait_loops = 0U;
-            g_identify_recog_wait_type = VISION_RECOGNITION_NONE;
+            reset_identify_recognition_wait();
             return 1U;
         }
     }
@@ -871,26 +930,13 @@ static uint8 identify_action_stub(const control_identify_target_t *target)
              * control_process() 没有固定调用周期，250 次循环可能远小于一次 OpenMV 识别耗时；
              * 超时这里只重发请求继续等，真正收到非 0~9 结果时才切 Mode1。
              */
-            g_identify_recog_wait_loops = 0U;
-            vision_clear_pending_data();
-            if (target->obj_type == CONTROL_IDENTIFY_OBJ_BOX)
+            if (!start_identify_recognition_request(target, distance))
             {
-                if (!uart_send_vision_img_request_by_distance(distance))
-                    return 1U;
-                g_identify_recog_wait_type = VISION_RECOGNITION_IMG;
+                return 1U;
             }
-            else
-            {
-                if (!uart_send_vision_num_request_by_distance(distance))
-                    return 1U;
-                g_identify_recog_wait_type = VISION_RECOGNITION_NUM;
-            }
-            g_identify_recog_waiting = 1U;
             return 0U;
         }
-        g_identify_recog_waiting = 0U;
-        g_identify_recog_wait_loops = 0U;
-        g_identify_recog_wait_type = VISION_RECOGNITION_NONE;
+        reset_identify_recognition_wait();
         return 1U;
     }
 
@@ -1565,15 +1611,6 @@ static void snapshot_restore(const map_runtime_snapshot_t *snap)
                Bombs_count * sizeof(Position));
     }
 
-    //
-    // boxes[0].id = 0;
-    // boxes[1].id = 1;
-    // boxes[2].id = 2;
-    // targets[0].id = 0;
-    // targets[1].id = 1;
-    // targets[2].id = 2;
-    //
-
 }
 
 /**
@@ -1871,7 +1908,6 @@ static void handle_startup_localization(void)
     {
         g_body_map_dir = CONTROL_MAP_DIR_RIGHT;
     }
-    g_relocalize_force_fresh_pose = 0U;
     mark_wait_new_map_frame();
     g_control_stage = CONTROL_STAGE_WAIT_CAMERA_DATA;
 }
@@ -1943,6 +1979,13 @@ static uint8 load_identify_path_for_execution(void)
     return start_identify_segment(g_identify_endpoint_indices[0]);
 }
 
+static void finish_identify_rotation(control_map_dir_t face_dir)
+{
+    g_identify_rotate_started = 0U;
+    g_body_map_dir = face_dir;
+    reset_identify_recognition_wait();
+}
+
 static void handle_identify_execute_path(void)
 {
     path_follow_status_t st = {0};
@@ -1980,11 +2023,7 @@ static void handle_identify_execute_path(void)
         yaw_err_deg = wrap_yaw_deg_local(target_yaw_deg - eulerAngle.yaw);
         if (fabsf(yaw_err_deg) <= CONTROL_IDENTIFY_YAW_ALIGN_TOL_DEG)
         {
-            g_identify_rotate_started = 0U;
-            g_body_map_dir = curr_target->face_dir;
-            g_identify_recog_waiting = 0U;
-            g_identify_recog_wait_loops = 0U;
-            g_identify_recog_wait_type = VISION_RECOGNITION_NONE;
+            finish_identify_rotation(curr_target->face_dir);
             if (!begin_identify_segment_motion(g_identify_endpoint_indices[g_identify_endpoint_cursor]))
             {
                 g_control_stage = CONTROL_STAGE_ERROR;
@@ -2007,11 +2046,7 @@ static void handle_identify_execute_path(void)
             return;
         }
 
-        g_identify_rotate_started = 0U;
-        g_body_map_dir = curr_target->face_dir;
-        g_identify_recog_waiting = 0U;
-        g_identify_recog_wait_loops = 0U;
-        g_identify_recog_wait_type = VISION_RECOGNITION_NONE;
+        finish_identify_rotation(curr_target->face_dir);
         if (!begin_identify_segment_motion(g_identify_endpoint_indices[g_identify_endpoint_cursor]))
         {
             g_control_stage = CONTROL_STAGE_ERROR;
@@ -2066,11 +2101,7 @@ static void handle_identify_execute_path(void)
         yaw_err_deg = wrap_yaw_deg_local(target_yaw_deg - eulerAngle.yaw);
         if (fabsf(yaw_err_deg) <= CONTROL_IDENTIFY_YAW_ALIGN_TOL_DEG)
         {
-            g_identify_rotate_started = 0U;
-            g_body_map_dir = curr_target->face_dir;
-            g_identify_recog_waiting = 0U;
-            g_identify_recog_wait_loops = 0U;
-            g_identify_recog_wait_type = VISION_RECOGNITION_NONE;
+            finish_identify_rotation(curr_target->face_dir);
             g_identify_exec_state = CONTROL_IDENTIFY_EXEC_DO_RECOGNIZE;
             return;
         }
@@ -2090,11 +2121,7 @@ static void handle_identify_execute_path(void)
             return;
         }
 
-        g_identify_rotate_started = 0U;
-        g_body_map_dir = curr_target->face_dir;
-        g_identify_recog_waiting = 0U;
-        g_identify_recog_wait_loops = 0U;
-        g_identify_recog_wait_type = VISION_RECOGNITION_NONE;
+        finish_identify_rotation(curr_target->face_dir);
         g_identify_exec_state = CONTROL_IDENTIFY_EXEC_DO_RECOGNIZE;
         break;
 
@@ -2266,70 +2293,12 @@ static void handle_error_stage(void)
 
 void control_init(void)
 {
-    g_control_start_enabled = 0U;
-    g_control_stage = CONTROL_STAGE_IDLE;
-    g_control_flow_phase = CONTROL_FLOW_IDENTIFY;
-    g_path_plan_paused = 0U;
-    g_plan_ready = 0U;
-    g_exec_steps = 0U;
-    memset(g_exec_path, 0, sizeof(g_exec_path));
-
-    reset_localization_accumulator();
-    g_prestart_move_started = 0U;
-    g_map_right_yaw_deg = 0.0f;
-    g_map_right_yaw_ready = 0U;
-    g_body_map_dir = CONTROL_MAP_DIR_RIGHT;
-    g_wait_new_map_frame = 0U;
-    g_wait_map_frame_base = 0U;
-    g_relocalize_force_fresh_pose = 0U;
-    reset_identify_runtime_state();
-    clear_saved_identify_ids();
-    vision_clear_pending_data();
-
-    g_map_req_loop_cnt = 0U;
-    g_car_req_loop_cnt = 0U;
-
-    path_follow_set_pause_indices(NULL, 0U, 0U);
-    path_follow_set_path(NULL, 0U);
-
-    /* 启动时默认关闭运动输出，路径准备好后再放行�?*/
-    car_go_flag = 0U;
-    car_stop_flag = 0U;
-
-    map_data_updated = false;
-    car_pose_updated = false;
+    reset_control_runtime_state();
 }
 
 void control_restart(void)
 {
-    g_control_start_enabled = 0U;
-    g_control_stage = CONTROL_STAGE_IDLE;
-    g_control_flow_phase = CONTROL_FLOW_IDENTIFY;
-    g_path_plan_paused = 0U;
-    g_plan_ready = 0U;
-    g_exec_steps = 0U;
-    memset(g_exec_path, 0, sizeof(g_exec_path));
-    reset_localization_accumulator();
-    g_prestart_move_started = 0U;
-    g_map_right_yaw_deg = 0.0f;
-    g_map_right_yaw_ready = 0U;
-    g_body_map_dir = CONTROL_MAP_DIR_RIGHT;
-    g_wait_new_map_frame = 0U;
-    g_wait_map_frame_base = 0U;
-    g_relocalize_force_fresh_pose = 0U;
-    reset_identify_runtime_state();
-    clear_saved_identify_ids();
-    vision_clear_pending_data();
-    g_map_req_loop_cnt = 0U;
-    g_car_req_loop_cnt = 0U;
-
-    path_follow_set_path(NULL, 0U);
-    path_follow_set_pause_indices(NULL, 0U, 0U);
-
-    car_go_flag = 0U;
-    car_stop_flag = 0U;
-    map_data_updated = false;
-    car_pose_updated = false;
+    reset_control_runtime_state();
 }
 
 void control_set_start_enabled(uint8 enabled)

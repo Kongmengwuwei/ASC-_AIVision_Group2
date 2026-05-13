@@ -2,9 +2,6 @@
 #define _CONTROL_H
 
 #include "zf_common_typedef.h"
-#include "data_handle.h"
-#include "Map_Path_Data.h"
-#include "path_follow.h"
 
 extern uint8 g_control_prestart_depart_dir;
 

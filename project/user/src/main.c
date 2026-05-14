@@ -124,7 +124,7 @@ int main(void)
     // 菜单系统主循环调用：响应按键事件，更新显示等。
     Menu_Switch();
     Menu_Show();
-
+    
   }
 }
 

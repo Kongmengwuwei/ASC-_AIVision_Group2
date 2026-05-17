@@ -174,7 +174,7 @@ static void motor_map_draw_screen(void)
 
   ips200_clear();
   ips200_show_string(0, 0, "MOTOR ENCODER MAP TEST");
-  ips200_show_string(0, 16, "K1/K4:CH K2:DIR K3:RUN");
+  ips200_show_string(0, 16, "K1/K4:CH K2:RUN K3:DIR");
 
   snprintf(line, sizeof(line), "SW:M%u DIR:%c PWM:%d",
            (unsigned int)(s_test_motor + 1U),
@@ -211,7 +211,7 @@ static void motor_map_draw_screen(void)
   }
   else
   {
-    ips200_show_string(0, 176, "MAX: none/run K3");
+    ips200_show_string(0, 176, "MAX: none/run K2");
   }
 
   ips200_show_string(0, 224, "Rule: SW Mx -> MAX Ex");
@@ -233,31 +233,28 @@ static void motor_map_handle_keys(void)
   k3 = key_get_state(KEY_3);
   k4 = key_get_state(KEY_4);
 
-  if (k1 == KEY_SHORT_PRESS)
-  {
-    s_test_motor = (uint8)((s_test_motor + 3U) % 4U);
-    redraw = 1U;
-  }
-  if (k4 == KEY_SHORT_PRESS)
-  {
-    s_test_motor = (uint8)((s_test_motor + 1U) % 4U);
-    redraw = 1U;
-  }
   if (k2 == KEY_SHORT_PRESS)
-  {
-    s_test_dir = -s_test_dir;
-    redraw = 1U;
-  }
-  if (k3 == KEY_SHORT_PRESS)
   {
     motor_map_run_pulse();
     redraw = 1U;
   }
+  else if (k3 == KEY_SHORT_PRESS)
+  {
+    s_test_dir = -s_test_dir;
+    redraw = 1U;
+  }
+  else if (k1 == KEY_SHORT_PRESS)
+  {
+    s_test_motor = (uint8)((s_test_motor + 3U) % 4U);
+    redraw = 1U;
+  }
+  else if (k4 == KEY_SHORT_PRESS)
+  {
+    s_test_motor = (uint8)((s_test_motor + 1U) % 4U);
+    redraw = 1U;
+  }
 
-  key_clear_state(KEY_1);
-  key_clear_state(KEY_2);
-  key_clear_state(KEY_3);
-  key_clear_state(KEY_4);
+  key_clear_all_state();
 
   if (redraw)
   {

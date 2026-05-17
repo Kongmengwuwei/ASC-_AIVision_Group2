@@ -147,17 +147,17 @@ void motor_pwm(int up_left_speed,int up_right_speed,int down_left_speed,int down
 
 	 if (up_right_speed > 0)
 	 {
-		 gpio_set_level(MOTOR2_DIR, GPIO_HIGH);                       // DIR输出高电平
+		 gpio_set_level(MOTOR2_DIR, GPIO_LOW);                       // DIR输出高电平
          pwm_set_duty(MOTOR2_PWM, up_right_speed);                   // 计算占空比
 	 }
 	 else if (up_right_speed < 0)
 	 {
-		 gpio_set_level(MOTOR2_DIR, GPIO_LOW);                     // DIR输出低电平
+		 gpio_set_level(MOTOR2_DIR, GPIO_HIGH);                     // DIR输出低电平
          pwm_set_duty(MOTOR2_PWM, -up_right_speed);                // 计算占空比
 	 }
 	 else if (up_right_speed == 0)
 	 {
-		 gpio_set_level(MOTOR2_DIR, GPIO_HIGH);                       // DIR输出高电平
+		 gpio_set_level(MOTOR2_DIR, GPIO_LOW);                       // DIR输出高电平
 		 pwm_set_duty(MOTOR2_PWM, 0);                                 // 停止
 	 }
 
@@ -179,17 +179,17 @@ void motor_pwm(int up_left_speed,int up_right_speed,int down_left_speed,int down
 
 	 if (down_right_speed > 0)
 	 {
-		 gpio_set_level(MOTOR4_DIR, GPIO_HIGH);                       // DIR输出高电平
+		 gpio_set_level(MOTOR4_DIR, GPIO_LOW);                       // DIR输出高电平
          pwm_set_duty(MOTOR4_PWM, down_right_speed);                  // 计算占空比
 	 }
 	 else if (down_right_speed < 0)
 	 {
-		 gpio_set_level(MOTOR4_DIR, GPIO_LOW);                       // DIR输出低电平
+		 gpio_set_level(MOTOR4_DIR, GPIO_HIGH);                       // DIR输出低电平
          pwm_set_duty(MOTOR4_PWM, -down_right_speed);                // 计算占空比
 	 }
 	 else if (down_right_speed == 0)
 	 {
-		 gpio_set_level(MOTOR4_DIR, GPIO_HIGH);                       // DIR输出高电平
+		 gpio_set_level(MOTOR4_DIR, GPIO_LOW);                       // DIR输出高电平
 		 pwm_set_duty(MOTOR4_PWM, 0);                                 // 停止	
 	 }
 }

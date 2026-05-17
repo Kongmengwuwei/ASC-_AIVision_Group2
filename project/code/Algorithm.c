@@ -362,15 +362,12 @@ static void heap_update(a_star_param *nodes, binary_heap *heap, int node_index)
     heap_sift_up(nodes, heap, heap_pos_2d[node_index]);
 }
 
-/* 鍏柟鍚戣繎浼煎惎鍙戯細鐩寸Щ浠ｄ环 10锛屾枩绉讳唬浠?14銆?*/
-static inline int diagonal_distance(Position p1, Position p2)
+/* Four-direction A* heuristic: each orthogonal move costs 10. */
+static inline int orthogonal_distance(Position p1, Position p2)
 {
     int dif_row = p1.row > p2.row ? p1.row - p2.row : p2.row - p1.row;
     int dif_col = p1.col > p2.col ? p1.col - p2.col : p2.col - p1.col;
-    int min_dif = dif_row < dif_col ? dif_row : dif_col;
-    int max_dif = dif_row > dif_col ? dif_row : dif_col;
-    // 鐩磋蛋鏉冮噸10锛屾枩璧版潈閲?4
-    return 14 * min_dif + 10 * (max_dif - min_dif);
+    return 10 * (dif_row + dif_col);
 }
 /* 鏇煎搱椤胯窛绂伙細鐢ㄤ簬绠卞瓙鎺ㄩ€侀樁娈电殑鍚彂浼拌銆?*/
 static inline int manhattan_distance_cells(Position p1, Position p2)
@@ -384,7 +381,10 @@ static inline int manhattan_distance_cells(Position p1, Position p2)
 a_star_param a_star[grid_size];
 
 /*
- * 2D A*锛氬皬杞︿粠 start 鍒?target 鐨勮璧拌矾寰勮鍒掋€? * allow_diagonal 璇箟锛? * - 1锛氱┖杞﹀彲 8 鍚戠Щ鍔紝浣嗛潬杩戠瀛愭椂鑷姩闄嶇骇涓?4 鍚戦槻纰版挒銆? * - 0锛氬己鍒?4 鍚戯紙鍏稿瀷鐢ㄤ簬鎺ㄧ鏃舵洿绋冲畾鐨勬爡鏍煎姩浣滐級銆? */
+ * 2D A*: car path from start to target.
+ * Movement is fixed to four orthogonal directions; allow_diagonal is kept only
+ * for compatibility with existing call sites.
+ */
 static int a_star_path_plan(int row_cnt, int col_cnt,
                             const Position *obstacles, int obstacles_cnt,
                             const Position *bombs, int bombs_cnt,
@@ -393,6 +393,8 @@ static int a_star_path_plan(int row_cnt, int col_cnt,
                             int allow_diagonal,
                             Position *out_path)
 {
+    (void)allow_diagonal;
+
     // Validate start/target.
     if (start.row >= row_cnt || start.col >= col_cnt)
         return -1;
@@ -416,7 +418,7 @@ static int a_star_path_plan(int row_cnt, int col_cnt,
     int target_index = target.row * col_cnt + target.col;
 
     a_star[start_index].g_cost = 0;
-    a_star[start_index].h_cost = diagonal_distance(start, target);
+    a_star[start_index].h_cost = orthogonal_distance(start, target);
     a_star[start_index].f_cost = a_star[start_index].g_cost + a_star[start_index].h_cost;
     a_star[start_index].parent_index = -1;
     a_star[start_index].path_len = 1;
@@ -424,35 +426,9 @@ static int a_star_path_plan(int row_cnt, int col_cnt,
 
     heap_push(a_star, &open_set, start_index);
 
-    // 8鍚戠Щ鍔ㄦ柟鍚?(0-3: 鐩磋姝ｄ氦鍚? 4-7: 瀵硅鏂滃悜)
-    const int dir_row[] = {-1, 1, 0, 0, -1, -1, 1, 1};
-    const int dir_col[] = {0, 0, -1, 1, -1, 1, -1, 1};
-    const int move_cost[] = {10, 10, 10, 10, 14, 14, 14, 14};
-    uint8_t near_box_map[grid_size];
-    memset(near_box_map, 0, sizeof(near_box_map));
-
-    if (allow_diagonal)
-    {
-        for (int b = 0; b < boxes_cnt; b++)
-        {
-            int br = boxes[b].row;
-            int bc = boxes[b].col;
-            if (br >= row_cnt || bc >= col_cnt)
-                continue;
-            for (int dr = -1; dr <= 1; dr++)
-            {
-                for (int dc = -1; dc <= 1; dc++)
-                {
-                    int rr = br + dr;
-                    int cc = bc + dc;
-                    if (rr >= 0 && rr < row_cnt && cc >= 0 && cc < col_cnt)
-                    {
-                        near_box_map[rr * col_cnt + cc] = 1;
-                    }
-                }
-            }
-        }
-    }
+    const int dir_row[] = {-1, 1, 0, 0};
+    const int dir_col[] = {0, 0, -1, 1};
+    const int move_cost[] = {10, 10, 10, 10};
 
     while (open_set.size > 0)
     {
@@ -490,29 +466,14 @@ static int a_star_path_plan(int row_cnt, int col_cnt,
             return path_len; // 姝ｅ父杩斿洖璺緞姝ユ暟
         }
 
-        // 褰撳墠鏍兼槸鍚﹂潬杩戠瀛愶紙棰勮绠楁煡琛紝閬垮厤寰幆鍐呴噸澶嶆壂鎻忓叏閮ㄧ瀛愶級
-        int is_near_box = allow_diagonal ? near_box_map[current_index] : 0;
-
-        // 褰撳懆杈规湁绠卞瓙鏃讹紝鎴栦笉鍏佽鏂滅┛(鎺ㄧ妯″紡)鏃讹紝寮哄埗闄嶇骇涓?4 鍚戠Щ鍔ㄩ槻纰帮紱鍦ㄧ┖鏃峰湴甯﹀垯鍏ㄥ紑 8 鍚戜互鍔犲揩瀵昏矾鍜岀Щ鍔ㄩ€熷害
-        int dir_count = (!allow_diagonal || is_near_box) ? 4 : 8;
         // Expand neighbors.
-        for (int i = 0; i < dir_count; i++)
+        for (int i = 0; i < 4; i++)
         {
             int nr = r + dir_row[i];
             int nc = c + dir_col[i];
 
             if (nr >= 0 && nr < row_cnt && nc >= 0 && nc < col_cnt)
             {
-                // 濡傛灉鏄瑙掔嚎绉诲姩(i >= 4)锛屽垯寮哄埗杩涜"绂佹鍒囪"楠岃瘉
-                if (i >= 4)
-                {
-                    // 姝ｄ氦涓よ竟鍒嗗埆涓?(r + dr[i], c) 鍜?(r, c + dc[i])
-                    // 纭繚涓婃柟/涓嬫柟 鍜?宸︽柟/鍙虫柟 閮芥槸绌鸿矾锛岄槻姝㈡枩绌垮瑙?or 绠卞瓙
-                    if (check_obstacle(grid, col_cnt, nr, c) || (grid[nr * col_cnt + c] & BOX) ||
-                        check_obstacle(grid, col_cnt, r, nc) || (grid[r * col_cnt + nc] & BOX))
-                        continue;
-                }
-
                 int neighbor_index = nr * col_cnt + nc;
 
                 // 鍒╃敤宸叉湁鏂规硶妫€娴嬬洰鏍囨牸鏈韩鏄惁鍙€氳繃缃戞牸 (鍖呮嫭澧欏拰绠卞瓙)
@@ -523,13 +484,13 @@ static int a_star_path_plan(int row_cnt, int col_cnt,
                 if (a_star[neighbor_index].open_or_close == 2)
                     continue;
 
-                int tentative_g_cost = a_star[current_index].g_cost + move_cost[i]; // 绱姞绉诲姩浠ｄ环鍊?10 鎴?14
+                int tentative_g_cost = a_star[current_index].g_cost + move_cost[i];
 
                 if (a_star[neighbor_index].open_or_close == 0)
                 { // unvisited (姝ゅ墠鏈璁块棶杩?
                     a_star[neighbor_index].parent_index = current_index;
                     a_star[neighbor_index].g_cost = tentative_g_cost;
-                    a_star[neighbor_index].h_cost = diagonal_distance((Position){nr, nc}, target);
+                    a_star[neighbor_index].h_cost = orthogonal_distance((Position){nr, nc}, target);
                     a_star[neighbor_index].f_cost = a_star[neighbor_index].g_cost + a_star[neighbor_index].h_cost;
                     a_star[neighbor_index].path_len = a_star[current_index].path_len + 1;
                     a_star[neighbor_index].open_or_close = 1;

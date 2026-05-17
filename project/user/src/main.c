@@ -34,17 +34,6 @@
  ********************************************************************************************************************/
 
 #include "zf_common_headfile.h"
-#include "Flash.h"
-#include "Mymenu.h"
-#include "Attitude.h"
-#include "Game_logic.h"
-#include "data_handle.h"
-#include "path_follow.h"
-#include "Motor.h"
-#include "PID.h"
-#include "PID_config.h"
-#include "Control.h"
-#include "wifi.h"
 #include <stdio.h>
 #include <string.h>
 

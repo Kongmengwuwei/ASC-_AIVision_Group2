@@ -10,7 +10,7 @@
 
 /*
  * 手动开关：是否在控制流程中使用视觉定位。
- * 1：使用视觉 CAR 位姿做初始定位/二次定位，并在等地图阶段轻量同步里程计。
+ * 1：使用视觉 CAR 位姿做初始定位/二次定位。
  * 0：跳过视觉定位，只请求地图并依靠当前里程计/IMU 继续规划执行。
  *
  * 需要临时关闭视觉定位时，只改这一处即可。
@@ -37,21 +37,12 @@ static uint8 g_control_identify_prerotate_enabled = 0U;
 
 /* ========================= 参数配置�?========================= */
 
-/**
- * @brief 地图请求发送周期（单位：control_process 调用次数）�?
- *
- * 含义：每调用 CONTROL_REQ_MAP_PERIOD_LOOPS �?control_process�?
- * 发送一�?"MAP" 请求，避免每圈都发导致串口拥塞�?
+/*
+ * MAP/CAR requests are sent on demand. These loop-count guards only retry
+ * when a request is already pending and no matching response has arrived.
  */
-#define CONTROL_REQ_MAP_PERIOD_LOOPS 40U
-
-/**
- * @brief 非执行阶段车位姿请求发送周期（单位：control_process 调用次数）�?
- *
- * 用于初始定位和等待地图阶段，采样频率较低即可满足需求�?
- */
-#define CONTROL_REQ_CAR_PERIOD_WAIT 20U
-#define CONTROL_REQ_CAR_PERIOD_LOCALIZE_FAST 8U
+#define CONTROL_REQ_MAP_RETRY_TIMEOUT_LOOPS 200U
+#define CONTROL_REQ_CAR_RETRY_TIMEOUT_LOOPS 200U
 /* 推炸弹到爆炸点后停留 0.5s，等待爆炸效果生效 */
 #define CONTROL_BOMB_EXPLOSION_PAUSE_MS 500U
 
@@ -283,15 +274,11 @@ static float g_localize_sum_y_m = 0.0f;
  */
 static float g_localize_sum_yaw_deg = 0.0f;
 
-/**
- * @brief 地图请求分频计数器�?
- */
-static uint16 g_map_req_loop_cnt = 0U;
+static uint8 g_map_request_waiting = 0U;
+static uint16 g_map_request_wait_loops = 0U;
 
-/**
- * @brief 车位姿请求分频计数器�?
- */
-static uint16 g_car_req_loop_cnt = 0U;
+static uint8 g_car_request_waiting = 0U;
+static uint16 g_car_request_wait_loops = 0U;
 
 /* ========================= 内部工具函数 ========================= */
 
@@ -337,10 +324,73 @@ static void reset_localization_accumulator(void)
     g_localize_sum_yaw_deg = 0.0f;
 }
 
+static void clear_map_request_wait(void)
+{
+    g_map_request_waiting = 0U;
+    g_map_request_wait_loops = 0U;
+}
+
+static void clear_car_request_wait(void)
+{
+    g_car_request_waiting = 0U;
+    g_car_request_wait_loops = 0U;
+}
+
+static void send_map_request_once(void)
+{
+    uart_send_map_request();
+    g_map_request_waiting = 1U;
+    g_map_request_wait_loops = 0U;
+}
+
+static void send_car_request_once(void)
+{
+    uart_send_car_request();
+    g_car_request_waiting = 1U;
+    g_car_request_wait_loops = 0U;
+}
+
+static void service_map_request_wait(void)
+{
+    if (!g_map_request_waiting)
+    {
+        send_map_request_once();
+        return;
+    }
+
+    if (g_map_request_wait_loops < CONTROL_REQ_MAP_RETRY_TIMEOUT_LOOPS)
+    {
+        g_map_request_wait_loops++;
+    }
+    if (g_map_request_wait_loops >= CONTROL_REQ_MAP_RETRY_TIMEOUT_LOOPS)
+    {
+        send_map_request_once();
+    }
+}
+
+static void service_car_request_wait(void)
+{
+    if (!g_car_request_waiting)
+    {
+        send_car_request_once();
+        return;
+    }
+
+    if (g_car_request_wait_loops < CONTROL_REQ_CAR_RETRY_TIMEOUT_LOOPS)
+    {
+        g_car_request_wait_loops++;
+    }
+    if (g_car_request_wait_loops >= CONTROL_REQ_CAR_RETRY_TIMEOUT_LOOPS)
+    {
+        send_car_request_once();
+    }
+}
+
 static void mark_wait_new_map_frame(void)
 {
     g_wait_new_map_frame = 1U;
     g_wait_map_frame_base = map_frame_count;
+    clear_map_request_wait();
 }
 
 static void reset_identify_recognition_wait(void)
@@ -512,8 +562,8 @@ static void reset_control_runtime_state(void)
     clear_saved_identify_ids();
     vision_clear_pending_data();
 
-    g_map_req_loop_cnt = 0U;
-    g_car_req_loop_cnt = 0U;
+    clear_map_request_wait();
+    clear_car_request_wait();
 
     path_follow_set_pause_indices(NULL, 0U, 0U);
     path_follow_set_path(NULL, 0U);
@@ -1252,8 +1302,8 @@ static void finish_identify_flow_and_relocalize(uint8 finalize_ids)
     g_control_flow_phase = CONTROL_FLOW_PUSHBOX;
     g_plan_ready = 0U;
     reset_identify_runtime_state();
-    g_map_req_loop_cnt = 0U;
-    g_car_req_loop_cnt = 0U;
+    clear_map_request_wait();
+    clear_car_request_wait();
     g_wait_new_map_frame = 0U;
     g_wait_map_frame_base = 0U;
     map_data_updated = false;
@@ -1392,30 +1442,29 @@ static void configure_bomb_pause_for_path(const Position *path, size_t steps)
  * 仅当 A->B �?B->C 共线且方向不反向（点�?>= 0）时返回 1�?
  * 这样可压缩直线段，同时避免把“原路折返”的拐点误删�?
  */
-static uint8 is_collinear_forward(const Position *a,
-                                  const Position *b,
-                                  const Position *c)
+/* Planner paths are axis-aligned, so only compress same-row or same-column runs. */
+static uint8 is_axis_aligned_forward(const Position *a,
+                                     const Position *b,
+                                     const Position *c)
 {
-    int32 v1_r = 0;
-    int32 v1_c = 0;
-    int32 v2_r = 0;
-    int32 v2_c = 0;
-    int32 cross = 0;
-    int32 dot = 0;
-
     if (a == NULL || b == NULL || c == NULL)
     {
         return 0U;
     }
 
-    v1_r = (int32)b->row - (int32)a->row;
-    v1_c = (int32)b->col - (int32)a->col;
-    v2_r = (int32)c->row - (int32)b->row;
-    v2_c = (int32)c->col - (int32)b->col;
-    cross = v1_r * v2_c - v1_c * v2_r;
-    dot = v1_r * v2_r + v1_c * v2_c;
+    if (a->row == b->row && b->row == c->row)
+    {
+        return ((a->col < b->col && b->col < c->col) ||
+                (a->col > b->col && b->col > c->col)) ? 1U : 0U;
+    }
 
-    return (cross == 0 && dot >= 0) ? 1U : 0U;
+    if (a->col == b->col && b->col == c->col)
+    {
+        return ((a->row < b->row && b->row < c->row) ||
+                (a->row > b->row && b->row > c->row)) ? 1U : 0U;
+    }
+
+    return 0U;
 }
 
 /**
@@ -1464,34 +1513,6 @@ static uint8 get_camera_pose_meter(float *x_m, float *y_m, float *yaw_deg)
     *y_m = col_f * GRID_SIZE_M;
     *yaw_deg = car_pose.yaw;
     return 1U;
-}
-
-/**
- * @brief 按固定节拍发送地图请求命令�?
- */
-static void request_map_periodic(void)
-{
-    g_map_req_loop_cnt++;
-    if (g_map_req_loop_cnt >= CONTROL_REQ_MAP_PERIOD_LOOPS)
-    {
-        uart_send_map_request();
-        g_map_req_loop_cnt = 0U;
-    }
-}
-
-/**
- * @brief 按固定节拍发送车位姿请求命令�?
- *
- * @param period_loops 请求周期（单位：control_process 调用次数）�?
- */
-static void request_car_periodic(uint16 period_loops)
-{
-    g_car_req_loop_cnt++;
-    if (g_car_req_loop_cnt >= period_loops)
-    {
-        uart_send_car_request();
-        g_car_req_loop_cnt = 0U;
-    }
 }
 
 /**
@@ -1663,9 +1684,9 @@ static uint8 build_exec_path_from_planner(void)
         if (out_steps >= 2U &&
             g_exec_path[out_steps - 1U].id == 0U &&
             mapped.id == 0U &&
-            is_collinear_forward(&g_exec_path[out_steps - 2U],
-                                 &g_exec_path[out_steps - 1U],
-                                 &mapped))
+            is_axis_aligned_forward(&g_exec_path[out_steps - 2U],
+                                    &g_exec_path[out_steps - 1U],
+                                    &mapped))
         {
             /* 直线同向延长：用新终点替换旧终点，实现“一段到底”�?*/
             g_exec_path[out_steps - 1U] = mapped;
@@ -1822,7 +1843,7 @@ static void handle_prestart_move(void)
  * @brief 处理“初始定位”阶段�?
  *
  * 核心逻辑�?
- * - 周期请求视觉车位�?
+ * - 按需请求视觉车位�?
  * - 采集多帧后取平均
  * - 一次性重置里程计位姿到平均�?
  */
@@ -1847,6 +1868,7 @@ static void handle_startup_localization(void)
             g_body_map_dir = CONTROL_MAP_DIR_RIGHT;
         }
         g_relocalize_force_fresh_pose = 0U;
+        clear_car_request_wait();
         mark_wait_new_map_frame();
         g_control_stage = CONTROL_STAGE_WAIT_CAMERA_DATA;
         return;
@@ -1854,17 +1876,13 @@ static void handle_startup_localization(void)
 
     if (g_control_flow_phase == CONTROL_FLOW_PUSHBOX)
     {
-        request_car_periodic(CONTROL_REQ_CAR_PERIOD_LOCALIZE_FAST);
         min_samples = CONTROL_RELOCALIZE_MIN_SAMPLES_PUSHBOX;
-    }
-    else
-    {
-        request_car_periodic(CONTROL_REQ_CAR_PERIOD_WAIT);
     }
 
     if (car_pose_updated)
     {
         car_pose_updated = false;
+        clear_car_request_wait();
         accept_sample = 1U;
     }
     else if (!g_relocalize_force_fresh_pose &&
@@ -1876,10 +1894,12 @@ static void handle_startup_localization(void)
 
     if (!accept_sample)
     {
+        service_car_request_wait();
         return;
     }
     if (!get_camera_pose_meter(&cam_x_m, &cam_y_m, &cam_yaw_deg))
     {
+        service_car_request_wait();
         return;
     }
 
@@ -1890,9 +1910,11 @@ static void handle_startup_localization(void)
 
     if (g_localize_sample_count < min_samples)
     {
+        send_car_request_once();
         return;
     }
 
+    clear_car_request_wait();
     path_follow_reset_pose(g_localize_sum_x_m / (float)g_localize_sample_count,
                            g_localize_sum_y_m / (float)g_localize_sample_count,
                            g_localize_sum_yaw_deg / (float)g_localize_sample_count);
@@ -1916,7 +1938,7 @@ static void handle_startup_localization(void)
  * @brief 处理“等待地图”阶段�?
  *
  * 阶段目标�?
- * - 周期请求地图与车位姿
+ * - 按需请求地图，并顺带消费可能到达的车位姿
  * - 收到有效地图后切换到规划阶段
  */
 static void handle_wait_camera_data(void)
@@ -1925,11 +1947,8 @@ static void handle_wait_camera_data(void)
     float cam_y_m = 0.0f;
     float cam_yaw_deg = 0.0f;
 
-    request_map_periodic();
     if (g_control_use_vision_localization)
     {
-        request_car_periodic(CONTROL_REQ_CAR_PERIOD_WAIT);
-
         if (car_pose_updated)
         {
             car_pose_updated = false;
@@ -1957,9 +1976,13 @@ static void handle_wait_camera_data(void)
                 apply_saved_identify_ids_to_current_map();
             }
             map_data_updated = false;
+            clear_map_request_wait();
             g_control_stage = CONTROL_STAGE_PLAN_PATH;
+            return;
         }
     }
+
+    service_map_request_wait();
 }
 
 /* ========================= 对外接口实现 ========================= */
@@ -2268,17 +2291,12 @@ static void handle_execute_path_stage(void)
 /**
  * @brief 错误阶段：安全停车，并等待新地图后重新尝试规划。
  *
- * 视觉定位开关关闭时，只请求地图；开关开启时继续请求 CAR 位姿，保持原有恢复流程。
+ * 只按需请求新地图；车位姿由定位阶段单独获取。
  */
 static void handle_error_stage(void)
 {
     car_go_flag = 1U;
     car_stop_flag = 1U;
-    request_map_periodic();
-    if (g_control_use_vision_localization)
-    {
-        request_car_periodic(CONTROL_REQ_CAR_PERIOD_WAIT);
-    }
 
     if (map_data_updated)
     {
@@ -2287,8 +2305,12 @@ static void handle_error_stage(void)
             apply_saved_identify_ids_to_current_map();
         }
         map_data_updated = false;
+        clear_map_request_wait();
         g_control_stage = CONTROL_STAGE_PLAN_PATH;
+        return;
     }
+
+    service_map_request_wait();
 }
 
 void control_init(void)

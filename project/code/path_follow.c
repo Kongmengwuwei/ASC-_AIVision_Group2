@@ -36,7 +36,7 @@
  * - 若仍推不动，可逐步增大；
  * - 若出现明显来回抽动，可适当减小。
  */
-#define PATH_LINE_GUIDE_MIN_CMPS 4.0f
+#define PATH_LINE_GUIDE_MIN_CMPS 4.0f  //
 /** @brief 直线段法向纠偏速度限幅，单位 cm/s。 */
 #define PATH_LINE_GUIDE_MAX_CMPS 12.0f
 /** @brief 直线段法向纠偏死区，单位 m。 */
@@ -63,22 +63,22 @@
 /** @brief 拐点附近是否启用双轴 PID 保持修正：1 启用，0 关闭。 */
 #define PATH_FOLLOW_ENABLE_CORNER_DUAL_AXIS_TRIM 1
 /** @brief 启用拐点 handover 时，拐点双轴保持修正的权重缩放系数。 */
-#define PATH_FOLLOW_CORNER_HOLD_TRIM_SCALE 9.0f
+#define PATH_FOLLOW_CORNER_HOLD_TRIM_SCALE 9.0f   //
 /** @brief 普通中间拐点是否启用速度向量 handover：1 启用，0 回退到原始简单段末速度保留。 */
-#define PATH_FOLLOW_ENABLE_CORNER_HANDOVER 1
+#define PATH_FOLLOW_ENABLE_CORNER_HANDOVER 1   //
 #if PATH_FOLLOW_ENABLE_CORNER_HANDOVER
 
 
 /* [CornerHandover重构] 保证 enter / commit 窗口之间至少留出的距离，单位 m。 */
 #define PATH_CORNER_HANDOVER_WINDOW_GAP_MIN_M 0.005f
 /* [CornerHandover重构] 普通中间拐点正式切段时的最小横向误差门限，单位 m。 */
-#define PATH_CORNER_COMMIT_LATERAL_GATE_MIN_M 0.025f
+#define PATH_CORNER_COMMIT_LATERAL_GATE_MIN_M 0.025f  //
 /* [CornerHandover重构] 普通中间拐点正式切段时横向误差门限相对 pos_tol 的放大系数。 */
 #define PATH_CORNER_COMMIT_LATERAL_GATE_SCALE 1.20f
 /* [CornerHandover重构] 交接中段对标量速度做轻微压低，避免拐点切向速度过硬。 */
 #define PATH_CORNER_HANDOVER_K_DROP 0.16f
 /* [CornerHandover] 固定交接窗口的开始距离，单位 m。 */
-#define PATH_CORNER_HANDOVER_ENTER_DISTANCE_M 0.09f
+#define PATH_CORNER_HANDOVER_ENTER_DISTANCE_M 0.09f   //
 /* [CornerHandover] 固定交接窗口的末端距离，单位 m。 */
 #define PATH_CORNER_HANDOVER_COMMIT_DISTANCE_M 0.015f
 /* [CornerHandover] 单个拐点交接最多允许持续的时间，单位 s。 */
@@ -87,17 +87,17 @@
 #endif
 
 /** @brief 路径跟随到点判定的基础位置容差，单位 m。 */
-#define PATH_FOLLOW_POSITION_TOLERANCE_M PATH_CORNER_COMMIT_LATERAL_GATE_MIN_M
+#define PATH_FOLLOW_POSITION_TOLERANCE_M 0.025f //
 /** @brief 原地转向完成判定的航向容差，单位 deg。 */
 #define PATH_FOLLOW_YAW_TOLERANCE_DEG 2.0f
 /** @brief 路径跟随允许的线速度上限，单位 m/s。 */
 #define PATH_FOLLOW_MAX_LINEAR_SPEED_MPS 3.0f
-/**
+/** 
  * @brief 当前实现中姿态环输出限幅使用的角速度上限数值。
  *
  * @note 该值直接沿用现有实现中的数值语义，只做宏抽取，不改变当前控制框架。
  */
-#define PATH_FOLLOW_MAX_ANGULAR_SPEED_LIMIT 360.0f
+#define PATH_FOLLOW_MAX_ANGULAR_SPEED_LIMIT 240.0f
 
 /** @brief 世界系位置环 PID 比例系数。 */
 #define PATH_FOLLOW_PID_WORLD_KP 2.2f

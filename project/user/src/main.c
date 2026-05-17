@@ -53,6 +53,256 @@
 #define PIT_PRIORITY_2 (PIT_IRQn)
 
 #define ALGORITHM_TEST_ENABLE 0     // 1: 启用算法测试，使用预设地图数据进行路径规划测试；0: 关闭算法测试，正常运行控制流程
+#define MOTOR_ENCODER_MAP_TEST_ENABLE 1
+
+#if MOTOR_ENCODER_MAP_TEST_ENABLE
+
+#define MAP_TEST_PWM_DUTY      1200
+#define MAP_TEST_PULSE_MS      300U
+#define MAP_TEST_SETTLE_MS     80U
+#define MAP_TEST_REFRESH_MS    20U
+#define MAP_TEST_DEADBAND      2
+
+typedef struct
+{
+  int16 raw[4];
+  int16 feedback[4];
+  uint8 max_index;
+  uint8 valid;
+  int16 max_raw;
+  int16 max_feedback;
+} motor_map_test_result_t;
+
+static uint8 s_test_motor = 0U;
+static int s_test_dir = 1;
+static motor_map_test_result_t s_last_result = {{0}, {0}, 0U, 0U, 0, 0};
+
+static const char *const s_motor_pin_desc[4] =
+{
+  "PH4 C7 / EN4 C6",
+  "PH3 C9 / EN3 C8",
+  "PH2 C11 / EN2 C10",
+  "PH1 D3 / EN1 D2",
+};
+
+static int16 motor_map_abs16(int16 value)
+{
+  return (value < 0) ? (int16)(-value) : value;
+}
+
+static void motor_map_clear_encoders(void)
+{
+  encoder_clear_count(ENCODER_1);
+  encoder_clear_count(ENCODER_2);
+  encoder_clear_count(ENCODER_3);
+  encoder_clear_count(ENCODER_4);
+}
+
+static void motor_map_read_raw(int16 out_raw[4])
+{
+  out_raw[0] = encoder_get_count(ENCODER_1);
+  out_raw[1] = encoder_get_count(ENCODER_2);
+  out_raw[2] = encoder_get_count(ENCODER_3);
+  out_raw[3] = encoder_get_count(ENCODER_4);
+}
+
+static void motor_map_raw_to_feedback(const int16 raw[4], int16 feedback[4])
+{
+  feedback[0] = (int16)(-raw[0]);
+  feedback[1] = raw[1];
+  feedback[2] = (int16)(-raw[2]);
+  feedback[3] = raw[3];
+}
+
+static void motor_map_drive_selected(uint8 motor_index, int speed)
+{
+  int pwm[4] = {0, 0, 0, 0};
+
+  if (motor_index < 4U)
+  {
+    pwm[motor_index] = speed;
+  }
+  motor_pwm(pwm[0], pwm[1], pwm[2], pwm[3]);
+}
+
+static void motor_map_run_pulse(void)
+{
+  uint8 i = 0U;
+  int16 max_abs = 0;
+
+  memset(&s_last_result, 0, sizeof(s_last_result));
+  motor_pwm(0, 0, 0, 0);
+  motor_map_clear_encoders();
+  system_delay_ms(MAP_TEST_SETTLE_MS);
+
+  motor_map_drive_selected(s_test_motor, s_test_dir * MAP_TEST_PWM_DUTY);
+  system_delay_ms(MAP_TEST_PULSE_MS);
+  motor_pwm(0, 0, 0, 0);
+  system_delay_ms(MAP_TEST_SETTLE_MS);
+
+  motor_map_read_raw(s_last_result.raw);
+  motor_map_raw_to_feedback(s_last_result.raw, s_last_result.feedback);
+  motor_map_clear_encoders();
+
+  for (i = 0U; i < 4U; i++)
+  {
+    int16 current_abs = motor_map_abs16(s_last_result.raw[i]);
+    if (current_abs > max_abs)
+    {
+      max_abs = current_abs;
+      s_last_result.max_index = i;
+    }
+  }
+
+  if (max_abs >= MAP_TEST_DEADBAND)
+  {
+    s_last_result.valid = 1U;
+    s_last_result.max_raw = s_last_result.raw[s_last_result.max_index];
+    s_last_result.max_feedback = s_last_result.feedback[s_last_result.max_index];
+  }
+}
+
+static void motor_map_show_signed(uint16 x, uint16 y, int16 value)
+{
+  ips200_show_string(x, y, "      ");
+  ips200_show_int(x, y, value, 5);
+}
+
+static void motor_map_draw_screen(void)
+{
+  char line[32];
+
+  ips200_clear();
+  ips200_show_string(0, 0, "MOTOR ENCODER MAP TEST");
+  ips200_show_string(0, 16, "K1/K4:CH K2:DIR K3:RUN");
+
+  snprintf(line, sizeof(line), "SW:M%u DIR:%c PWM:%d",
+           (unsigned int)(s_test_motor + 1U),
+           (s_test_dir > 0) ? '+' : '-',
+           MAP_TEST_PWM_DUTY);
+  ips200_show_string(0, 32, line);
+
+  ips200_show_string(0, 48, "PIN:");
+  ips200_show_string(40, 48, s_motor_pin_desc[s_test_motor]);
+
+  snprintf(line, sizeof(line), "PULSE:%ums", (unsigned int)MAP_TEST_PULSE_MS);
+  ips200_show_string(0, 64, line);
+
+  ips200_show_string(0, 88, "RAW E1    E2    E3    E4");
+  motor_map_show_signed(0, 104, s_last_result.raw[0]);
+  motor_map_show_signed(56, 104, s_last_result.raw[1]);
+  motor_map_show_signed(112, 104, s_last_result.raw[2]);
+  motor_map_show_signed(168, 104, s_last_result.raw[3]);
+
+  ips200_show_string(0, 128, "FB  F1    F2    F3    F4");
+  motor_map_show_signed(0, 144, s_last_result.feedback[0]);
+  motor_map_show_signed(56, 144, s_last_result.feedback[1]);
+  motor_map_show_signed(112, 144, s_last_result.feedback[2]);
+  motor_map_show_signed(168, 144, s_last_result.feedback[3]);
+
+  if (s_last_result.valid)
+  {
+    snprintf(line, sizeof(line), "MAX:E%u RAW:%d",
+             (unsigned int)(s_last_result.max_index + 1U),
+             (int)s_last_result.max_raw);
+    ips200_show_string(0, 176, line);
+    snprintf(line, sizeof(line), "SOFT FB:%d", (int)s_last_result.max_feedback);
+    ips200_show_string(0, 192, line);
+  }
+  else
+  {
+    ips200_show_string(0, 176, "MAX: none/run K3");
+  }
+
+  ips200_show_string(0, 224, "Rule: SW Mx -> MAX Ex");
+  ips200_show_string(0, 240, "FB sign should match DIR");
+  ips200_show_string(0, 256, "Test with wheels lifted.");
+}
+
+static void motor_map_handle_keys(void)
+{
+  key_state_enum k1;
+  key_state_enum k2;
+  key_state_enum k3;
+  key_state_enum k4;
+  uint8 redraw = 0U;
+
+  key_scanner();
+  k1 = key_get_state(KEY_1);
+  k2 = key_get_state(KEY_2);
+  k3 = key_get_state(KEY_3);
+  k4 = key_get_state(KEY_4);
+
+  if (k1 == KEY_SHORT_PRESS)
+  {
+    s_test_motor = (uint8)((s_test_motor + 3U) % 4U);
+    redraw = 1U;
+  }
+  if (k4 == KEY_SHORT_PRESS)
+  {
+    s_test_motor = (uint8)((s_test_motor + 1U) % 4U);
+    redraw = 1U;
+  }
+  if (k2 == KEY_SHORT_PRESS)
+  {
+    s_test_dir = -s_test_dir;
+    redraw = 1U;
+  }
+  if (k3 == KEY_SHORT_PRESS)
+  {
+    motor_map_run_pulse();
+    redraw = 1U;
+  }
+
+  key_clear_state(KEY_1);
+  key_clear_state(KEY_2);
+  key_clear_state(KEY_3);
+  key_clear_state(KEY_4);
+
+  if (redraw)
+  {
+    motor_map_draw_screen();
+  }
+}
+
+int main(void)
+{
+  clock_init(SYSTEM_CLOCK_600M);
+  debug_init();
+  system_delay_ms(300);
+
+  ips200_set_dir(IPS200_PORTAIT);
+  ips200_set_font(IPS200_8X16_FONT);
+  ips200_set_color(RGB565_WHITE, RGB565_BLACK);
+  ips200_init(IPS200_TYPE_SPI);
+  key_init(20);
+
+  motor_init();
+  encoder_init();
+  motor_pwm(0, 0, 0, 0);
+  motor_map_clear_encoders();
+  motor_map_draw_screen();
+
+  while (1)
+  {
+    motor_map_handle_keys();
+    system_delay_ms(MAP_TEST_REFRESH_MS);
+  }
+}
+
+void pit_0_handler(void)
+{
+}
+
+void pit_1_handler(void)
+{
+}
+
+void pit_2_handler(void)
+{
+}
+
+#else
 
 int main(void)
 {
@@ -200,3 +450,5 @@ void pit_2_handler(void)
     return;
   Attitude_Calculate();
 }
+
+#endif

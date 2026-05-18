@@ -3,16 +3,15 @@
 Menu_Item Root;     // 根目录
 Menu_Item *pointer; // 指针
 
-int32_t test1 = 1234; // 测试数据
-float test2 = 123.45; // 测试数据
-uint8_t test3 = 1;    // 测试数据
-bool test4 = true;    // 测试数据
-
 uint8 car_go_flag = 0;   // 运行标志
 uint8 car_stop_flag = 0; // 停车标志
 
 static bool startup_start_switch = false;
 static bool startup_reset_switch = false;
+
+path_follow_status_t path_follow_status = {0};
+
+uint8 test1 = 0;
 
 #if ALGORITHM_TEST_ENABLE
 char move_cmd = 'X'; // 移动命令缓存
@@ -23,21 +22,17 @@ uint8 move_ret = 0;  // 移动结果缓存
 void Menu_Create(void)
 {
     // 在此动态创建文件夹 //
-    Menu_Item *Folder1 = Create_Menu_Folder_dynamic(&Root, "Startup");
-    Menu_Item *Folder2 = Create_Menu_Folder_dynamic(&Root, "Mode");
-    Menu_Item *Folder3 = Create_Menu_Folder_dynamic(&Root, "Data");
-    Menu_Item *Folder4 = Create_Menu_Folder_dynamic(&Root, "Folder3");
-    Menu_Item *Folder5 = Create_Menu_Folder_dynamic(&Root, "Folder4");
+    Menu_Item *Startup = Create_Menu_Folder_dynamic(&Root, "Startup");
+    Menu_Item *Data = Create_Menu_Folder_dynamic(&Root, "Data");
+    Menu_Item *Setting = Create_Menu_Folder_dynamic(&Root, "Setting");
 
     // 在此动态创建文件 //
-    Create_Menu_File_dynamic(Folder1, "Start", &startup_start_switch, bool_Box);
-    Create_Menu_File_dynamic(Folder1, "Reset", &startup_reset_switch, bool_Box);
+    Create_Menu_File_dynamic(Startup, "Start", &startup_start_switch, bool_Box);
+    Create_Menu_File_dynamic(Startup, "Reset", &startup_reset_switch, bool_Box);
+    Create_Menu_File_dynamic(Startup, "Start_Dir", &g_control_prestart_depart_dir, uint8_Box);
 
-    Create_Menu_File_dynamic(Folder2, "Start_DIR", &g_control_prestart_depart_dir, uint8_Box);
-
-    Create_Menu_File_dynamic(Folder3, "File2", &test2, float_Box);
-    Create_Menu_File_dynamic(Folder3, "File3", &test3, uint8_Box);
-    Create_Menu_File_dynamic(Folder4, "File4", &test4, bool_Box);
+    Create_Menu_File_dynamic(Data, "test", &test1, uint8_Box);
+    Create_Menu_File_dynamic(Setting, "test", &test1, uint8_Box);
 }
 
 static void Menu_Sync_Control_State(void)
@@ -105,6 +100,8 @@ void Menu_Init(void)
     if (Root.sons != 0)
         pointer = Root.First_Son; // 指针默认指向第一个节点
     All_Folder_Menu_Init(&Root);  // 初始化所有文件夹菜单
+
+    ips200_draw_line(0, 129, 239, 129, RGB565_WHITE);
 }
 
 // 显示菜单标题
@@ -500,12 +497,12 @@ void Show_Map(void)
     last_path_sig = path_sig;
     last_id_sig = id_sig;
     // 显示地图数据
-    ips200_show_string(start_x + (map_cols + 1) * cell_size, start_y, "BOX:");
-    ips200_show_uint(start_x + (map_cols + 1) * cell_size + FONT_W * 5, start_y, Boxes_count, 2);
-    ips200_show_string(start_x + (map_cols + 1) * cell_size, start_y + FONT_H, "TAR:");
-    ips200_show_uint(start_x + (map_cols + 1) * cell_size + FONT_W * 5, start_y + FONT_H, Targets_count, 2);
-    ips200_show_string(start_x + (map_cols + 1) * cell_size, start_y + FONT_H * 2, "BOM:");
-    ips200_show_uint(start_x + (map_cols + 1) * cell_size + FONT_W * 5, start_y + FONT_H * 2, Bombs_count, 2);
+    // ips200_show_string(start_x + (map_cols + 1) * cell_size, start_y, "BOX:");
+    // ips200_show_uint(start_x + (map_cols + 1) * cell_size + FONT_W * 5, start_y, Boxes_count, 2);
+    // ips200_show_string(start_x + (map_cols + 1) * cell_size, start_y + FONT_H, "TAR:");
+    // ips200_show_uint(start_x + (map_cols + 1) * cell_size + FONT_W * 5, start_y + FONT_H, Targets_count, 2);
+    // ips200_show_string(start_x + (map_cols + 1) * cell_size, start_y + FONT_H * 2, "BOM:");
+    // ips200_show_uint(start_x + (map_cols + 1) * cell_size + FONT_W * 5, start_y + FONT_H * 2, Bombs_count, 2);
 
 #if ALGORITHM_TEST_ENABLE
     ips200_show_char(start_x + (map_cols + 1) * cell_size, start_y + FONT_H * 5, move_cmd);
@@ -518,43 +515,60 @@ void Show_Map(void)
 
 void State_Show(void)
 {
-    ips200_show_string(0, 176, "State:");
-
+    ips200_show_string(176, 132, "State:");
     switch (g_control_stage)
     {
     case CONTROL_STAGE_IDLE:
-        ips200_show_uint(64, 176, 0, 2);
+        ips200_show_uint(224, 132, 0, 2);
         break;
     case CONTROL_STAGE_PRESTART_MOVE:
-        ips200_show_uint(64, 176, 1, 2);
+        ips200_show_uint(224, 132, 1, 2);
         break;
     case CONTROL_STAGE_STARTUP_LOCALIZE:
-        ips200_show_uint(64, 176, 2, 2);
+        ips200_show_uint(224, 132, 2, 2);
         break;
     case CONTROL_STAGE_WAIT_CAMERA_DATA:
-        ips200_show_uint(64, 176, 3, 2);
+        ips200_show_uint(224, 132, 3, 2);
         break;
     case CONTROL_STAGE_PLAN_PATH:
-        ips200_show_uint(64, 176, 4, 2);
+        ips200_show_uint(224, 132, 4, 2);
         break;
     case CONTROL_STAGE_LOAD_PATH:
-        ips200_show_uint(64, 176, 5, 2);
+        ips200_show_uint(224, 132, 5, 2);
         break;
     case CONTROL_STAGE_EXECUTE_PATH:
-        ips200_show_uint(64, 176, 6, 2);
+        ips200_show_uint(224, 132, 6, 2);
         break;
     case CONTROL_STAGE_FINISHED:
-        ips200_show_uint(64, 176, 7, 2);
+        ips200_show_uint(224, 132, 7, 2);
         break;
     case CONTROL_STAGE_ERROR:
-        ips200_show_uint(64, 176, 16, 2);
+        ips200_show_uint(224, 132, 16, 2);
         break;
     }
+
+    path_follow_get_status(&path_follow_status);
+
+    ips200_show_string(0, 144, "Speed:");
+    ips200_show_float(56, 144, path_follow_status.speed_ref_cmps, 1, 2);
+
+    ips200_show_string(0, 160, "Cur:");
+    ips200_show_float(40, 160, path_follow_status.x_m, 1, 3);
+    ips200_show_char(88, 160, ',');
+    ips200_show_float(96, 160, path_follow_status.y_m, 1, 3);
+    ips200_show_float(160, 160, path_follow_status.yaw_deg, 3, 1);
+
+    ips200_show_string(0, 176, "Tar:");
+    ips200_show_float(40, 176, path_follow_status.target_x_m, 1, 3);
+    ips200_show_char(88, 176, ',');
+    ips200_show_float(96, 176, path_follow_status.target_y_m, 1, 3);
+    ips200_show_float(160, 176, path_follow_status.target_yaw_deg, 3, 1);
 }
 
 // 菜单显示
 void Menu_Show(void)
 {
+
     Menu_Item *r = pointer->Father;
     Menu_Item *s = r->First_Son;
 

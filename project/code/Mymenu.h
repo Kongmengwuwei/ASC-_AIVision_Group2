@@ -8,6 +8,7 @@
 #include "Map_Path_Data.h"
 #include "Algorithm_Test.h"
 #include "Control.h"
+#include "path_follow.h"
 
 // 显示配置
 #define FONT_W (8)               //字体宽

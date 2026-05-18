@@ -10,6 +10,7 @@ static bool startup_start_switch = false;
 static bool startup_reset_switch = false;
 
 path_follow_status_t path_follow_status = {0};
+control_plan_mode_t plan_mode = CONTROL_PLAN_MODE_1;
 
 uint8 test1 = 0;
 
@@ -563,6 +564,10 @@ void State_Show(void)
     ips200_show_char(88, 176, ',');
     ips200_show_float(96, 176, path_follow_status.target_y_m, 1, 3);
     ips200_show_float(160, 176, path_follow_status.target_yaw_deg, 3, 1);
+
+    plan_mode = control_get_plan_mode();
+    ips200_show_string(170, 200, "Mode:");
+    ips200_show_uint(170 + FONT_W * 6, 200, plan_mode, 2);
 }
 
 // 菜单显示
@@ -723,9 +728,9 @@ void Menu_Switch(void)
 {
     // 按键在此更改
     key_state_enum k1 = key_get_state(KEY_1);
-    key_state_enum k3 = key_get_state(KEY_2);
+    key_state_enum k2 = key_get_state(KEY_2);
     key_state_enum k4 = key_get_state(KEY_3);
-    key_state_enum k2 = key_get_state(KEY_4);
+    key_state_enum k3 = key_get_state(KEY_4);
 
     if (k1 == KEY_SHORT_PRESS)
     {

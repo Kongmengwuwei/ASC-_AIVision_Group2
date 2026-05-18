@@ -35,9 +35,9 @@ typedef enum
  */
 typedef enum
 {
-    CONTROL_PLAN_MODE_1 = 0U,
-    CONTROL_PLAN_MODE_2 = 1U,
-    CONTROL_PLAN_MODE_IDENTIFY = 2U
+    CONTROL_PLAN_MODE_1 = 1U,
+    CONTROL_PLAN_MODE_2 = 2U,
+    CONTROL_PLAN_MODE_IDENTIFY = 0U
 } control_plan_mode_t;
 
 extern control_stage_t g_control_stage;

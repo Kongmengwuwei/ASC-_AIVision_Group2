@@ -5,6 +5,7 @@
 #include "Mymenu.h"
 #include "path_follow.h"
 #include "Attitude.h"
+#include "zf_driver_delay.h"
 #include <math.h>
 #include <string.h>
 
@@ -43,6 +44,8 @@ static uint8 g_control_identify_prerotate_enabled = 0U;
  */
 #define CONTROL_REQ_MAP_RETRY_TIMEOUT_LOOPS 200U
 #define CONTROL_REQ_CAR_RETRY_TIMEOUT_LOOPS 200U
+/* Wait before consuming CAR pose frames to avoid using delayed camera data. */
+#define CONTROL_CAMERA_POSE_SETTLE_DELAY_MS 200U
 /* 推炸弹到爆炸点后停留 0.5s，等待爆炸效果生效 */
 #define CONTROL_BOMB_EXPLOSION_PAUSE_MS 500U
 
@@ -200,12 +203,12 @@ static size_t g_exec_steps = 0U;
 static uint8 g_plan_ready = 0U;
 /*
  * 推箱阶段使用的规划模式：
- * - 默认 Mode2，表示识别阶段得到 0~9 后按箱子/目标 ID 配对推箱；
+ * - 默认 Mode1，表示识别阶段得到 0~9 后按箱子/目标 ID 配对推箱；
  * - 首个 IMG/NUM 识别若收到明确的非 0~9 结果，会自动切到 Mode1；
  * - 首个 IMG/NUM 等待超时只重发请求，不直接判 Mode1，避免主循环过快导致误判；
  * - 仍保留 control_set_plan_mode() 作为外部手动覆盖入口。
  */
-static control_plan_mode_t g_control_plan_mode = CONTROL_PLAN_MODE_2;
+static control_plan_mode_t g_control_plan_mode = CONTROL_PLAN_MODE_1;
 static control_flow_phase_t g_control_flow_phase = CONTROL_FLOW_IDENTIFY;
 
 static float g_map_right_yaw_deg = 0.0f;
@@ -250,6 +253,7 @@ static uint8 g_saved_identify_ids_ready = 0U;
  * @brief 初始定位累计样本数�?
  */
 static uint8 g_localize_sample_count = 0U;
+static uint8 g_localize_camera_settled = 0U;
 
 /**
  * @brief 起步动作是否已经触发�?
@@ -319,6 +323,7 @@ static float wrap_yaw_deg_local(float yaw_deg)
 static void reset_localization_accumulator(void)
 {
     g_localize_sample_count = 0U;
+    g_localize_camera_settled = 0U;
     g_localize_sum_x_m = 0.0f;
     g_localize_sum_y_m = 0.0f;
     g_localize_sum_yaw_deg = 0.0f;
@@ -1515,6 +1520,19 @@ static uint8 get_camera_pose_meter(float *x_m, float *y_m, float *yaw_deg)
     return 1U;
 }
 
+static void settle_camera_before_localization_once(void)
+{
+    if (g_localize_camera_settled)
+    {
+        return;
+    }
+
+    /* Wait once at the start of a localization phase, then parse the latest CAR frame. */
+    system_delay_ms(CONTROL_CAMERA_POSE_SETTLE_DELAY_MS);
+    process_blob_data();
+    g_localize_camera_settled = 1U;
+}
+
 /**
  * @brief 进入路径规划保护期�?
  */
@@ -1878,6 +1896,8 @@ static void handle_startup_localization(void)
     {
         min_samples = CONTROL_RELOCALIZE_MIN_SAMPLES_PUSHBOX;
     }
+
+    settle_camera_before_localization_once();
 
     if (car_pose_updated)
     {

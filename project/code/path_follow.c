@@ -65,7 +65,7 @@
 /** @brief 启用拐点 handover 时，拐点双轴保持修正的权重缩放系数。 */
 #define PATH_FOLLOW_CORNER_HOLD_TRIM_SCALE 9.0f   //
 /** @brief 普通中间拐点是否启用速度向量 handover：1 启用，0 回退到原始简单段末速度保留。 */
-#define PATH_FOLLOW_ENABLE_CORNER_HANDOVER 1   //
+#define PATH_FOLLOW_ENABLE_CORNER_HANDOVER 0   //
 #if PATH_FOLLOW_ENABLE_CORNER_HANDOVER
 
 

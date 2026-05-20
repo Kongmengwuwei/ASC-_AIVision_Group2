@@ -1192,8 +1192,11 @@ static void path_follow_reset_control_state(void)
     PID_Clear(&pid_world_y);
     PID_Clear(&pid_stay);
     PID_Clear(&pid_stay_y);
-    //PID_Clear(&pid_yaw);
-    //PID_Clear(&pid_accel_yaw);
+    /* 路径切换、位姿重置或整条路径结束时，航向环也必须清历史量。
+     * 否则上一段旋转/跟踪留下的 D 项滤波状态可能在新路径第一拍形成角速度冲击，
+     * 表现为原地转圈或起步方向异常。 */
+    PID_Clear(&pid_yaw);
+    PID_Clear(&pid_accel_yaw);
 }
 
 static uint8 path_follow_finish_path(path_follow_output_t *out);

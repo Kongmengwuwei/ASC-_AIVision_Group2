@@ -19,6 +19,8 @@
 #define BOMB_EXPLOSION 1        // 炸弹爆炸位置标记
 #define TURNING_POINT  2        // 路径转折点标记
 #define IDENTIFICATION 3        // 识别位置统一标记
+#define PUSH_StART_POINT 4        // 推箱起步位置标记
+#define PUSH_END_POINT 5        // 推箱结束位置标记
 
 typedef struct
 {

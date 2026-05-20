@@ -177,8 +177,12 @@ static int is_identification_marker(uint8 marker_id)
 static uint8 marker_priority(uint8 marker_id)
 {
     if (marker_id == BOMB_EXPLOSION)
-        return 3;
+        return 5;
     if (is_identification_marker(marker_id))
+        return 4;
+    if (marker_id == PUSH_END_POINT)
+        return 3;
+    if (marker_id == PUSH_StART_POINT)
         return 2;
     if (marker_id == TURNING_POINT)
         return 1;

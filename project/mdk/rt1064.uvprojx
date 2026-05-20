@@ -575,6 +575,16 @@
               <FilePath>..\code\path_follow.h</FilePath>
             </File>
             <File>
+              <FileName>path.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\code\path.c</FilePath>
+            </File>
+            <File>
+              <FileName>path.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\code\path.h</FilePath>
+            </File>
+            <File>
               <FileName>程序文件说明.txt</FileName>
               <FileType>5</FileType>
               <FilePath>..\code\程序文件说明.txt</FilePath>

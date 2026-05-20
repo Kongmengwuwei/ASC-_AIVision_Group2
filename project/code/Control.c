@@ -3,6 +3,7 @@
 #include "Game_logic.h"
 #include "Map_Path_Data.h"
 #include "Mymenu.h"
+#include "path.h"
 #include "path_follow.h"
 #include "Attitude.h"
 #include "zf_driver_delay.h"
@@ -76,39 +77,14 @@ static uint8 g_control_identify_prerotate_enabled = 0U;
  * - 路径�?(row,col) 在下发前转为 (col,row)
  * - 视觉位姿映射同步采用 (x=col, y=row)
  */
-#define CONTROL_COORD_TRANSPOSE_COMPENSATE 1U
+#define CONTROL_COORD_TRANSPOSE_COMPENSATE PATH_COORD_TRANSPOSE_COMPENSATE
 /* 在转置补偿基础上，额外翻转“上下轴”（对应 map �?row 方向）�?*/
-#define CONTROL_COORD_FLIP_VERTICAL 1U
-
-#if CONTROL_COORD_TRANSPOSE_COMPENSATE
-#define CONTROL_WORLD_X_MAX_M ((float)(MAP_COLS - 1) * GRID_SIZE_M)
-#define CONTROL_WORLD_Y_MAX_M ((float)(MAP_ROWS - 1) * GRID_SIZE_M)
-#else
-#define CONTROL_WORLD_X_MAX_M ((float)(MAP_ROWS - 1) * GRID_SIZE_M)
-#define CONTROL_WORLD_Y_MAX_M ((float)(MAP_COLS - 1) * GRID_SIZE_M)
-#endif
+#define CONTROL_COORD_FLIP_VERTICAL PATH_COORD_FLIP_VERTICAL
+#define CONTROL_WORLD_X_MAX_M PATH_WORLD_X_MAX_M
+#define CONTROL_WORLD_Y_MAX_M PATH_WORLD_Y_MAX_M
 
 
 /* ========================= 内部数据结构 ========================= */
-
-/**
- * @brief 地图运行时快照�?
- *
- * Game_logic 规划函数会在内部模拟执行并改写全局地图对象�?
- * 为了避免影响实时显示与后续逻辑，规划前先快照，规划后再恢复�?
- */
-typedef struct
-{
-    size_t obstacles_count;                    /**< 快照时障碍物数量�?*/
-    size_t boxes_count;                        /**< 快照时箱子数量�?*/
-    size_t targets_count;                      /**< 快照时目标点数量�?*/
-    size_t bombs_count;                        /**< 快照时炸弹数量�?*/
-    Position obstacles_buf[MAX_OBSTACLES];     /**< 快照时障碍物数组�?*/
-    Position boxes_buf[MAX_BOXES];             /**< 快照时箱子数组�?*/
-    Position targets_buf[MAX_TARGETS];         /**< 快照时目标点数组�?*/
-    Position bombs_buf[MAX_BOMBS];             /**< 快照时炸弹数组�?*/
-    Position car_pose_grid;                    /**< 快照时小车栅格位置�?*/
-} map_runtime_snapshot_t;
 
 #define CONTROL_IDENTIFY_MAX_TARGETS_PER_POINT (MAX_BOXES + MAX_TARGETS)
 #define CONTROL_IDENTIFY_YAW_ALIGN_TOL_DEG 5.0f
@@ -432,22 +408,7 @@ static void reset_identify_runtime_state(void)
 
 static void inverse_remap_exec_path_point(Position *p)
 {
-    uint8 temp = 0U;
-
-    if (p == NULL)
-    {
-        return;
-    }
-
-#if CONTROL_COORD_FLIP_VERTICAL
-    p->col = (uint8)((MAP_ROWS - 1U) - p->col);
-#endif
-
-#if CONTROL_COORD_TRANSPOSE_COMPENSATE
-    temp = p->row;
-    p->row = p->col;
-    p->col = temp;
-#endif
+    path_inverse_remap_exec_point(p);
 }
 
 /* 前向声明：供识别分段和主路径下发时复用炸弹停留配置。 */
@@ -1361,38 +1322,9 @@ static uint8 advance_identify_endpoint_or_finish(void)
  * 当开启行列补偿时，把 (row,col) 转为 (col,row)�?
  * 关闭补偿时保持原样�?
  */
-static void remap_exec_path_point(Position *p)
-{
-    uint8 temp = 0U;
-
-    if (p == NULL)
-    {
-        return;
-    }
-
-#if CONTROL_COORD_TRANSPOSE_COMPENSATE
-    temp = p->row;
-    p->row = p->col;
-    p->col = temp;
-#endif
-
-#if CONTROL_COORD_FLIP_VERTICAL
-    p->col = (uint8)((MAP_ROWS - 1) - p->col);
-#endif
-}
-
 /**
  * @brief 判断两个栅格点是否在同一单元�?
  */
-static uint8 is_same_grid_cell(const Position *a, const Position *b)
-{
-    if (a == NULL || b == NULL)
-    {
-        return 0U;
-    }
-    return (a->row == b->row && a->col == b->col) ? 1U : 0U;
-}
-
 /**
  * @brief 为当前执行路径配置“炸弹爆炸点停留”事件。
  *
@@ -1439,37 +1371,6 @@ static void configure_bomb_pause_for_path(const Position *path, size_t steps)
     {
         path_follow_set_pause_indices(NULL, 0U, 0U);
     }
-}
-
-/**
- * @brief 判断三点是否“同一直线且同向前进”�?
- *
- * 仅当 A->B �?B->C 共线且方向不反向（点�?>= 0）时返回 1�?
- * 这样可压缩直线段，同时避免把“原路折返”的拐点误删�?
- */
-/* Planner paths are axis-aligned, so only compress same-row or same-column runs. */
-static uint8 is_axis_aligned_forward(const Position *a,
-                                     const Position *b,
-                                     const Position *c)
-{
-    if (a == NULL || b == NULL || c == NULL)
-    {
-        return 0U;
-    }
-
-    if (a->row == b->row && b->row == c->row)
-    {
-        return ((a->col < b->col && b->col < c->col) ||
-                (a->col > b->col && b->col > c->col)) ? 1U : 0U;
-    }
-
-    if (a->col == b->col && b->col == c->col)
-    {
-        return ((a->row < b->row && b->row < c->row) ||
-                (a->row > b->row && b->row > c->row)) ? 1U : 0U;
-    }
-
-    return 0U;
 }
 
 /**
@@ -1554,7 +1455,7 @@ static void end_path_plan_pause(void)
  *
  * @param[out] snap 快照输出结构体指针�?
  */
-static void snapshot_take(map_runtime_snapshot_t *snap)
+static void snapshot_take(path_map_snapshot_t *snap)
 {
     if (snap == NULL)
     {
@@ -1607,7 +1508,7 @@ static void snapshot_take(map_runtime_snapshot_t *snap)
  *
  * @param[in] snap 快照输入结构体指针�?
  */
-static void snapshot_restore(const map_runtime_snapshot_t *snap)
+static void snapshot_restore(const path_map_snapshot_t *snap)
 {
     if (snap == NULL)
     {
@@ -1663,70 +1564,6 @@ static void snapshot_restore(const map_runtime_snapshot_t *snap)
  * - 1：成功生成执行路�?
  * - 0：规划路径无�?
  */
-static uint8 build_exec_path_from_planner(void)
-{
-    size_t i = 0U;
-    size_t out_steps = 0U;
-    Position mapped = {0};
-
-    g_exec_steps = 0U;
-    memset(g_exec_path, 0, sizeof(g_exec_path));
-
-    if (Car_path_count < 2U || Car_path_count > MAX_CAR_PATH)
-    {
-        return 0U;
-    }
-
-    /* 路径下发前统一做：坐标映射 + 重复点剔�?+ 直线段压缩�?*/
-    for (i = 0U; i < Car_path_count; i++)
-    {
-        mapped = car_path[i];
-        remap_exec_path_point(&mapped);
-
-        if (out_steps == 0U)
-        {
-            g_exec_path[out_steps++] = mapped;
-            continue;
-        }
-
-        if (is_same_grid_cell(&g_exec_path[out_steps - 1U], &mapped))
-        {
-            /* 同格重复点：若新点带事件 id，覆盖保留�?*/
-            if (mapped.id != 0U)
-            {
-                g_exec_path[out_steps - 1U].id = mapped.id;
-            }
-            continue;
-        }
-
-        if (out_steps >= 2U &&
-            g_exec_path[out_steps - 1U].id == 0U &&
-            mapped.id == 0U &&
-            is_axis_aligned_forward(&g_exec_path[out_steps - 2U],
-                                    &g_exec_path[out_steps - 1U],
-                                    &mapped))
-        {
-            /* 直线同向延长：用新终点替换旧终点，实现“一段到底”�?*/
-            g_exec_path[out_steps - 1U] = mapped;
-            continue;
-        }
-
-        if (out_steps >= MAX_CAR_PATH)
-        {
-            return 0U;
-        }
-        g_exec_path[out_steps++] = mapped;
-    }
-
-    if (out_steps < 2U)
-    {
-        return 0U;
-    }
-
-    g_exec_steps = out_steps;
-    return 1U;
-}
-
 /**
  * @brief 完成一次路径规划并构建执行路径�?
  *
@@ -1740,10 +1577,13 @@ static uint8 build_exec_path_from_planner(void)
  */
 static uint8 control_plan_path(void)
 {
-    map_runtime_snapshot_t map_snapshot;
+    path_map_snapshot_t map_snapshot;
+    path_map_snapshot_t post_plan_snapshot;
+    uint8 build_ok = 0U;
 
     g_plan_ready = 0U;
     memset(&map_snapshot, 0, sizeof(map_snapshot));
+    memset(&post_plan_snapshot, 0, sizeof(post_plan_snapshot));
     snapshot_take(&map_snapshot);
 
     /* 根据 planmode 标志位选择规划方案，不做自动模式回退�?*/
@@ -1769,13 +1609,23 @@ static uint8 control_plan_path(void)
         return 0U;
     }
 
-    if (!build_exec_path_from_planner())
+    /* 规划函数会在全局地图里模拟动作后的结果；map_snapshot 保存规划前地图。
+     * path.c 构建执行路径时同时参考“规划后地图”和“规划前地图”，
+     * 让捷径同时避开动作前后的对象位置。构建完成后再恢复真实运行时地图。 */
+    snapshot_take(&post_plan_snapshot);
+    build_ok = path_build_exec_from_planner(car_path,
+                                            Car_path_count,
+                                            &post_plan_snapshot,
+                                            &map_snapshot,
+                                            g_exec_path,
+                                            MAX_CAR_PATH,
+                                            &g_exec_steps);
+    snapshot_restore(&map_snapshot);
+    if (!build_ok)
     {
-        snapshot_restore(&map_snapshot);
         return 0U;
     }
 
-    snapshot_restore(&map_snapshot);
     g_plan_ready = 1U;
     return 1U;
 }

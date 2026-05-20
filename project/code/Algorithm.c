@@ -453,6 +453,7 @@ static int a_star_path_plan(int row_cnt, int col_cnt,
             {
                 out_path[path_len].row = curr / col_cnt;
                 out_path[path_len].col = curr % col_cnt;
+                out_path[path_len].id = 0;
                 path_len++;
                 curr = a_star[curr].parent_index;
             }
@@ -886,6 +887,8 @@ int a_star_path_plan_3d(int row_cnt, int col_cnt,
     }
 
     int total_car_len = 0;
+    int push_start_index = -1;
+    int push_end_index = -1;
 
     // 鍏堣灏忚溅璺戝埌鎺ㄧ偣
     int start_index = sp_path[0];
@@ -921,7 +924,10 @@ int a_star_path_plan_3d(int row_cnt, int col_cnt,
         if (a_star_3d[curr_index].is_push == 1)
         {
             // 鐩存帹
-            full_car_path[total_car_len++] = (Position){prev_r, prev_c};
+            if (push_start_index < 0 && total_car_len > 0)
+                push_start_index = total_car_len - 1;
+            push_end_index = total_car_len;
+            full_car_path[total_car_len++] = (Position){prev_r, prev_c, 0};
         }
         else
         {
@@ -943,6 +949,10 @@ int a_star_path_plan_3d(int row_cnt, int col_cnt,
                 full_car_path[total_car_len++] = temp[k];
         }
     }
+    if (push_start_index >= 0 && push_start_index < total_car_len)
+        full_car_path[push_start_index].id = PUSH_StART_POINT;
+    if (push_end_index >= 0 && push_end_index < total_car_len)
+        full_car_path[push_end_index].id = PUSH_END_POINT;
     return total_car_len;
 }
 
@@ -1008,12 +1018,21 @@ int get_candidate_walls(const Position *obstacles, int obstacles_cnt,
 static int marker_priority(uint8_t marker_id)
 {
     if (marker_id == BOMB_EXPLOSION)
-        return 3;
+        return 5;
     if (marker_id == IDENTIFICATION)
+        return 4;
+    if (marker_id == PUSH_END_POINT)
+        return 3;
+    if (marker_id == PUSH_StART_POINT)
         return 2;
     if (marker_id == TURNING_POINT)
         return 1;
     return 0;
+}
+
+static int is_push_marker(uint8_t marker_id)
+{
+    return (marker_id == PUSH_StART_POINT || marker_id == PUSH_END_POINT);
 }
 
 static void mark_path_id(Position *path, int path_len, int index, uint8_t marker_id)
@@ -1033,7 +1052,8 @@ static void annotate_path_special_ids(Position *path, int path_len, int bomb_eve
 
     for (int i = 0; i < path_len; i++)
     {
-        path[i].id = 0;
+        if (!is_push_marker(path[i].id))
+            path[i].id = 0;
     }
 
     for (int i = 1; i < path_len - 1; i++)

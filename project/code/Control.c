@@ -102,6 +102,16 @@ typedef enum
 
 typedef enum
 {
+    CONTROL_PHASE_STEP_LOCALIZE = 0U,
+    CONTROL_PHASE_STEP_WAIT_CAMERA_DATA,
+    CONTROL_PHASE_STEP_PLAN_PATH,
+    CONTROL_PHASE_STEP_LOAD_PATH,
+    CONTROL_PHASE_STEP_EXECUTE_PATH,
+    CONTROL_PHASE_STEP_FINISHED
+} control_phase_step_t;
+
+typedef enum
+{
     CONTROL_MAP_DIR_RIGHT = 0U,
     CONTROL_MAP_DIR_UP = 1U,
     CONTROL_MAP_DIR_LEFT = 2U,
@@ -294,6 +304,66 @@ static float wrap_yaw_deg_local(float yaw_deg)
         yaw_deg += 360.0f;
     }
     return yaw_deg;
+}
+
+/**
+ * @brief 按“大阶段 + 小步骤”生成公开运行状态。
+ *
+ * Control 内部仍然用 g_control_flow_phase 表示当前是“识别阶段”还是“推箱子阶段”；
+ * 对外显示和调试时则直接使用 control_stage_t。所有阶段内的状态跳转都经过这里，
+ * 这样不会出现一部分代码写通用 PLAN/EXECUTE、另一部分代码写阶段状态的混乱情况。
+ */
+static control_stage_t make_control_phase_stage(control_flow_phase_t phase,
+                                                control_phase_step_t step)
+{
+    if (phase == CONTROL_FLOW_PUSHBOX)
+    {
+        switch (step)
+        {
+        case CONTROL_PHASE_STEP_LOCALIZE:
+            return CONTROL_STAGE_PUSHBOX_LOCALIZE;
+        case CONTROL_PHASE_STEP_WAIT_CAMERA_DATA:
+            return CONTROL_STAGE_PUSHBOX_WAIT_CAMERA_DATA;
+        case CONTROL_PHASE_STEP_PLAN_PATH:
+            return CONTROL_STAGE_PUSHBOX_PLAN_PATH;
+        case CONTROL_PHASE_STEP_LOAD_PATH:
+            return CONTROL_STAGE_PUSHBOX_LOAD_PATH;
+        case CONTROL_PHASE_STEP_EXECUTE_PATH:
+            return CONTROL_STAGE_PUSHBOX_EXECUTE_PATH;
+        case CONTROL_PHASE_STEP_FINISHED:
+        default:
+            return CONTROL_STAGE_PUSHBOX_FINISHED;
+        }
+    }
+
+    switch (step)
+    {
+    case CONTROL_PHASE_STEP_LOCALIZE:
+        return CONTROL_STAGE_IDENTIFY_LOCALIZE;
+    case CONTROL_PHASE_STEP_WAIT_CAMERA_DATA:
+        return CONTROL_STAGE_IDENTIFY_WAIT_CAMERA_DATA;
+    case CONTROL_PHASE_STEP_PLAN_PATH:
+        return CONTROL_STAGE_IDENTIFY_PLAN_PATH;
+    case CONTROL_PHASE_STEP_LOAD_PATH:
+        return CONTROL_STAGE_IDENTIFY_LOAD_PATH;
+    case CONTROL_PHASE_STEP_EXECUTE_PATH:
+        return CONTROL_STAGE_IDENTIFY_EXECUTE_PATH;
+    case CONTROL_PHASE_STEP_FINISHED:
+    default:
+        return CONTROL_STAGE_IDENTIFY_FINISHED;
+    }
+}
+
+/**
+ * @brief 切换到当前大阶段下的某个小步骤。
+ *
+ * 例如识别阶段调用 CONTROL_PHASE_STEP_PLAN_PATH 会得到
+ * CONTROL_STAGE_IDENTIFY_PLAN_PATH；推箱子阶段调用同一个小步骤会得到
+ * CONTROL_STAGE_PUSHBOX_PLAN_PATH。这样菜单和调试变量能一眼看出当前属于哪条流程。
+ */
+static void set_control_phase_stage(control_phase_step_t step)
+{
+    g_control_stage = make_control_phase_stage(g_control_flow_phase, step);
 }
 
 static void reset_localization_accumulator(void)
@@ -1279,7 +1349,7 @@ static void finish_identify_flow_and_relocalize(uint8 finalize_ids)
     if (g_control_use_vision_localization)
     {
         g_relocalize_force_fresh_pose = 1U;
-        g_control_stage = CONTROL_STAGE_STARTUP_LOCALIZE;
+        set_control_phase_stage(CONTROL_PHASE_STEP_LOCALIZE);
     }
     else
     {
@@ -1290,7 +1360,7 @@ static void finish_identify_flow_and_relocalize(uint8 finalize_ids)
         }
         g_relocalize_force_fresh_pose = 0U;
         mark_wait_new_map_frame();
-        g_control_stage = CONTROL_STAGE_WAIT_CAMERA_DATA;
+        set_control_phase_stage(CONTROL_PHASE_STEP_WAIT_CAMERA_DATA);
     }
 }
 
@@ -1316,15 +1386,6 @@ static uint8 advance_identify_endpoint_or_finish(void)
     return start_identify_segment(g_identify_endpoint_indices[g_identify_endpoint_cursor]);
 }
 
-/**
- * @brief 将规划输出的路径点转换为执行坐标系�?
- *
- * 当开启行列补偿时，把 (row,col) 转为 (col,row)�?
- * 关闭补偿时保持原样�?
- */
-/**
- * @brief 判断两个栅格点是否在同一单元�?
- */
 /**
  * @brief 为当前执行路径配置“炸弹爆炸点停留”事件。
  *
@@ -1691,7 +1752,7 @@ static void handle_prestart_move(void)
         g_relocalize_force_fresh_pose = 0U;
         if (g_control_use_vision_localization)
         {
-            g_control_stage = CONTROL_STAGE_STARTUP_LOCALIZE;
+            set_control_phase_stage(CONTROL_PHASE_STEP_LOCALIZE);
         }
         else
         {
@@ -1702,7 +1763,7 @@ static void handle_prestart_move(void)
             }
             g_body_map_dir = CONTROL_MAP_DIR_RIGHT;
             mark_wait_new_map_frame();
-            g_control_stage = CONTROL_STAGE_WAIT_CAMERA_DATA;
+            set_control_phase_stage(CONTROL_PHASE_STEP_WAIT_CAMERA_DATA);
         }
     }
 }
@@ -1738,7 +1799,7 @@ static void handle_startup_localization(void)
         g_relocalize_force_fresh_pose = 0U;
         clear_car_request_wait();
         mark_wait_new_map_frame();
-        g_control_stage = CONTROL_STAGE_WAIT_CAMERA_DATA;
+        set_control_phase_stage(CONTROL_PHASE_STEP_WAIT_CAMERA_DATA);
         return;
     }
 
@@ -1801,7 +1862,7 @@ static void handle_startup_localization(void)
         g_body_map_dir = CONTROL_MAP_DIR_RIGHT;
     }
     mark_wait_new_map_frame();
-    g_control_stage = CONTROL_STAGE_WAIT_CAMERA_DATA;
+    set_control_phase_stage(CONTROL_PHASE_STEP_WAIT_CAMERA_DATA);
 }
 
 /**
@@ -1847,7 +1908,7 @@ static void handle_wait_camera_data(void)
             }
             map_data_updated = false;
             clear_map_request_wait();
-            g_control_stage = CONTROL_STAGE_PLAN_PATH;
+            set_control_phase_stage(CONTROL_PHASE_STEP_PLAN_PATH);
             return;
         }
     }
@@ -2085,7 +2146,7 @@ static void handle_plan_path_stage(void)
     begin_path_plan_pause();
     if (control_plan_path())
     {
-        g_control_stage = CONTROL_STAGE_LOAD_PATH;
+        set_control_phase_stage(CONTROL_PHASE_STEP_LOAD_PATH);
     }
     else
     {
@@ -2115,7 +2176,7 @@ static void handle_load_path_stage(void)
             g_control_stage = CONTROL_STAGE_ERROR;
             return;
         }
-        g_control_stage = CONTROL_STAGE_EXECUTE_PATH;
+        set_control_phase_stage(CONTROL_PHASE_STEP_EXECUTE_PATH);
         return;
     }
 
@@ -2125,7 +2186,7 @@ static void handle_load_path_stage(void)
 
     car_go_flag = 1U;
     car_stop_flag = 0U;
-    g_control_stage = CONTROL_STAGE_EXECUTE_PATH;
+    set_control_phase_stage(CONTROL_PHASE_STEP_EXECUTE_PATH);
 }
 
 /**
@@ -2140,7 +2201,7 @@ static void handle_pushbox_execute_path(void)
     {
         car_go_flag = 1U;
         car_stop_flag = 1U;
-        g_control_stage = CONTROL_STAGE_FINISHED;
+        set_control_phase_stage(CONTROL_PHASE_STEP_FINISHED);
     }
 }
 
@@ -2176,7 +2237,7 @@ static void handle_error_stage(void)
         }
         map_data_updated = false;
         clear_map_request_wait();
-        g_control_stage = CONTROL_STAGE_PLAN_PATH;
+        set_control_phase_stage(CONTROL_PHASE_STEP_PLAN_PATH);
         return;
     }
 
@@ -2239,27 +2300,33 @@ void control_process(void)
         handle_prestart_move();
         break;
 
-    case CONTROL_STAGE_STARTUP_LOCALIZE:
+    case CONTROL_STAGE_IDENTIFY_LOCALIZE:
+    case CONTROL_STAGE_PUSHBOX_LOCALIZE:
         handle_startup_localization();
         break;
 
-    case CONTROL_STAGE_WAIT_CAMERA_DATA:
+    case CONTROL_STAGE_IDENTIFY_WAIT_CAMERA_DATA:
+    case CONTROL_STAGE_PUSHBOX_WAIT_CAMERA_DATA:
         handle_wait_camera_data();
         break;
 
-    case CONTROL_STAGE_PLAN_PATH:
+    case CONTROL_STAGE_IDENTIFY_PLAN_PATH:
+    case CONTROL_STAGE_PUSHBOX_PLAN_PATH:
         handle_plan_path_stage();
         break;
 
-    case CONTROL_STAGE_LOAD_PATH:
+    case CONTROL_STAGE_IDENTIFY_LOAD_PATH:
+    case CONTROL_STAGE_PUSHBOX_LOAD_PATH:
         handle_load_path_stage();
         break;
 
-    case CONTROL_STAGE_EXECUTE_PATH:
+    case CONTROL_STAGE_IDENTIFY_EXECUTE_PATH:
+    case CONTROL_STAGE_PUSHBOX_EXECUTE_PATH:
         handle_execute_path_stage();
         break;
 
-    case CONTROL_STAGE_FINISHED:
+    case CONTROL_STAGE_IDENTIFY_FINISHED:
+    case CONTROL_STAGE_PUSHBOX_FINISHED:
         /* 完成态保持停车，等待外部调用 control_restart()。 */
         break;
 

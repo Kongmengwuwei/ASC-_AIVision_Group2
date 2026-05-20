@@ -516,35 +516,58 @@ void Show_Map(void)
 
 void State_Show(void)
 {
-    ips200_show_string(176, 132, "State:");
+    ips200_show_string(168, 132, "State:");
+    /*
+     * 状态编号约定：
+     * 0/1 为全局状态；20~25 为识别阶段；30~35 为推箱子阶段；99 为错误重试。
+     * 这样现场调车时只看两位数字，就能先判断当前属于哪条流程。
+     */
     switch (g_control_stage)
     {
     case CONTROL_STAGE_IDLE:
-        ips200_show_uint(224, 132, 0, 2);
+        ips200_show_uint(216, 132, 0, 2);
         break;
     case CONTROL_STAGE_PRESTART_MOVE:
-        ips200_show_uint(224, 132, 1, 2);
+        ips200_show_uint(216, 132, 1, 2);
         break;
-    case CONTROL_STAGE_STARTUP_LOCALIZE:
-        ips200_show_uint(224, 132, 2, 2);
+    case CONTROL_STAGE_IDENTIFY_LOCALIZE:
+        ips200_show_uint(216, 132, 20, 2);
         break;
-    case CONTROL_STAGE_WAIT_CAMERA_DATA:
-        ips200_show_uint(224, 132, 3, 2);
+    case CONTROL_STAGE_IDENTIFY_WAIT_CAMERA_DATA:
+        ips200_show_uint(216, 132, 21, 2);
         break;
-    case CONTROL_STAGE_PLAN_PATH:
-        ips200_show_uint(224, 132, 4, 2);
+    case CONTROL_STAGE_IDENTIFY_PLAN_PATH:
+        ips200_show_uint(216, 132, 22, 2);
         break;
-    case CONTROL_STAGE_LOAD_PATH:
-        ips200_show_uint(224, 132, 5, 2);
+    case CONTROL_STAGE_IDENTIFY_LOAD_PATH:
+        ips200_show_uint(216, 132, 23, 2);
         break;
-    case CONTROL_STAGE_EXECUTE_PATH:
-        ips200_show_uint(224, 132, 6, 2);
+    case CONTROL_STAGE_IDENTIFY_EXECUTE_PATH:
+        ips200_show_uint(216, 132, 24, 2);
         break;
-    case CONTROL_STAGE_FINISHED:
-        ips200_show_uint(224, 132, 7, 2);
+    case CONTROL_STAGE_IDENTIFY_FINISHED:
+        ips200_show_uint(216, 132, 25, 2);
+        break;
+    case CONTROL_STAGE_PUSHBOX_LOCALIZE:
+        ips200_show_uint(216, 132, 30, 2);
+        break;
+    case CONTROL_STAGE_PUSHBOX_WAIT_CAMERA_DATA:
+        ips200_show_uint(216, 132, 31, 2);
+        break;
+    case CONTROL_STAGE_PUSHBOX_PLAN_PATH:
+        ips200_show_uint(216, 132, 32, 2);
+        break;
+    case CONTROL_STAGE_PUSHBOX_LOAD_PATH:
+        ips200_show_uint(216, 132, 33, 2);
+        break;
+    case CONTROL_STAGE_PUSHBOX_EXECUTE_PATH:
+        ips200_show_uint(216, 132, 34, 2);
+        break;
+    case CONTROL_STAGE_PUSHBOX_FINISHED:
+        ips200_show_uint(216, 132, 35, 2);
         break;
     case CONTROL_STAGE_ERROR:
-        ips200_show_uint(224, 132, 16, 2);
+        ips200_show_uint(216, 132, 99, 2);
         break;
     }
 

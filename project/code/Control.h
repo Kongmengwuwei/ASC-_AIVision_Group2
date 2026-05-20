@@ -10,25 +10,36 @@ extern uint8 g_control_prestart_depart_dir;
  */
 typedef enum
 {
-    CONTROL_STAGE_IDLE = 0,         /**< 空闲态：流程未启动。 */
-    CONTROL_STAGE_PRESTART_MOVE,    /**< 起步态：先沿车头方向运动 0.2m，驶出发车区。 */
-    CONTROL_STAGE_STARTUP_LOCALIZE, /**< 初始定位态：采集相机位姿并对齐里程计。 */
-    CONTROL_STAGE_WAIT_CAMERA_DATA, /**< 等待地图态：周期请求并等待摄像头地图帧。 */
-    CONTROL_STAGE_PLAN_PATH,        /**< 规划态：调用 Game_logic 进行路径规划。 */
-    CONTROL_STAGE_LOAD_PATH,        /**< 下发态：把规划结果转换并下发给 path_follow。 */
-    CONTROL_STAGE_EXECUTE_PATH,     /**< 执行态：沿路径连续运动并检测执行完成。 */
-    CONTROL_STAGE_FINISHED,         /**< 完成态：整段路径执行完毕并保持停车。 */
-    CONTROL_STAGE_ERROR             /**< 错误态：规划/下发失败，等待新地图后重试。 */
+    CONTROL_STAGE_IDLE = 0,          /**< 空闲态：流程未启动。 */
+    CONTROL_STAGE_PRESTART_MOVE = 1, /**< 起步态：先沿车头方向运动 0.2m，驶出发车区。 */
+
+    /* 识别阶段：负责到达识别点、识别箱子/目标 ID，并保存给后续推箱子阶段使用。 */
+    CONTROL_STAGE_IDENTIFY_LOCALIZE = 20,        /**< 识别-定位态：采集相机位姿并对齐里程计。 */
+    CONTROL_STAGE_IDENTIFY_WAIT_CAMERA_DATA = 21, /**< 识别-等待地图态：请求并等待识别用地图帧。 */
+    CONTROL_STAGE_IDENTIFY_PLAN_PATH = 22,       /**< 识别-规划态：调用识别路径规划。 */
+    CONTROL_STAGE_IDENTIFY_LOAD_PATH = 23,       /**< 识别-下发态：切分识别路径并准备分段执行。 */
+    CONTROL_STAGE_IDENTIFY_EXECUTE_PATH = 24,    /**< 识别-执行态：移动、转向并触发识别。 */
+    CONTROL_STAGE_IDENTIFY_FINISHED = 25,        /**< 识别-完成态：识别流程结束，准备切入推箱子。 */
+
+    /* 推箱子阶段：使用识别结果规划真实推箱路径，并下发给 path_follow 执行。 */
+    CONTROL_STAGE_PUSHBOX_LOCALIZE = 30,         /**< 推箱子-定位态：重新采集车位姿，降低阶段切换误差。 */
+    CONTROL_STAGE_PUSHBOX_WAIT_CAMERA_DATA = 31, /**< 推箱子-等待地图态：请求并等待推箱子地图帧。 */
+    CONTROL_STAGE_PUSHBOX_PLAN_PATH = 32,        /**< 推箱子-规划态：调用 Game_logic 进行推箱路径规划。 */
+    CONTROL_STAGE_PUSHBOX_LOAD_PATH = 33,        /**< 推箱子-下发态：把执行路径下发给 path_follow。 */
+    CONTROL_STAGE_PUSHBOX_EXECUTE_PATH = 34,     /**< 推箱子-执行态：沿路径运动并处理爆炸点停留。 */
+    CONTROL_STAGE_PUSHBOX_FINISHED = 35,         /**< 推箱子-完成态：整段任务完成并保持停车。 */
+
+    CONTROL_STAGE_ERROR = 99                     /**< 错误态：规划/下发失败，等待新地图后重试。 */
 } control_stage_t;
 
 /**
  * @brief 路径规划模式枚举。
  *
  * CONTROL_PLAN_MODE_1:
- * 在 CONTROL_STAGE_PLAN_PATH 阶段调用 Plan_path_Mode1()。
+ * 在 CONTROL_STAGE_PUSHBOX_PLAN_PATH 阶段调用 Plan_path_Mode1()。
  *
  * CONTROL_PLAN_MODE_2:
- * 在 CONTROL_STAGE_PLAN_PATH 阶段调用 Plan_path_Mode2()。
+ * 在 CONTROL_STAGE_PUSHBOX_PLAN_PATH 阶段调用 Plan_path_Mode2()。
  *
  * CONTROL_PLAN_MODE_IDENTIFY:
  * 预留值。识别流程由控制状态机首轮自动执行，不通过该标志手动切换。

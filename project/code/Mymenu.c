@@ -1,4 +1,5 @@
 #include "Mymenu.h"
+#include "path.h"
 
 Menu_Item Root;     // 根目录
 Menu_Item *pointer; // 指针
@@ -18,6 +19,23 @@ uint8 test1 = 0;
 char move_cmd = 'X'; // 移动命令缓存
 uint8 move_ret = 0;  // 移动结果缓存
 #endif
+
+static void draw_exec_path_diamond(uint16 center_x, uint16 center_y)
+{
+    const uint16 radius = 3U;
+    for (uint16 dy = 0U; dy <= radius; dy++)
+    {
+        uint16 half_width = radius - dy;
+        uint16 x0 = (center_x > half_width) ? (center_x - half_width) : 0U;
+        uint16 x1 = center_x + half_width;
+
+        ips200_draw_line(x0, center_y + dy, x1, center_y + dy, RGB565_BLUE);
+        if (dy > 0U && center_y >= dy)
+        {
+            ips200_draw_line(x0, center_y - dy, x1, center_y - dy, RGB565_BLUE);
+        }
+    }
+}
 
 // 创建菜单
 void Menu_Create(void)
@@ -218,8 +236,11 @@ void Show_Map(void)
     static uint8 inited = 0U;
     static uint8 last_cells[12][16] = {{0}};
     static uint32 last_path_sig = 0U;
+    static uint32 last_exec_path_sig = 0U;
     static uint32 last_id_sig = 0U;
     uint8 curr_cells[12][16] = {{0}};
+    size_t exec_steps = 0U;
+    const Position *exec_path = control_get_exec_path(&exec_steps);
     // 地图元素类型位定义
     enum
     {
@@ -303,6 +324,18 @@ void Show_Map(void)
         path_sig = (path_sig ^ (uint32)(uint16)car_path[i].col) * 16777619u;
     }
 
+    uint32 exec_path_sig = 2166136261u;
+    exec_path_sig = (exec_path_sig ^ (uint32)exec_steps) * 16777619u;
+    if (exec_path != NULL)
+    {
+        for (size_t i = 0; i < exec_steps; i++)
+        {
+            exec_path_sig = (exec_path_sig ^ (uint32)(uint16)exec_path[i].row) * 16777619u;
+            exec_path_sig = (exec_path_sig ^ (uint32)(uint16)exec_path[i].col) * 16777619u;
+            exec_path_sig = (exec_path_sig ^ (uint32)(uint16)exec_path[i].id) * 16777619u;
+        }
+    }
+
     uint32 id_sig = 2166136261u;
     id_sig = (id_sig ^ (uint32)Boxes_count) * 16777619u;
     for (size_t i = 0; i < Boxes_count; i++)
@@ -319,7 +352,11 @@ void Show_Map(void)
         id_sig = (id_sig ^ (uint32)(uint16)targets[i].id) * 16777619u;
     }
 
-    uint8 changed = (inited == 0U || path_sig != last_path_sig || id_sig != last_id_sig) ? 1U : 0U;
+    uint8 force_redraw = (inited == 0U ||
+                          path_sig != last_path_sig ||
+                          exec_path_sig != last_exec_path_sig ||
+                          id_sig != last_id_sig) ? 1U : 0U;
+    uint8 changed = force_redraw;
     for (uint16 r = 0; r < map_rows && !changed; r++)
     {
         for (uint16 c = 0; c < map_cols; c++)
@@ -341,7 +378,7 @@ void Show_Map(void)
     {
         for (uint16 c = 0; c < map_cols; c++)
         {
-            if (!inited || curr_cells[r][c] != last_cells[r][c])
+            if (force_redraw || curr_cells[r][c] != last_cells[r][c])
             {
                 uint16 cell_x = start_x + c * cell_size;
                 uint16 cell_y = start_y + r * cell_size;
@@ -486,6 +523,59 @@ void Show_Map(void)
         }
     }
 
+    // 执行路径显示：执行路径来自 path_follow 坐标系，显示前先转回地图栅格坐标。
+    if (exec_path != NULL && exec_steps >= 1U)
+    {
+        if (exec_steps >= 2U)
+        {
+            for (size_t i = 1; i < exec_steps; i++)
+            {
+                Position p0 = exec_path[i - 1U];
+                Position p1 = exec_path[i];
+                path_inverse_remap_exec_point(&p0);
+                path_inverse_remap_exec_point(&p1);
+
+                int r0 = p0.row;
+                int c0 = p0.col;
+                int r1 = p1.row;
+                int c1 = p1.col;
+
+                if (r0 < 0 || c0 < 0 || r1 < 0 || c1 < 0 ||
+                    r0 >= (int)inner_rows || c0 >= (int)inner_cols ||
+                    r1 >= (int)inner_rows || c1 >= (int)inner_cols)
+                {
+                    continue;
+                }
+
+                uint16 x0 = start_x + (uint16)(c0 + inner_col_offset) * cell_size + cell_size / 2U;
+                uint16 y0 = start_y + (uint16)(r0 + inner_row_offset) * cell_size + cell_size / 2U;
+                uint16 x1 = start_x + (uint16)(c1 + inner_col_offset) * cell_size + cell_size / 2U;
+                uint16 y1 = start_y + (uint16)(r1 + inner_row_offset) * cell_size + cell_size / 2U;
+
+                ips200_draw_line(x0, y0, x1, y1, RGB565_BLUE);
+            }
+        }
+
+        for (size_t i = 0; i < exec_steps; i++)
+        {
+            Position p = exec_path[i];
+            path_inverse_remap_exec_point(&p);
+
+            int r = p.row;
+            int c = p.col;
+
+            if (r < 0 || c < 0 ||
+                r >= (int)inner_rows || c >= (int)inner_cols)
+            {
+                continue;
+            }
+
+            uint16 x = start_x + (uint16)(c + inner_col_offset) * cell_size + cell_size / 2U;
+            uint16 y = start_y + (uint16)(r + inner_row_offset) * cell_size + cell_size / 2U;
+            draw_exec_path_diamond(x, y);
+        }
+    }
+
     // 记录当前地图状态
     for (uint16 r = 0; r < map_rows; r++)
     {
@@ -496,6 +586,7 @@ void Show_Map(void)
     }
     inited = 1U;
     last_path_sig = path_sig;
+    last_exec_path_sig = exec_path_sig;
     last_id_sig = id_sig;
     // 显示地图数据
     // ips200_show_string(start_x + (map_cols + 1) * cell_size, start_y, "BOX:");

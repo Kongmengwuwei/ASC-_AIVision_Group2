@@ -35,7 +35,7 @@ uint8 g_control_prestart_depart_dir = 0U;
  * 1：每段识别短路程出发前先转到识别朝向，到点后直接识别。
  * 0：关闭提前转向，恢复为到达识别点后再原地转向识别。
  */
-static uint8 g_control_identify_prerotate_enabled = 0U;
+static uint8 g_control_identify_prerotate_enabled = 1U;
 
 /* ========================= 参数配置�?========================= */
 
@@ -46,7 +46,7 @@ static uint8 g_control_identify_prerotate_enabled = 0U;
 #define CONTROL_REQ_MAP_RETRY_TIMEOUT_LOOPS 200U
 #define CONTROL_REQ_CAR_RETRY_TIMEOUT_LOOPS 200U
 /* Wait before consuming CAR pose frames to avoid using delayed camera data. */
-#define CONTROL_CAMERA_POSE_SETTLE_DELAY_MS 200U
+#define CONTROL_CAMERA_POSE_SETTLE_DELAY_MS 300U
 /* 推炸弹到爆炸点后停留 0.5s，等待爆炸效果生效 */
 #define CONTROL_BOMB_EXPLOSION_PAUSE_MS 500U
 
@@ -56,8 +56,8 @@ static uint8 g_control_identify_prerotate_enabled = 0U;
  *
  * 使用简单平均抑制单帧抖动。达到该采样数后才完成初始定位�?
  */
-#define CONTROL_LOCALIZE_MIN_SAMPLES 2U
-#define CONTROL_RELOCALIZE_MIN_SAMPLES_PUSHBOX 4U
+#define CONTROL_LOCALIZE_MIN_SAMPLES 3U
+#define CONTROL_RELOCALIZE_MIN_SAMPLES_PUSHBOX 3U
 
 /**
  * @brief 起步位移距离（米）�?
@@ -2343,6 +2343,15 @@ void control_process(void)
 control_stage_t control_get_stage(void)
 {
     return g_control_stage;
+}
+
+const Position *control_get_exec_path(size_t *steps)
+{
+    if (steps != NULL)
+    {
+        *steps = g_exec_steps;
+    }
+    return g_exec_path;
 }
 
 /**

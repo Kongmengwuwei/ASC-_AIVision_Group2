@@ -1,6 +1,7 @@
 #ifndef _CONTROL_H
 #define _CONTROL_H
 
+#include "Map_Path_Data.h"
 #include "zf_common_typedef.h"
 
 extern uint8 g_control_prestart_depart_dir;
@@ -93,6 +94,17 @@ uint8 control_get_start_enabled(void);
  * @return control_stage_t 当前状态机阶段值。
  */
 control_stage_t control_get_stage(void);
+
+/**
+ * @brief 获取当前执行路径缓存。
+ *
+ * 返回的是已经转换到 path_follow 执行坐标系的路径点；若用于地图显示，
+ * 需要调用 path_inverse_remap_exec_point() 转回地图栅格坐标。
+ *
+ * @param[out] steps 当前执行路径点数量，可传 NULL。
+ * @return const Position* 执行路径只读指针。
+ */
+const Position *control_get_exec_path(size_t *steps);
 
 /**
  * @brief 设置控制流程使用的路径规划模式。

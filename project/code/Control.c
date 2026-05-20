@@ -46,7 +46,7 @@ static uint8 g_control_identify_prerotate_enabled = 1U;
 #define CONTROL_REQ_MAP_RETRY_TIMEOUT_LOOPS 200U
 #define CONTROL_REQ_CAR_RETRY_TIMEOUT_LOOPS 200U
 /* Wait before consuming CAR pose frames to avoid using delayed camera data. */
-#define CONTROL_CAMERA_POSE_SETTLE_DELAY_MS 300U
+#define CONTROL_CAMERA_POSE_SETTLE_DELAY_MS 200U
 /* 推炸弹到爆炸点后停留 0.5s，等待爆炸效果生效 */
 #define CONTROL_BOMB_EXPLOSION_PAUSE_MS 500U
 
@@ -616,7 +616,7 @@ static uint8 identify_result_to_valid_id(const VisionRecognitionResult *result, 
     {
         return 0U;
     }
-    if (!result->success || !result->label_is_number)
+    if (!result->success || result->mode_marker || !result->label_is_number)
     {
         return 0U;
     }
@@ -630,11 +630,34 @@ static uint8 identify_result_to_valid_id(const VisionRecognitionResult *result, 
     return 1U;
 }
 
-static void update_plan_mode_from_first_identify_result(uint8 valid_id)
+static uint8 update_plan_mode_from_first_identify_result(const VisionRecognitionResult *result,
+                                                         uint8 valid_id)
 {
     if (g_identify_first_result_checked)
     {
-        return;
+        return 1U;
+    }
+
+    if (!valid_id && result != NULL && result->mode_marker)
+    {
+        g_identify_first_result_checked = 1U;
+        /*
+         * 新版摄像头用 IMG/NUM,-1,0 表示首帧已识别到关卡模式纯色块。
+         * 这不是串口错误，也不是普通识别失败；它表示本关不需要继续做 ID 配对，
+         * 因此保持原本要求：立即切到 Mode1，并结束识别阶段。
+         */
+        g_control_plan_mode = CONTROL_PLAN_MODE_1;
+        g_identify_abort_to_mode1 = 1U;
+        return 1U;
+    }
+
+    if (!valid_id && result != NULL && !result->success)
+    {
+        /*
+         * IMG/NUM,-1,-1 现在只表示本次图案/数字识别失败。
+         * 它不再作为 Mode1 的判断依据，首个有效模式结果到来前继续重发等待。
+         */
+        return 0U;
     }
 
     g_identify_first_result_checked = 1U;
@@ -649,6 +672,7 @@ static void update_plan_mode_from_first_identify_result(uint8 valid_id)
         g_control_plan_mode = CONTROL_PLAN_MODE_1;
         g_identify_abort_to_mode1 = 1U;
     }
+    return 1U;
 }
 
 static void save_identify_ids_from_current_map(void)
@@ -972,7 +996,14 @@ static uint8 identify_action_stub(const control_identify_target_t *target)
         if (vision_take_img_result(&result))
         {
             valid_id = identify_result_to_valid_id(&result, &recognized_id);
-            update_plan_mode_from_first_identify_result(valid_id);
+            if (!update_plan_mode_from_first_identify_result(&result, valid_id))
+            {
+                if (!start_identify_recognition_request(target, distance))
+                {
+                    return 1U;
+                }
+                return 0U;
+            }
 
             if (target->obj_type == CONTROL_IDENTIFY_OBJ_BOX &&
                 target->obj_index < MAX_BOXES &&
@@ -991,7 +1022,14 @@ static uint8 identify_action_stub(const control_identify_target_t *target)
         if (vision_take_num_result(&result))
         {
             valid_id = identify_result_to_valid_id(&result, &recognized_id);
-            update_plan_mode_from_first_identify_result(valid_id);
+            if (!update_plan_mode_from_first_identify_result(&result, valid_id))
+            {
+                if (!start_identify_recognition_request(target, distance))
+                {
+                    return 1U;
+                }
+                return 0U;
+            }
 
             if (target->obj_type == CONTROL_IDENTIFY_OBJ_TARGET &&
                 target->obj_index < MAX_TARGETS &&

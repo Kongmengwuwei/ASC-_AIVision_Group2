@@ -733,6 +733,7 @@ static void vision_reset_result(VisionRecognitionResult *result, VisionRecogniti
     result->type = type;
     result->label_value = -1;
     result->score = -1;
+    result->mode_marker = false;
     result->success = false;
 }
 
@@ -742,7 +743,8 @@ static void vision_store_result(VisionRecognitionType type,
                                 int32 label_value,
                                 bool label_is_number,
                                 int16 score,
-                                bool success)
+                                bool success,
+                                bool mode_marker)
 {
     VisionRecognitionResult *dst = NULL;
 
@@ -763,6 +765,7 @@ static void vision_store_result(VisionRecognitionType type,
     dst->label_is_number = label_is_number;
     dst->score = score;
     dst->success = success;
+    dst->mode_marker = mode_marker;
 
     if (VISION_RECOGNITION_NUM == type) {
         vision_num_result_ready = true;
@@ -801,6 +804,7 @@ static void vision_parse_line(char *line)
     int32 label_value = -1;
     bool label_is_number = false;
     bool success = true;
+    bool mode_marker = false;
 
     if (line == NULL) {
         return;
@@ -856,14 +860,27 @@ static void vision_parse_line(char *line)
         label_value = -1;
     }
 
-    if (0 == strcmp(label, "-1") && -1 == score_value) {
-        success = false;
+    if (0 == strcmp(label, "-1")) {
+        if (-1 == score_value) {
+            success = false;
+        } else if (0 == score_value) {
+            /*
+             * 新版摄像头在第一次接收到识别命令时，会先判断关卡模式色块。
+             * 命中对应纯色块时返回 IMG/NUM,-1,0：这不是普通识别失败，
+             * 而是告诉主控“已确认模式，但本帧没有实际图案/数字标签”。
+             */
+            success = true;
+            mode_marker = true;
+        } else {
+            vision_note_bad_line();
+            return;
+        }
     } else if (score_value < 0 || score_value > 100) {
         vision_note_bad_line();
         return;
     }
 
-    vision_store_result(type, label, label_value, label_is_number, (int16)score_value, success);
+    vision_store_result(type, label, label_value, label_is_number, (int16)score_value, success, mode_marker);
 }
 
 /*

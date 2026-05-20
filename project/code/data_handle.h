@@ -100,6 +100,7 @@ typedef struct {
     bool label_is_number;             /* label_value 是否由有效数字转换得到。 */
     int16 score;                      /* 置信度百分比，范围 0~100；失败帧为 -1。 */
     bool success;                     /* true=识别成功；false=OpenMV 返回 -1,-1。 */
+    bool mode_marker;                 /* true=摄像头首帧识别到关卡模式纯色块，返回 IMG/NUM,-1,0。 */
 } VisionRecognitionResult;
 
 /* 初始化串口接收、FIFO 与模块状态 */

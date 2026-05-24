@@ -5,7 +5,6 @@
 #include <math.h>
 #include "Attitude.h"
 
-
 /**
  * @file path_follow.c
  * @brief 路径跟随与底盘速度规划实现文件。
@@ -15,13 +14,22 @@
  * 当前实现兼容网格地图产生的横平竖直路径，并保留启动偏移、位姿校正等辅助动作接口。
  */
 
-
 #ifndef M_PI
 #define M_PI 3.1415926
 #endif
 
 /** @brief 接近目标点时开始混合定点保持修正的距离阈值，单位 m。 */
 #define PATH_HOLD_TRIM_RELEASE_DISTANCE 0.25f
+
+/*
+ * Target compensation, unit: cm.
+ * compensated_target = raw_target + BASE_COMP_CM + accumulated_axis_run_cm * RUN_COMP_K.
+ * RUN_COMP_K means compensation cm per accumulated 1 cm run on that axis.
+ */
+#define PATH_FOLLOW_TARGET_X_BASE_COMP_CM 0.0f
+#define PATH_FOLLOW_TARGET_X_RUN_COMP_K 0.0f
+#define PATH_FOLLOW_TARGET_Y_BASE_COMP_CM 0.0f
+#define PATH_FOLLOW_TARGET_Y_RUN_COMP_K 0.0f
 /** @brief 直线段法向纠偏比例系数，单位 (cm/s)/cm。 */
 #define PATH_LINE_GUIDE_KP 1.0f
 /**
@@ -36,7 +44,7 @@
  * - 若仍推不动，可逐步增大；
  * - 若出现明显来回抽动，可适当减小。
  */
-#define PATH_LINE_GUIDE_MIN_CMPS 4.0f  //
+#define PATH_LINE_GUIDE_MIN_CMPS 5.0f
 /** @brief 直线段法向纠偏速度限幅，单位 cm/s。 */
 #define PATH_LINE_GUIDE_MAX_CMPS 12.0f
 /** @brief 直线段法向纠偏死区，单位 m。 */
@@ -63,22 +71,23 @@
 /** @brief 拐点附近是否启用双轴 PID 保持修正：1 启用，0 关闭。 */
 #define PATH_FOLLOW_ENABLE_CORNER_DUAL_AXIS_TRIM 1
 /** @brief 启用拐点 handover 时，拐点双轴保持修正的权重缩放系数。 */
-#define PATH_FOLLOW_CORNER_HOLD_TRIM_SCALE 9.0f   //
+#define PATH_FOLLOW_CORNER_HOLD_TRIM_SCALE 9.0f
 /** @brief 普通中间拐点是否启用速度向量 handover：1 启用，0 回退到原始简单段末速度保留。 */
-#define PATH_FOLLOW_ENABLE_CORNER_HANDOVER 0   //
-#if PATH_FOLLOW_ENABLE_CORNER_HANDOVER
-
+#define PATH_FOLLOW_ENABLE_CORNER_HANDOVER 0
+/** @brief 编译拐点 handover 代码，实际是否启用由运行时调参变量控制。 */
+#define PATH_FOLLOW_COMPILE_CORNER_HANDOVER 0
+#if PATH_FOLLOW_COMPILE_CORNER_HANDOVER
 
 /* [CornerHandover重构] 保证 enter / commit 窗口之间至少留出的距离，单位 m。 */
 #define PATH_CORNER_HANDOVER_WINDOW_GAP_MIN_M 0.005f
 /* [CornerHandover重构] 普通中间拐点正式切段时的最小横向误差门限，单位 m。 */
-#define PATH_CORNER_COMMIT_LATERAL_GATE_MIN_M 0.025f  //
+#define PATH_CORNER_COMMIT_LATERAL_GATE_MIN_M 0.02f
 /* [CornerHandover重构] 普通中间拐点正式切段时横向误差门限相对 pos_tol 的放大系数。 */
 #define PATH_CORNER_COMMIT_LATERAL_GATE_SCALE 1.20f
 /* [CornerHandover重构] 交接中段对标量速度做轻微压低，避免拐点切向速度过硬。 */
 #define PATH_CORNER_HANDOVER_K_DROP 0.16f
 /* [CornerHandover] 固定交接窗口的开始距离，单位 m。 */
-#define PATH_CORNER_HANDOVER_ENTER_DISTANCE_M 0.09f   //
+#define PATH_CORNER_HANDOVER_ENTER_DISTANCE_M 0.15f
 /* [CornerHandover] 固定交接窗口的末端距离，单位 m。 */
 #define PATH_CORNER_HANDOVER_COMMIT_DISTANCE_M 0.015f
 /* [CornerHandover] 单个拐点交接最多允许持续的时间，单位 s。 */
@@ -86,18 +95,40 @@
 
 #endif
 
+#ifndef PATH_CORNER_HANDOVER_WINDOW_GAP_MIN_M
+#define PATH_CORNER_HANDOVER_WINDOW_GAP_MIN_M 0.005f
+#endif
+#ifndef PATH_CORNER_COMMIT_LATERAL_GATE_MIN_M
+#define PATH_CORNER_COMMIT_LATERAL_GATE_MIN_M 0.02f
+#endif
+#ifndef PATH_CORNER_COMMIT_LATERAL_GATE_SCALE
+#define PATH_CORNER_COMMIT_LATERAL_GATE_SCALE 1.20f
+#endif
+#ifndef PATH_CORNER_HANDOVER_K_DROP
+#define PATH_CORNER_HANDOVER_K_DROP 0.16f
+#endif
+#ifndef PATH_CORNER_HANDOVER_ENTER_DISTANCE_M
+#define PATH_CORNER_HANDOVER_ENTER_DISTANCE_M 0.15f
+#endif
+#ifndef PATH_CORNER_HANDOVER_COMMIT_DISTANCE_M
+#define PATH_CORNER_HANDOVER_COMMIT_DISTANCE_M 0.015f
+#endif
+#ifndef PATH_CORNER_HANDOVER_TIMEOUT_S
+#define PATH_CORNER_HANDOVER_TIMEOUT_S 5U
+#endif
+
 /** @brief 路径跟随到点判定的基础位置容差，单位 m。 */
-#define PATH_FOLLOW_POSITION_TOLERANCE_M 0.025f //
+#define PATH_FOLLOW_POSITION_TOLERANCE_M 0.02
 /** @brief 原地转向完成判定的航向容差，单位 deg。 */
 #define PATH_FOLLOW_YAW_TOLERANCE_DEG 2.0f
 /** @brief 路径跟随允许的线速度上限，单位 m/s。 */
 #define PATH_FOLLOW_MAX_LINEAR_SPEED_MPS 3.0f
-/** 
+/**
  * @brief 当前实现中姿态环输出限幅使用的角速度上限数值。
  *
  * @note 该值直接沿用现有实现中的数值语义，只做宏抽取，不改变当前控制框架。
  */
-#define PATH_FOLLOW_MAX_ANGULAR_SPEED_LIMIT 240.0f
+#define PATH_FOLLOW_MAX_ANGULAR_SPEED_LIMIT 360.0f
 
 /** @brief 世界系位置环 PID 比例系数。 */
 #define PATH_FOLLOW_PID_WORLD_KP 2.2f
@@ -144,9 +175,9 @@
  */
 typedef struct
 {
-    float x_m;      // 世界坐标系 X，单位 m
-    float y_m;      // 世界坐标系 Y，单位 m
-    float yaw_deg;  // 航向角，度
+    float x_m;     // 世界坐标系 X，单位 m
+    float y_m;     // 世界坐标系 Y，单位 m
+    float yaw_deg; // 航向角，度
 } pose2d_t;
 
 /**
@@ -162,8 +193,8 @@ typedef enum
  */
 typedef struct
 {
-    float segment_end_speed_cmps;   // 非终点路径段在段末保留的目标速度，单位 cm/s
-    float hold_release_distance_m;  // 开始混合定点保持修正的距离阈值，单位 m
+    float segment_end_speed_cmps;  // 非终点路径段在段末保留的目标速度，单位 cm/s
+    float hold_release_distance_m; // 开始混合定点保持修正的距离阈值，单位 m
 } path_follow_speed_cfg_t;
 
 /**
@@ -171,10 +202,10 @@ typedef struct
  */
 typedef struct
 {
-    uint8 band_idx;         // 当前路径段锁定的 band 索引
-    float max_speed_cmps;   // 当前路径段锁定的最大速度，单位 cm/s
-    float accel_cmpss;      // 当前路径段锁定的最大加速度，单位 cm/s^2
-    float jerk_cmpsss;      // 当前路径段锁定的最大 jerk，单位 cm/s^3
+    uint8 band_idx;       // 当前路径段锁定的 band 索引
+    float max_speed_cmps; // 当前路径段锁定的最大速度，单位 cm/s
+    float accel_cmpss;    // 当前路径段锁定的最大加速度，单位 cm/s^2
+    float jerk_cmpsss;    // 当前路径段锁定的最大 jerk，单位 cm/s^3
 } path_follow_scurve_runtime_cfg_t;
 
 /**
@@ -211,23 +242,23 @@ typedef struct
  */
 typedef struct
 {
-    float s;      // 当前路径段总位移，单位 cm
-    float x0;     // 轨迹起点位置，单位 cm，当前实现固定为 0
-    float x1;     // 轨迹终点位置，单位 cm
-    float v0;     // 段起点速度，单位 cm/s
-    float v1;     // 段终点速度，单位 cm/s
-    float vmax;   // 配置给定的最大速度约束，单位 cm/s
-    float amax;   // 本条轨迹最终采用的最大加速度，单位 cm/s^2
-    float jmax;   // 本条轨迹采用的最大 jerk，单位 cm/s^3
-    float vlim;   // 本条轨迹实际可达到的峰值速度，单位 cm/s
-    float alima;  // 加速侧实际峰值加速度，单位 cm/s^2
-    float alimd;  // 减速侧实际峰值减速度幅值，单位 cm/s^2
-    float Tj1;    // 加速侧 jerk 作用时间，单位 s
-    float Ta;     // 整个加速阶段时长，单位 s
-    float Tv;     // 匀速阶段时长，单位 s
-    float Tj2;    // 减速侧 jerk 作用时间，单位 s
-    float Td;     // 整个减速阶段时长，单位 s
-    float T;      // 轨迹总时长，单位 s
+    float s;     // 当前路径段总位移，单位 cm
+    float x0;    // 轨迹起点位置，单位 cm，当前实现固定为 0
+    float x1;    // 轨迹终点位置，单位 cm
+    float v0;    // 段起点速度，单位 cm/s
+    float v1;    // 段终点速度，单位 cm/s
+    float vmax;  // 配置给定的最大速度约束，单位 cm/s
+    float amax;  // 本条轨迹最终采用的最大加速度，单位 cm/s^2
+    float jmax;  // 本条轨迹采用的最大 jerk，单位 cm/s^3
+    float vlim;  // 本条轨迹实际可达到的峰值速度，单位 cm/s
+    float alima; // 加速侧实际峰值加速度，单位 cm/s^2
+    float alimd; // 减速侧实际峰值减速度幅值，单位 cm/s^2
+    float Tj1;   // 加速侧 jerk 作用时间，单位 s
+    float Ta;    // 整个加速阶段时长，单位 s
+    float Tv;    // 匀速阶段时长，单位 s
+    float Tj2;   // 减速侧 jerk 作用时间，单位 s
+    float Td;    // 整个减速阶段时长，单位 s
+    float T;     // 轨迹总时长，单位 s
     uint8 valid;
 } path_follow_scurve_profile_t;
 
@@ -236,8 +267,8 @@ typedef struct
  */
 typedef struct
 {
-    float target_yaw_deg;   // 当前姿态层目标航向，单位 deg
-    float omega_cmd_radps;  // 当前姿态层输出角速度，单位 rad/s
+    float target_yaw_deg;  // 当前姿态层目标航向，单位 deg
+    float omega_cmd_radps; // 当前姿态层输出角速度，单位 rad/s
 } path_follow_attitude_plan_t;
 
 /**
@@ -245,10 +276,10 @@ typedef struct
  */
 typedef struct
 {
-    float vx_world_cmps;  // 世界系 X 方向速度命令，单位 cm/s
-    float vy_world_cmps;  // 世界系 Y 方向速度命令，单位 cm/s
-    float vx_body_cmps;   // 车体系 X 方向速度命令，单位 cm/s
-    float vy_body_cmps;   // 车体系 Y 方向速度命令，单位 cm/s
+    float vx_world_cmps; // 世界系 X 方向速度命令，单位 cm/s
+    float vy_world_cmps; // 世界系 Y 方向速度命令，单位 cm/s
+    float vx_body_cmps;  // 车体系 X 方向速度命令，单位 cm/s
+    float vy_body_cmps;  // 车体系 Y 方向速度命令，单位 cm/s
 } path_follow_motion_cmd_t;
 
 /**
@@ -256,14 +287,14 @@ typedef struct
  */
 typedef struct
 {
-    float distance_m;       // 当前目标距离，单位 m
-    float dir_x;            // 当前单位方向向量 X 分量
-    float dir_y;            // 当前单位方向向量 Y 分量
-    float speed_ref_cmps;   // 当前标量速度参考，单位 cm/s
-    float target_yaw_deg;   // 当前目标航向，单位 deg
-    float vx_world_cmps;    // 当前世界系 X 速度命令，单位 cm/s
-    float vy_world_cmps;    // 当前世界系 Y 速度命令，单位 cm/s
-    uint8 segment_axis;     // 当前路径段主轴类型
+    float distance_m;     // 当前目标距离，单位 m
+    float dir_x;          // 当前单位方向向量 X 分量
+    float dir_y;          // 当前单位方向向量 Y 分量
+    float speed_ref_cmps; // 当前标量速度参考，单位 cm/s
+    float target_yaw_deg; // 当前目标航向，单位 deg
+    float vx_world_cmps;  // 当前世界系 X 速度命令，单位 cm/s
+    float vy_world_cmps;  // 当前世界系 Y 速度命令，单位 cm/s
+    uint8 segment_axis;   // 当前路径段主轴类型
 } path_follow_debug_state_t;
 
 /**
@@ -271,42 +302,42 @@ typedef struct
  */
 typedef struct
 {
-    const Position *path;  // 规划路径指针
-    size_t steps;          // 路径长度
-    size_t idx;            // 当前目标点索引
-    float grid_m;          // 网格边长，m/格
-    float default_grid_m;  // 地图路径网格边长，m/格
-    float pulses_per_meter;// 编码器每米脉冲数
-    float pos_tol_m;       // 位置容差
-    float yaw_tol_deg;     // 航向容差（保留，当前未用）
-    float max_v_mps;       // 线速度上限 m/s
-    float max_w_rad;       // 角速度上限 rad/s
-    float target_yaw_deg;  // 当前姿态控制目标
-    uint8 heading_mode;    // 当前姿态控制模式
-    pose2d_t pose;         // 当前里程计位姿
-    path_follow_speed_cfg_t speed_cfg;          // 速度规划参数集合
+    const Position *path;                               // 规划路径指针
+    size_t steps;                                       // 路径长度
+    size_t idx;                                         // 当前目标点索引
+    float grid_m;                                       // 网格边长，m/格
+    float default_grid_m;                               // 地图路径网格边长，m/格
+    float pulses_per_meter;                             // 编码器每米脉冲数
+    float pos_tol_m;                                    // 位置容差
+    float yaw_tol_deg;                                  // 航向容差（保留，当前未用）
+    float max_v_mps;                                    // 线速度上限 m/s
+    float max_w_rad;                                    // 角速度上限 rad/s
+    float target_yaw_deg;                               // 当前姿态控制目标
+    uint8 heading_mode;                                 // 当前姿态控制模式
+    pose2d_t pose;                                      // 当前里程计位姿
+    path_follow_speed_cfg_t speed_cfg;                  // 速度规划参数集合
     path_follow_scurve_runtime_cfg_t active_scurve_cfg; // 当前路径段锁定的 S 曲线参数
-    path_follow_scurve_profile_t active_profile;// 当前目标段的整段式 S 曲线 profile
-    path_follow_debug_state_t debug;            // 调试状态快照
-    float profile_time_s;                       // 当前 profile 已执行的累计时间
-    float last_ref_speed_cmps;                 // 上一周期输出的标量速度参考
-    size_t profile_target_idx;                 // 当前 profile 绑定的目标点索引
+    path_follow_scurve_profile_t active_profile;        // 当前目标段的整段式 S 曲线 profile
+    path_follow_debug_state_t debug;                    // 调试状态快照
+    float profile_time_s;                               // 当前 profile 已执行的累计时间
+    float last_ref_speed_cmps;                          // 上一周期输出的标量速度参考
+    size_t profile_target_idx;                          // 当前 profile 绑定的目标点索引
     size_t pause_indices[PATH_FOLLOW_MAX_PAUSE_POINTS]; // 需要在到点后暂停的 corner 索引列表
-    size_t pause_count;                        // pause_indices 中的有效元素个数
-    size_t pause_cursor;                       // 下一个待触发的暂停点游标
-    uint32 pause_cycles_cfg;                   // 每次暂停统一持续的控制周期数
-    uint32 pause_cycles_remaining;             // 当前暂停剩余控制周期数
-    uint8 pause_events_enabled;                // 仅普通地图 corner_path 允许触发暂停
-    uint8 paused;                              // 1: 正处于暂停窗口
-    uint8 rotate_only_active;                  // 1: 当前仅执行原地转向
-    uint8 profile_active;                      // 1: 当前段已有有效 profile
-#if PATH_FOLLOW_ENABLE_CORNER_HANDOVER
-    uint8 corner_handover_active;              // 1: 当前普通中间拐点已进入 handover 区
-    size_t corner_handover_idx;                // 当前 handover 对应的 target idx
-    float corner_enter_distance_m;             // 当前拐点进入 handover 的距离阈值，单位 m
-    float corner_commit_distance_m;            // 当前拐点允许正式切段的提前量，单位 m
+    size_t pause_count;                                 // pause_indices 中的有效元素个数
+    size_t pause_cursor;                                // 下一个待触发的暂停点游标
+    uint32 pause_cycles_cfg;                            // 每次暂停统一持续的控制周期数
+    uint32 pause_cycles_remaining;                      // 当前暂停剩余控制周期数
+    uint8 pause_events_enabled;                         // 仅普通地图 corner_path 允许触发暂停
+    uint8 paused;                                       // 1: 正处于暂停窗口
+    uint8 rotate_only_active;                           // 1: 当前仅执行原地转向
+    uint8 profile_active;                               // 1: 当前段已有有效 profile
+#if PATH_FOLLOW_COMPILE_CORNER_HANDOVER
+    uint8 corner_handover_active;   // 1: 当前普通中间拐点已进入 handover 区
+    size_t corner_handover_idx;     // 当前 handover 对应的 target idx
+    float corner_enter_distance_m;  // 当前拐点进入 handover 的距离阈值，单位 m
+    float corner_commit_distance_m; // 当前拐点允许正式切段的提前量，单位 m
 #endif
-    uint8 active;                              // 1: 正在跟随
+    uint8 active; // 1: 正在跟随
 } path_follow_ctx_t;
 
 /** @brief 路径跟随模块全局上下文。 */
@@ -360,6 +391,14 @@ float prestart_move_right_m = 0.00f;
 float prestart_move_forward_m = 0.35f;
 /** @brief 发车前后移偏置量，单位 m。 */
 float prestart_move_backward_m = 0.00f;
+float path_corner_commit_lateral_gate_min_m = PATH_CORNER_COMMIT_LATERAL_GATE_MIN_M;
+uint8 path_follow_enable_corner_handover = PATH_FOLLOW_ENABLE_CORNER_HANDOVER;
+float path_hold_trim_release_distance = PATH_HOLD_TRIM_RELEASE_DISTANCE;
+float path_line_guide_kp = PATH_LINE_GUIDE_KP;
+float path_follow_corner_hold_trim_scale = PATH_FOLLOW_CORNER_HOLD_TRIM_SCALE;
+float path_line_guide_min_cmps = PATH_LINE_GUIDE_MIN_CMPS;
+float path_corner_handover_enter_distance_m = PATH_CORNER_HANDOVER_ENTER_DISTANCE_M;
+float path_corner_handover_commit_distance_m = PATH_CORNER_HANDOVER_COMMIT_DISTANCE_M;
 /** @brief 单目标模式使用的两点临时路径缓存。 */
 static Position g_single_target_path[2];
 /** @brief 发车前偏移动作使用的临时路径缓存。 */
@@ -448,6 +487,64 @@ static float path_follow_mps2_to_cmpss(float value_mps2)
 static float path_follow_mps3_to_cmpsss(float value_mps3)
 {
     return value_mps3 * 100.0f;
+}
+
+static float path_follow_get_accumulated_axis_run_cm(size_t target_idx, uint8 x_axis)
+{
+    size_t i;
+    float run_cm = 0.0f;
+
+    if (g_ctx.path == NULL || g_ctx.steps == 0U)
+    {
+        return 0.0f;
+    }
+    if (target_idx >= g_ctx.steps)
+    {
+        target_idx = g_ctx.steps - 1U;
+    }
+
+    for (i = 1U; i <= target_idx; ++i)
+    {
+        int delta_grid = x_axis ? (g_ctx.path[i].row - g_ctx.path[i - 1U].row) : (g_ctx.path[i].col - g_ctx.path[i - 1U].col);
+        run_cm += fabsf((float)delta_grid) * g_ctx.grid_m * 100.0f;
+    }
+
+    return run_cm;
+}
+
+static float path_follow_compute_target_comp_cm(float base_comp_cm,
+                                                float axis_run_cm,
+                                                float run_comp_k)
+{
+    return base_comp_cm + axis_run_cm * run_comp_k;
+}
+
+static void path_follow_get_compensated_target_position(size_t target_idx,
+                                                        Position target,
+                                                        float *target_x_m,
+                                                        float *target_y_m)
+{
+    float x_run_cm;
+    float y_run_cm;
+    float x_comp_cm;
+    float y_comp_cm;
+
+    if (target_x_m == NULL || target_y_m == NULL)
+    {
+        return;
+    }
+
+    x_run_cm = path_follow_get_accumulated_axis_run_cm(target_idx, 1U);
+    y_run_cm = path_follow_get_accumulated_axis_run_cm(target_idx, 0U);
+    x_comp_cm = path_follow_compute_target_comp_cm(PATH_FOLLOW_TARGET_X_BASE_COMP_CM,
+                                                   x_run_cm,
+                                                   PATH_FOLLOW_TARGET_X_RUN_COMP_K);
+    y_comp_cm = path_follow_compute_target_comp_cm(PATH_FOLLOW_TARGET_Y_BASE_COMP_CM,
+                                                   y_run_cm,
+                                                   PATH_FOLLOW_TARGET_Y_RUN_COMP_K);
+
+    *target_x_m = target.row * g_ctx.grid_m + x_comp_cm / 100.0f;
+    *target_y_m = target.col * g_ctx.grid_m + y_comp_cm / 100.0f;
 }
 
 /**
@@ -557,6 +654,48 @@ static void path_follow_update_pid_limits(void)
     pid_yaw_init.fMax_Iout = g_ctx.max_w_rad * 20.0f;
     pid_yaw_init.fMax_Out = g_ctx.max_w_rad * 20.0f;
     PID_Update(&pid_yaw, &pid_yaw_init);
+}
+
+static void path_follow_apply_runtime_tuning(void)
+{
+    if (path_corner_commit_lateral_gate_min_m < 0.001f)
+    {
+        path_corner_commit_lateral_gate_min_m = 0.001f;
+    }
+    if (path_hold_trim_release_distance < path_corner_commit_lateral_gate_min_m)
+    {
+        path_hold_trim_release_distance = path_corner_commit_lateral_gate_min_m;
+    }
+    if (path_line_guide_kp < 0.0f)
+    {
+        path_line_guide_kp = 0.0f;
+    }
+    if (path_follow_corner_hold_trim_scale < 0.0f)
+    {
+        path_follow_corner_hold_trim_scale = 0.0f;
+    }
+    if (path_line_guide_min_cmps < 0.0f)
+    {
+        path_line_guide_min_cmps = 0.0f;
+    }
+    if (path_line_guide_min_cmps > PATH_LINE_GUIDE_MAX_CMPS)
+    {
+        path_line_guide_min_cmps = PATH_LINE_GUIDE_MAX_CMPS;
+    }
+    if (path_corner_handover_commit_distance_m < 0.0f)
+    {
+        path_corner_handover_commit_distance_m = 0.0f;
+    }
+    if (path_corner_handover_enter_distance_m <=
+        (path_corner_handover_commit_distance_m + PATH_CORNER_HANDOVER_WINDOW_GAP_MIN_M))
+    {
+        path_corner_handover_enter_distance_m =
+            path_corner_handover_commit_distance_m + PATH_CORNER_HANDOVER_WINDOW_GAP_MIN_M;
+    }
+    path_follow_enable_corner_handover = path_follow_enable_corner_handover ? 1U : 0U;
+
+    g_ctx.pos_tol_m = path_corner_commit_lateral_gate_min_m;
+    g_ctx.speed_cfg.hold_release_distance_m = path_hold_trim_release_distance;
 }
 
 /**
@@ -747,7 +886,7 @@ static uint8 path_follow_build_scurve_profile(path_follow_scurve_profile_t *prof
             numer = j_max_cmpsss * distance_cm -
                     sqrtf(fmaxf(j_max_cmpsss * (j_max_cmpsss * distance_cm * distance_cm +
                                                 (v1_cmps + v0_cmps) * (v1_cmps + v0_cmps) *
-                                                (v1_cmps - v0_cmps)),
+                                                    (v1_cmps - v0_cmps)),
                                 0.0f));
             denom = j_max_cmpsss * (v1_cmps + v0_cmps);
             if (fabsf(denom) <= 1e-6f)
@@ -766,7 +905,7 @@ static uint8 path_follow_build_scurve_profile(path_follow_scurve_profile_t *prof
             numer = j_max_cmpsss * distance_cm -
                     sqrtf(fmaxf(j_max_cmpsss * (j_max_cmpsss * distance_cm * distance_cm -
                                                 (v1_cmps + v0_cmps) * (v1_cmps + v0_cmps) *
-                                                (v1_cmps - v0_cmps)),
+                                                    (v1_cmps - v0_cmps)),
                                 0.0f));
             denom = j_max_cmpsss * (v1_cmps + v0_cmps);
             if (fabsf(denom) <= 1e-6f)
@@ -820,7 +959,7 @@ static uint8 path_follow_build_scurve_profile(path_follow_scurve_profile_t *prof
 
 static uint8 path_follow_target_requires_pause(size_t target_idx);
 static uint8 path_follow_is_route_corner_target(void);
-#if PATH_FOLLOW_ENABLE_CORNER_HANDOVER || PATH_FOLLOW_ENABLE_LINE_GUIDE
+#if PATH_FOLLOW_COMPILE_CORNER_HANDOVER || PATH_FOLLOW_ENABLE_LINE_GUIDE
 static uint8 path_follow_get_segment_points(const Position **prev_point,
                                             const Position **curr_point,
                                             const Position **next_point);
@@ -831,7 +970,7 @@ static uint8 path_follow_compute_segment_progress_m(const pose2d_t *pose,
                                                     float *segment_length_m,
                                                     float *normal_error_m);
 #endif
-#if PATH_FOLLOW_ENABLE_CORNER_HANDOVER
+#if PATH_FOLLOW_COMPILE_CORNER_HANDOVER
 static void path_follow_reset_corner_handover_state(void);
 #endif
 #if PATH_FOLLOW_ENABLE_LINE_GUIDE
@@ -888,7 +1027,7 @@ static float path_follow_sample_scurve_velocity(float t_s,
     if (t_s < (profile->T - profile->Tj2))
     {
         return profile->vlim - profile->alimd *
-               (t_s - profile->T + profile->Td - profile->Tj2 * 0.5f);
+                                   (t_s - profile->T + profile->Td - profile->Tj2 * 0.5f);
     }
 
     {
@@ -897,7 +1036,62 @@ static float path_follow_sample_scurve_velocity(float t_s,
     }
 }
 
-#if PATH_FOLLOW_ENABLE_CORNER_HANDOVER || PATH_FOLLOW_ENABLE_LINE_GUIDE
+#if PATH_FOLLOW_COMPILE_CORNER_HANDOVER || PATH_FOLLOW_ENABLE_LINE_GUIDE
+static uint8 path_follow_compute_segment_progress_xy_m(const pose2d_t *pose,
+                                                       float start_x_m,
+                                                       float start_y_m,
+                                                       float end_x_m,
+                                                       float end_y_m,
+                                                       float *progress_m,
+                                                       float *segment_length_m,
+                                                       float *normal_error_m)
+{
+    float seg_dx_m;
+    float seg_dy_m;
+    float seg_norm_m;
+    float seg_dir_x;
+    float seg_dir_y;
+    float rel_x_m;
+    float rel_y_m;
+
+    if (progress_m != NULL)
+    {
+        *progress_m = 0.0f;
+    }
+    if (segment_length_m != NULL)
+    {
+        *segment_length_m = 0.0f;
+    }
+    if (normal_error_m != NULL)
+    {
+        *normal_error_m = 0.0f;
+    }
+
+    if (pose == NULL || progress_m == NULL ||
+        segment_length_m == NULL || normal_error_m == NULL)
+    {
+        return 0U;
+    }
+
+    seg_dx_m = end_x_m - start_x_m;
+    seg_dy_m = end_y_m - start_y_m;
+    seg_norm_m = sqrtf(seg_dx_m * seg_dx_m + seg_dy_m * seg_dy_m);
+    if (seg_norm_m <= 1e-6f)
+    {
+        return 0U;
+    }
+
+    seg_dir_x = seg_dx_m / seg_norm_m;
+    seg_dir_y = seg_dy_m / seg_norm_m;
+    rel_x_m = pose->x_m - start_x_m;
+    rel_y_m = pose->y_m - start_y_m;
+
+    *progress_m = rel_x_m * seg_dir_x + rel_y_m * seg_dir_y;
+    *segment_length_m = seg_norm_m;
+    *normal_error_m = rel_x_m * (-seg_dir_y) + rel_y_m * seg_dir_x;
+    return 1U;
+}
+
 /**
  * @brief 获取当前目标相关的前一角点、当前角点和后一角点。
  *
@@ -1019,7 +1213,7 @@ static uint8 path_follow_compute_segment_progress_m(const pose2d_t *pose,
 }
 #endif
 
-#if PATH_FOLLOW_ENABLE_CORNER_HANDOVER
+#if PATH_FOLLOW_COMPILE_CORNER_HANDOVER
 /**
  * @brief 根据前后段较短长度计算进入 handover 的距离阈值。
  *
@@ -1045,8 +1239,6 @@ static float path_follow_compute_segment_end_speed(void)
     {
         return 0.0f;
     }
-
-
 
     return g_ctx.speed_cfg.segment_end_speed_cmps;
 }
@@ -1125,7 +1317,7 @@ static void path_follow_clear_debug_state(void)
     g_ctx.debug.segment_axis = 0U;
 }
 
-#if PATH_FOLLOW_ENABLE_CORNER_HANDOVER
+#if PATH_FOLLOW_COMPILE_CORNER_HANDOVER
 /**
  * @brief 清空普通中间拐点 handover 的运行态缓存。
  */
@@ -1155,7 +1347,7 @@ static void path_follow_invalidate_active_profile(void)
 static void path_follow_reset_motion_profile_state(void)
 {
     path_follow_invalidate_active_profile();
-#if PATH_FOLLOW_ENABLE_CORNER_HANDOVER
+#if PATH_FOLLOW_COMPILE_CORNER_HANDOVER
     path_follow_reset_corner_handover_state();
 #endif
     path_follow_reset_active_scurve_cfg();
@@ -1177,7 +1369,6 @@ static void path_follow_sync_stay_pid_gains(void)
     pid_stay_y.alpha = pid_stay.alpha;
 }
 
-
 /**
  * @brief 清空本模块内部控制状态。
  *
@@ -1192,11 +1383,8 @@ static void path_follow_reset_control_state(void)
     PID_Clear(&pid_world_y);
     PID_Clear(&pid_stay);
     PID_Clear(&pid_stay_y);
-    /* 路径切换、位姿重置或整条路径结束时，航向环也必须清历史量。
-     * 否则上一段旋转/跟踪留下的 D 项滤波状态可能在新路径第一拍形成角速度冲击，
-     * 表现为原地转圈或起步方向异常。 */
-    PID_Clear(&pid_yaw);
-    PID_Clear(&pid_accel_yaw);
+    // PID_Clear(&pid_yaw);
+    // PID_Clear(&pid_accel_yaw);
 }
 
 static uint8 path_follow_finish_path(path_follow_output_t *out);
@@ -1480,50 +1668,51 @@ void path_follow_init(float grid_size_m, float pulses_per_meter)
     g_ctx.grid_m = grid_size_m;
     g_ctx.default_grid_m = grid_size_m;
     g_ctx.pulses_per_meter = pulses_per_meter;
-    g_ctx.pos_tol_m = PATH_FOLLOW_POSITION_TOLERANCE_M;   // 位置容差，可按需要调整
-    g_ctx.yaw_tol_deg = PATH_FOLLOW_YAW_TOLERANCE_DEG;  // 航向容差
-    g_ctx.max_v_mps = PATH_FOLLOW_MAX_LINEAR_SPEED_MPS;    // 最大线速度
-    g_ctx.max_w_rad = PATH_FOLLOW_MAX_ANGULAR_SPEED_LIMIT;    // 角速度上限
+    g_ctx.pos_tol_m = path_corner_commit_lateral_gate_min_m; // 位置容差，可按需要调整
+    g_ctx.yaw_tol_deg = PATH_FOLLOW_YAW_TOLERANCE_DEG;       // 航向容差
+    g_ctx.max_v_mps = PATH_FOLLOW_MAX_LINEAR_SPEED_MPS;      // 最大线速度
+    g_ctx.max_w_rad = PATH_FOLLOW_MAX_ANGULAR_SPEED_LIMIT;   // 角速度上限
     g_ctx.target_yaw_deg = 0.0f;
     g_ctx.heading_mode = PATH_FOLLOW_HEADING_FIXED;
     g_ctx.pose.x_m = 0.0f;
     g_ctx.pose.y_m = 0.0f;
     g_ctx.pose.yaw_deg = 0.0f;
     g_ctx.speed_cfg.segment_end_speed_cmps = SCURVE_SEGMENT_END_SPEED_CMPS;
-    g_ctx.speed_cfg.hold_release_distance_m = PATH_HOLD_TRIM_RELEASE_DISTANCE;
+    g_ctx.speed_cfg.hold_release_distance_m = path_hold_trim_release_distance;
     g_ctx.path = NULL;
     g_ctx.steps = 0;
     g_ctx.idx = 0;
     g_ctx.rotate_only_active = 0U;
     g_ctx.active = 0;
     g_ctx.pause_events_enabled = 0U;
+    path_follow_apply_runtime_tuning();
     path_follow_reset_scurve_band_defaults();
     path_follow_reset_motion_profile_state();
     path_follow_clear_debug_state();
     path_follow_clear_pause_config();
 
-    pid_world_init.fKp = PATH_FOLLOW_PID_WORLD_KP;  // 位置误差到速度输出
+    pid_world_init.fKp = PATH_FOLLOW_PID_WORLD_KP; // 位置误差到速度输出
     pid_world_init.fKi = PATH_FOLLOW_PID_WORLD_KI;
     pid_world_init.fKd = PATH_FOLLOW_PID_WORLD_KD;
-    pid_world_init.fMax_Iout = g_ctx.max_v_mps*100.0f;
-    pid_world_init.fMax_Out = g_ctx.max_v_mps*100.0f;
+    pid_world_init.fMax_Iout = g_ctx.max_v_mps * 100.0f;
+    pid_world_init.fMax_Out = g_ctx.max_v_mps * 100.0f;
     pid_world_init.alpha = PATH_FOLLOW_PID_WORLD_ALPHA;
 
-    pid_stay_init.fKp = PATH_FOLLOW_PID_STAY_KP;  // 位置误差到速度输出
+    pid_stay_init.fKp = PATH_FOLLOW_PID_STAY_KP; // 位置误差到速度输出
     pid_stay_init.fKi = PATH_FOLLOW_PID_STAY_KI;
     pid_stay_init.fKd = PATH_FOLLOW_PID_STAY_KD;
     pid_stay_init.fMax_Iout = PATH_FOLLOW_PID_STAY_MAX_IOUT_CMPS;
     pid_stay_init.fMax_Out = PATH_FOLLOW_PID_STAY_MAX_OUT_CMPS;
     pid_stay_init.alpha = PATH_FOLLOW_PID_STAY_ALPHA;
 
-    pid_yaw_init.fKp = PATH_FOLLOW_PID_YAW_KP;  // 航向误差到角速度输出
+    pid_yaw_init.fKp = PATH_FOLLOW_PID_YAW_KP; // 航向误差到角速度输出
     pid_yaw_init.fKi = PATH_FOLLOW_PID_YAW_KI;
     pid_yaw_init.fKd = PATH_FOLLOW_PID_YAW_KD;
     pid_yaw_init.fMax_Iout = g_ctx.max_w_rad;
     pid_yaw_init.fMax_Out = g_ctx.max_w_rad;
     pid_yaw_init.alpha = PATH_FOLLOW_PID_YAW_ALPHA;
 
-    pid_accel_yaw_init.fKp = PATH_FOLLOW_PID_ACCEL_YAW_KP;  // 航向误差到角速度输出
+    pid_accel_yaw_init.fKp = PATH_FOLLOW_PID_ACCEL_YAW_KP; // 航向误差到角速度输出
     pid_accel_yaw_init.fKi = PATH_FOLLOW_PID_ACCEL_YAW_KI;
     pid_accel_yaw_init.fKd = PATH_FOLLOW_PID_ACCEL_YAW_KD;
     pid_accel_yaw_init.fMax_Iout = g_ctx.max_w_rad;
@@ -1722,7 +1911,7 @@ static void update_odometry(float yaw_deg)
 
     float vx_body = 0.25f * (w_ul + w_ur + w_dl + w_dr);
     float vy_body = 0.25f * (-w_ul + w_ur + w_dl - w_dr);
-    float omega_body = (-w_ul + w_ur - w_dl + w_dr) / (2*D_X + 2*D_Y);
+    float omega_body = (-w_ul + w_ur - w_dl + w_dr) / (2 * D_X + 2 * D_Y);
     // if (rx_plus_ry_cali != 0.0f)
     // {
     //     omega_body /= rx_plus_ry_cali;
@@ -1815,8 +2004,10 @@ static uint8 path_follow_prepare_geometry(path_follow_geometry_t *geometry, path
         target = g_ctx.path[g_ctx.idx];
 
         geometry->target_point = target;
-        geometry->target_x_m = target.row * g_ctx.grid_m;
-        geometry->target_y_m = target.col * g_ctx.grid_m;
+        path_follow_get_compensated_target_position(g_ctx.idx,
+                                                    target,
+                                                    &geometry->target_x_m,
+                                                    &geometry->target_y_m);
         geometry->delta_x_m = geometry->target_x_m - g_ctx.pose.x_m;
         geometry->delta_y_m = geometry->target_y_m - g_ctx.pose.y_m;
         geometry->distance_m = sqrtf(geometry->delta_x_m * geometry->delta_x_m +
@@ -1840,9 +2031,12 @@ static uint8 path_follow_prepare_geometry(path_follow_geometry_t *geometry, path
                 path_follow_enter_pause(g_ctx.idx);
                 return 0U;
             }
-#if PATH_FOLLOW_ENABLE_CORNER_HANDOVER
-            path_follow_reset_corner_handover_state();
-            path_follow_invalidate_active_profile();
+#if PATH_FOLLOW_COMPILE_CORNER_HANDOVER
+            if (path_follow_enable_corner_handover)
+            {
+                path_follow_reset_corner_handover_state();
+                path_follow_invalidate_active_profile();
+            }
 #endif
             g_ctx.idx++;
             continue;
@@ -2064,14 +2258,13 @@ static uint8 path_follow_is_route_corner_target(void)
     return (d1_row != d2_row || d1_col != d2_col) ? 1U : 0U;
 }
 
-
 /**
  * @brief [CornerHandover移植] 将 0~1 线性进度整形成五次 smoothstep 进度。
  *
  * @param t 线性进度，范围期望为 [0, 1]。
  * @return S 形整形后的进度，范围为 [0, 1]。
  */
-#if PATH_FOLLOW_ENABLE_CORNER_HANDOVER
+#if PATH_FOLLOW_COMPILE_CORNER_HANDOVER
 static float path_follow_s_curve_01(float t)
 {
     if (t <= 0.0f)
@@ -2085,7 +2278,7 @@ static float path_follow_s_curve_01(float t)
 
     return t * t * t * (t * (t * 6.0f - 15.0f) + 10.0f);
 }
-  
+
 static uint8 path_follow_check_corner_handover_timeout(void)
 {
     static uint8 last_active = 0U;
@@ -2177,6 +2370,10 @@ static uint8 path_follow_try_corner_handover(const path_follow_geometry_t *geome
     {
         return 0U;
     }
+    if (!path_follow_enable_corner_handover)
+    {
+        return 0U;
+    }
     if (!path_follow_is_route_corner_target())
     {
         return 0U;
@@ -2200,7 +2397,6 @@ static uint8 path_follow_try_corner_handover(const path_follow_geometry_t *geome
         return 0U;
     }
 
-
     prev_dx_m = (curr_point->row - prev_point->row) * g_ctx.grid_m;
     prev_dy_m = (curr_point->col - prev_point->col) * g_ctx.grid_m;
     next_dx_m = (next_point->row - curr_point->row) * g_ctx.grid_m;
@@ -2212,10 +2408,10 @@ static uint8 path_follow_try_corner_handover(const path_follow_geometry_t *geome
         return 0U;
     }
 
-/*     enter_distance_m = path_follow_compute_corner_enter_distance_m(prev_length_m, next_length_m);
-    commit_distance_m = path_follow_compute_corner_commit_distance_m(prev_length_m, next_length_m); */
-    enter_distance_m = PATH_CORNER_HANDOVER_ENTER_DISTANCE_M;
-    commit_distance_m = PATH_CORNER_HANDOVER_COMMIT_DISTANCE_M;
+    /*     enter_distance_m = path_follow_compute_corner_enter_distance_m(prev_length_m, next_length_m);
+        commit_distance_m = path_follow_compute_corner_commit_distance_m(prev_length_m, next_length_m); */
+    enter_distance_m = path_corner_handover_enter_distance_m;
+    commit_distance_m = path_corner_handover_commit_distance_m;
     if (enter_distance_m <= (commit_distance_m + PATH_CORNER_HANDOVER_WINDOW_GAP_MIN_M))
     {
         enter_distance_m = commit_distance_m + PATH_CORNER_HANDOVER_WINDOW_GAP_MIN_M;
@@ -2264,11 +2460,10 @@ static uint8 path_follow_try_corner_handover(const path_follow_geometry_t *geome
         }
         g_ctx.corner_handover_active = 1U;
     }
-        if (path_follow_check_corner_handover_timeout())
+    if (path_follow_check_corner_handover_timeout())
     {
         return 0U;
     }
-
 
     old_x = geometry->dir_x;
     old_y = geometry->dir_y;
@@ -2310,6 +2505,10 @@ static uint8 path_follow_apply_line_guidance(float ref_speed_cmps,
 {
     const Position *prev_point = NULL;
     const Position *curr_point = NULL;
+    float start_x_m;
+    float start_y_m;
+    float end_x_m;
+    float end_y_m;
     float segment_progress_m = 0.0f;
     float segment_length_m = 0.0f;
     float lateral_error_m = 0.0f;
@@ -2334,18 +2533,33 @@ static uint8 path_follow_apply_line_guidance(float ref_speed_cmps,
     {
         return 0U;
     }
-    if (!path_follow_compute_segment_progress_m(&g_ctx.pose,
-                                                prev_point,
-                                                curr_point,
-                                                &segment_progress_m,
-                                                &segment_length_m,
-                                                &lateral_error_m))
+    if (g_ctx.idx == 0U)
     {
         return 0U;
     }
 
-    seg_dx_m = (curr_point->row - prev_point->row) * g_ctx.grid_m;
-    seg_dy_m = (curr_point->col - prev_point->col) * g_ctx.grid_m;
+    path_follow_get_compensated_target_position(g_ctx.idx - 1U,
+                                                *prev_point,
+                                                &start_x_m,
+                                                &start_y_m);
+    path_follow_get_compensated_target_position(g_ctx.idx,
+                                                *curr_point,
+                                                &end_x_m,
+                                                &end_y_m);
+    if (!path_follow_compute_segment_progress_xy_m(&g_ctx.pose,
+                                                   start_x_m,
+                                                   start_y_m,
+                                                   end_x_m,
+                                                   end_y_m,
+                                                   &segment_progress_m,
+                                                   &segment_length_m,
+                                                   &lateral_error_m))
+    {
+        return 0U;
+    }
+
+    seg_dx_m = end_x_m - start_x_m;
+    seg_dy_m = end_y_m - start_y_m;
     seg_norm_m = sqrtf(seg_dx_m * seg_dx_m + seg_dy_m * seg_dy_m);
     if (seg_norm_m <= 1e-6f)
     {
@@ -2378,10 +2592,10 @@ static uint8 path_follow_apply_line_guidance(float ref_speed_cmps,
      * - 误差一旦越过死区，先给一个最小侧向修正速度，帮助克服静摩擦；
      * - 再叠加与误差成正比的修正量，保持越偏越拉的趋势。
      */
-    trim_cmps = PATH_LINE_GUIDE_KP * abs_error_cm;
+    trim_cmps = path_line_guide_kp * abs_error_cm;
     if (trim_cmps > 0.0f)
     {
-        trim_cmps += PATH_LINE_GUIDE_MIN_CMPS;
+        trim_cmps += path_line_guide_min_cmps;
     }
     trim_cmps *= guide_sign;
     trim_cmps = clamp_sym(trim_cmps, PATH_LINE_GUIDE_MAX_CMPS);
@@ -2419,14 +2633,14 @@ static void path_follow_apply_hold_trim(const path_follow_geometry_t *geometry,
     {
         return;
     }
-#elif PATH_FOLLOW_ENABLE_CORNER_HANDOVER
+#elif PATH_FOLLOW_COMPILE_CORNER_HANDOVER
     /*
      * handover 启用时，拐点附近仍保留双轴定点修正，但降低权重，
      * 避免对切向速度交接施加过强拉扯。
      */
-    if (path_follow_is_route_corner_target())
+    if (path_follow_enable_corner_handover && path_follow_is_route_corner_target())
     {
-        hold_blend *= PATH_FOLLOW_CORNER_HOLD_TRIM_SCALE;
+        hold_blend *= path_follow_corner_hold_trim_scale;
     }
 #endif
 
@@ -2494,7 +2708,7 @@ static void path_follow_build_motion_command(const path_follow_geometry_t *geome
     float cos_yaw;
     float sin_yaw;
     float hold_blend;
-#if PATH_FOLLOW_ENABLE_CORNER_HANDOVER
+#if PATH_FOLLOW_COMPILE_CORNER_HANDOVER
     uint8 handover_active = 0U;
 #endif
 
@@ -2507,20 +2721,27 @@ static void path_follow_build_motion_command(const path_follow_geometry_t *geome
     motion_cmd->vy_world_cmps = speed_plan->ref_speed_cmps * geometry->dir_y;
     hold_blend = path_follow_compute_hold_blend(geometry->distance_m);
 
-#if PATH_FOLLOW_ENABLE_CORNER_HANDOVER
+#if PATH_FOLLOW_COMPILE_CORNER_HANDOVER
     /*
      * [CornerHandover移植]
      * 先基于当前标量速度得到基础世界系速度，再在普通中间拐点前尝试做方向交接。
      * 后续仍保留原版的 hold trim、世界系限幅和车体系变换，不改变现有主链路能力。
      */
-    handover_active = path_follow_try_corner_handover(geometry,
-                                                      speed_plan->ref_speed_cmps,
-                                                      &motion_cmd->vx_world_cmps,
-                                                      &motion_cmd->vy_world_cmps);
+    if (path_follow_enable_corner_handover)
+    {
+        handover_active = path_follow_try_corner_handover(geometry,
+                                                          speed_plan->ref_speed_cmps,
+                                                          &motion_cmd->vx_world_cmps,
+                                                          &motion_cmd->vy_world_cmps);
+    }
+    else
+    {
+        path_follow_reset_corner_handover_state();
+    }
 #endif
 #if PATH_FOLLOW_ENABLE_LINE_GUIDE
     if (
-#if PATH_FOLLOW_ENABLE_CORNER_HANDOVER
+#if PATH_FOLLOW_COMPILE_CORNER_HANDOVER
         !handover_active &&
 #endif
         hold_blend <= 0.0f)
@@ -2621,6 +2842,8 @@ void path_follow_update(float yaw_deg, path_follow_output_t *out)
     path_follow_attitude_plan_t attitude_plan = {0};
     path_follow_motion_cmd_t motion_cmd = {0};
     float yaw_error_deg = 0.0f;
+
+    path_follow_apply_runtime_tuning();
 
     if (out)
     {
@@ -2746,14 +2969,14 @@ void distance_speed_strategy(void)
     Kinematics_Inverse(speed_three_array, speed_encoder);
 }
 
-//void path_follow_request_bluetooth_report(void)
+// void path_follow_request_bluetooth_report(void)
 //{
-//    g_path_follow_bt_report_pending = 1U;
-//}
+//     g_path_follow_bt_report_pending = 1U;
+// }
 
-//void path_follow_service_bluetooth_report(void)
+// void path_follow_service_bluetooth_report(void)
 //{
-//    path_follow_status_t st = {0};
+//     path_follow_status_t st = {0};
 
 //    if (!g_path_follow_bt_report_pending)
 //    {
@@ -2799,8 +3022,10 @@ void path_follow_get_status(path_follow_status_t *status)
 
     if (g_ctx.path && g_ctx.idx < g_ctx.steps)
     {
-        status->target_x_m = g_ctx.path[g_ctx.idx].row * g_ctx.grid_m;
-        status->target_y_m = g_ctx.path[g_ctx.idx].col * g_ctx.grid_m;
+        path_follow_get_compensated_target_position(g_ctx.idx,
+                                                    g_ctx.path[g_ctx.idx],
+                                                    &status->target_x_m,
+                                                    &status->target_y_m);
     }
     else
     {
@@ -2818,25 +3043,24 @@ void path_follow_draw_status(void)
     path_follow_get_status(&st);
 
     // ips200_show_string(x, y, "Pose x y yaw:");
-    ips200_show_string(0,112,"st_x_m");
+    ips200_show_string(0, 112, "st_x_m");
     ips200_show_float(70, 112, st.x_m, 2, 4);
-    ips200_show_string(0,128,"st_y_m");
+    ips200_show_string(0, 128, "st_y_m");
     ips200_show_float(70, 128, st.y_m, 2, 4);
-    ips200_show_string(0,144,"st_yaw");
+    ips200_show_string(0, 144, "st_yaw");
     ips200_show_float(70, 144, st.yaw_deg, 3, 2);
 
     // ips200_show_string(x, y + 16, "Target idx/x/y:");
-    ips200_show_string(0,160,"target_idx");
+    ips200_show_string(0, 160, "target_idx");
     ips200_show_uint(90, 160, st.target_idx, 3);
-    ips200_show_string(0,176,"target_x_m");
+    ips200_show_string(0, 176, "target_x_m");
     ips200_show_float(90, 176, st.target_x_m, 2, 3);
-    ips200_show_string(0,192,"target_y_m");
+    ips200_show_string(0, 192, "target_y_m");
     ips200_show_float(90, 192, st.target_y_m, 2, 3);
-    ips200_show_string(0,208,"speed_ref");
+    ips200_show_string(0, 208, "speed_ref");
     ips200_show_float(90, 208, st.speed_ref_cmps, 3, 1);
-    ips200_show_string(0,224,"seg_axis");
+    ips200_show_string(0, 224, "seg_axis");
     ips200_show_uint(90, 224, st.segment_axis, 1);
-
 }
 
 /**
@@ -2891,7 +3115,7 @@ size_t path_follow_extract_corners(const Position *path, size_t path_steps,
     // 起点一定是拐点
     if (corner_count >= corner_capacity)
     {
-        return 0;  // 缓冲区不足
+        return 0; // 缓冲区不足
     }
     corner_buffer[corner_count++] = path[0];
 
@@ -2911,7 +3135,7 @@ size_t path_follow_extract_corners(const Position *path, size_t path_steps,
         {
             if (corner_count >= corner_capacity)
             {
-                return 0;  // 缓冲区不足
+                return 0; // 缓冲区不足
             }
             corner_buffer[corner_count++] = path[i];
         }
@@ -2920,7 +3144,7 @@ size_t path_follow_extract_corners(const Position *path, size_t path_steps,
     // 终点一定是拐点
     if (corner_count >= corner_capacity)
     {
-        return 0;  // 缓冲区不足
+        return 0; // 缓冲区不足
     }
     corner_buffer[corner_count++] = path[path_steps - 1];
 

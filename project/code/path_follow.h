@@ -83,6 +83,14 @@ extern float prestart_move_left_m;
 extern float prestart_move_right_m;
 extern float prestart_move_forward_m;
 extern float prestart_move_backward_m;
+extern float path_corner_commit_lateral_gate_min_m;
+extern uint8 path_follow_enable_corner_handover;
+extern float path_hold_trim_release_distance;
+extern float path_line_guide_kp;
+extern float path_follow_corner_hold_trim_scale;
+extern float path_line_guide_min_cmps;
+extern float path_corner_handover_enter_distance_m;
+extern float path_corner_handover_commit_distance_m;
 extern path_follow_scurve_band_cfg_t g_path_follow_scurve_band_cfg[PATH_FOLLOW_SCURVE_BAND_COUNT];
 
 #endif

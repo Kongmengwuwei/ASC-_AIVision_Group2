@@ -17,6 +17,8 @@ static uint16 s_prev_index[MAX_CAR_PATH] = {0U};
 static uint16 s_rebuild_indices[MAX_CAR_PATH] = {0U};
 static uint16 s_mandatory_prefix[MAX_CAR_PATH + 1U] = {0U};
 static uint16 s_push_edge_prefix[MAX_CAR_PATH + 1U] = {0U};
+/* 运行期开关：1 允许动态规划选择斜线捷径，0 时只保留水平/竖直执行段。 */
+static uint8 g_path_diagonal_enabled = 1U;
 
 void path_remap_exec_point(Position *p)
 {
@@ -56,6 +58,16 @@ void path_inverse_remap_exec_point(Position *p)
     p->row = p->col;
     p->col = temp;
 #endif
+}
+
+void path_set_diagonal_enabled(uint8 enabled)
+{
+    g_path_diagonal_enabled = (enabled != 0U) ? 1U : 0U;
+}
+
+uint8 path_get_diagonal_enabled(void)
+{
+    return g_path_diagonal_enabled;
 }
 
 static uint8 path_is_same_grid_cell(const Position *a, const Position *b)
@@ -691,12 +703,17 @@ static uint8 path_exec_segment_allowed(const Position *path,
         return 0U;
     }
 
+    is_slanted = path_is_slanted_segment(seg_start, seg_end);
+    if (is_slanted && !g_path_diagonal_enabled)
+    {
+        return 0U;
+    }
+
     if (end_idx == start_idx + 1U)
     {
         return 1U;
     }
 
-    is_slanted = path_is_slanted_segment(seg_start, seg_end);
     crosses_push_span = path_segment_crosses_push_span(start_idx, end_idx);
     follows_raw_axis_run = path_raw_subpath_is_axis_run(path, start_idx, end_idx);
 

@@ -4,7 +4,8 @@
 #include "Map_Path_Data.h"
 #include "zf_common_typedef.h"
 
-extern uint8 g_control_prestart_depart_dir;
+#define CONTROL_PRESTART_DEPART_DIR_MIN 0U
+#define CONTROL_PRESTART_DEPART_DIR_MAX 4U
 
 /**
  * @brief 控制流程阶段定义。
@@ -89,6 +90,29 @@ void control_set_start_enabled(uint8 enabled);
 uint8 control_get_start_enabled(void);
 
 /**
+ * @brief 设置起步发车方向选项。
+ *
+ * 取值会被限制在 CONTROL_PRESTART_DEPART_DIR_MIN ~ CONTROL_PRESTART_DEPART_DIR_MAX。
+ *
+ * 当前方向约定：
+ * - 0：地图右
+ * - 1：地图上
+ * - 2：地图左
+ * - 3：地图下
+ * - 4：保留/默认，按地图右处理
+ *
+ * @param dir 菜单输入的发车方向编号。
+ */
+void control_set_prestart_depart_dir(uint8 dir);
+
+/**
+ * @brief 获取当前起步发车方向选项。
+ *
+ * @return uint8 当前发车方向编号。
+ */
+uint8 control_get_prestart_depart_dir(void);
+
+/**
  * @brief 获取当前控制阶段。
  *
  * @return control_stage_t 当前状态机阶段值。
@@ -105,6 +129,39 @@ control_stage_t control_get_stage(void);
  * @return const Position* 执行路径只读指针。
  */
 const Position *control_get_exec_path(size_t *steps);
+
+/**
+ * @brief 设置是否允许执行路径使用斜线捷径。
+ *
+ * 该开关影响下一次执行路径构建；已经下发给 path_follow 的路径不会被立即改写。
+ *
+ * @param enabled 1：允许斜线；0：只允许水平/竖直执行段。
+ */
+void control_set_diagonal_path_enabled(uint8 enabled);
+
+/**
+ * @brief 获取当前斜线执行路径开关状态。
+ *
+ * @return uint8 1：允许斜线；0：只允许水平/竖直执行段。
+ */
+uint8 control_get_diagonal_path_enabled(void);
+
+/**
+ * @brief 设置初始定位之后是否继续使用视觉定位修正。
+ *
+ * 起步后的第一次视觉定位始终启用；该开关只影响识别结束后的二次定位，
+ * 以及等待地图阶段是否用新 CAR 位姿轻量同步 path_follow。
+ *
+ * @param enabled 1：后续继续使用视觉定位；0：后续依靠里程计/IMU。
+ */
+void control_set_followup_vision_localization_enabled(uint8 enabled);
+
+/**
+ * @brief 获取后续视觉定位修正开关状态。
+ *
+ * @return uint8 1：后续继续使用视觉定位；0：后续依靠里程计/IMU。
+ */
+uint8 control_get_followup_vision_localization_enabled(void);
 
 /**
  * @brief 设置控制流程使用的路径规划模式。

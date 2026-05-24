@@ -52,6 +52,20 @@ void path_remap_exec_point(Position *p);
 void path_inverse_remap_exec_point(Position *p);
 
 /**
+ * @brief 设置是否允许执行路径使用斜线捷径。
+ *
+ * @param enabled 1：允许斜线；0：只允许水平/竖直执行段。
+ */
+void path_set_diagonal_enabled(uint8 enabled);
+
+/**
+ * @brief 获取当前斜线捷径开关状态。
+ *
+ * @return uint8 1：允许斜线；0：只允许水平/竖直执行段。
+ */
+uint8 path_get_diagonal_enabled(void);
+
+/**
  * @brief 从规划路径生成最终下发给 path_follow 的执行路径。
  *
  * @param planner_path Game_logic/Algorithm 输出的原始规划路径，仍为地图坐标。

@@ -11,24 +11,26 @@
 #include <string.h>
 
 /*
- * 手动开关：是否在控制流程中使用视觉定位。
- * 1：使用视觉 CAR 位姿做初始定位/二次定位。
- * 0：跳过视觉定位，只请求地图并依靠当前里程计/IMU 继续规划执行。
+ * 手动开关：初始定位之后，是否继续使用视觉 CAR 位姿修正定位。
  *
- * 需要临时关闭视觉定位时，只改这一处即可。
+ * 注意：起步后的第一次定位始终强制使用视觉，因为系统需要先拿到小车真实位置
+ * 和地图方向基准；该开关只控制后续流程：
+ * - 识别结束进入推箱子阶段前是否二次视觉定位；
+ * - 等待地图阶段收到新 CAR 位姿时是否顺带同步 path_follow。
  */
-static uint8 g_control_use_vision_localization = 1;
+static uint8 g_control_use_followup_vision_localization = 1U;
 
 /*
  * 手动选择起步发车方向。
  * 0：地图右，对应车前方；
  * 1：地图上，对应车左方；
  * 2：地图左，对应车后方；
- * 3：地图下，对应车右方。
+ * 3：地图下，对应车右方；
+ * 4：保留/默认，按地图右处理。
  *
  * 小车只平移到对应方向，车头朝向保持不变。
  */
-uint8 g_control_prestart_depart_dir = 0U;
+static uint8 g_control_prestart_depart_dir = 0U;
 
 /*
  * 手动开关：识别阶段是否启用“段前提前转向”。
@@ -366,6 +368,21 @@ static void set_control_phase_stage(control_phase_step_t step)
     g_control_stage = make_control_phase_stage(g_control_flow_phase, step);
 }
 
+/**
+ * @brief 当前大阶段是否需要进入视觉定位状态。
+ *
+ * 识别阶段的第一次定位不能被菜单开关关闭，否则规划起点和地图方向基准都可能无效。
+ * 推箱子阶段属于后续重定位，由菜单开关控制是否继续使用视觉修正。
+ */
+static uint8 should_enter_vision_localization_stage(void)
+{
+    if (g_control_flow_phase == CONTROL_FLOW_IDENTIFY)
+    {
+        return 1U;
+    }
+    return g_control_use_followup_vision_localization;
+}
+
 static void reset_localization_accumulator(void)
 {
     g_localize_sample_count = 0U;
@@ -563,6 +580,7 @@ static control_map_dir_t get_prestart_depart_map_dir(void)
         return CONTROL_MAP_DIR_LEFT;
     case 3U:
         return CONTROL_MAP_DIR_DOWN;
+    case 4U:
     case 0U:
     default:
         return CONTROL_MAP_DIR_RIGHT;
@@ -1384,7 +1402,7 @@ static void finish_identify_flow_and_relocalize(uint8 finalize_ids)
     car_pose_updated = false;
     reset_localization_accumulator();
 
-    if (g_control_use_vision_localization)
+    if (should_enter_vision_localization_stage())
     {
         g_relocalize_force_fresh_pose = 1U;
         set_control_phase_stage(CONTROL_PHASE_STEP_LOCALIZE);
@@ -1734,7 +1752,7 @@ static uint8 control_plan_path(void)
  *
  * 行为说明：
  * - 首次进入时，读取当前 IMU 航向角作为车头保持方向；
- * - 根据文件顶部的 g_control_prestart_depart_dir 选择地图右/上/左/下四个发车方向；
+ * - 根据 control_set_prestart_depart_dir() 设置的编号选择地图右/上/左/下发车方向；
  * - 小车按所选方向平移一个网格距离，车头朝向不变；
  * - 动作执行完成后，切到初始定位阶段。
  */
@@ -1788,7 +1806,7 @@ static void handle_prestart_move(void)
         car_stop_flag = 0U;
         reset_localization_accumulator();
         g_relocalize_force_fresh_pose = 0U;
-        if (g_control_use_vision_localization)
+        if (should_enter_vision_localization_stage())
         {
             set_control_phase_stage(CONTROL_PHASE_STEP_LOCALIZE);
         }
@@ -1822,9 +1840,9 @@ static void handle_startup_localization(void)
     float cam_y_m = 0.0f;
     float cam_yaw_deg = 0.0f;
 
-    if (!g_control_use_vision_localization)
+    if (!should_enter_vision_localization_stage())
     {
-        /* 运行中关闭视觉定位时，当前阶段立即降级为“等地图->规划”。 */
+        /* 后续视觉定位关闭时，推箱子阶段重定位直接降级为“等地图->规划”。 */
         if (!g_map_right_yaw_ready)
         {
             g_map_right_yaw_deg = eulerAngle.yaw;
@@ -1916,7 +1934,7 @@ static void handle_wait_camera_data(void)
     float cam_y_m = 0.0f;
     float cam_yaw_deg = 0.0f;
 
-    if (g_control_use_vision_localization)
+    if (g_control_use_followup_vision_localization)
     {
         if (car_pose_updated)
         {
@@ -1930,7 +1948,7 @@ static void handle_wait_camera_data(void)
     }
     else
     {
-        /* 视觉定位关闭时丢弃旧 CAR 更新标志，避免重新开启后误吃关闭期间的缓存帧。 */
+        /* 后续视觉修正关闭时丢弃旧 CAR 更新标志，避免重新开启后误吃关闭期间的缓存帧。 */
         car_pose_updated = false;
     }
 
@@ -2312,6 +2330,20 @@ uint8 control_get_start_enabled(void)
     return g_control_start_enabled;
 }
 
+void control_set_prestart_depart_dir(uint8 dir)
+{
+    if (dir > CONTROL_PRESTART_DEPART_DIR_MAX)
+    {
+        dir = CONTROL_PRESTART_DEPART_DIR_MAX;
+    }
+    g_control_prestart_depart_dir = dir;
+}
+
+uint8 control_get_prestart_depart_dir(void)
+{
+    return g_control_prestart_depart_dir;
+}
+
 void control_process(void)
 {
     /*
@@ -2390,6 +2422,26 @@ const Position *control_get_exec_path(size_t *steps)
         *steps = g_exec_steps;
     }
     return g_exec_path;
+}
+
+void control_set_diagonal_path_enabled(uint8 enabled)
+{
+    path_set_diagonal_enabled(enabled);
+}
+
+uint8 control_get_diagonal_path_enabled(void)
+{
+    return path_get_diagonal_enabled();
+}
+
+void control_set_followup_vision_localization_enabled(uint8 enabled)
+{
+    g_control_use_followup_vision_localization = (enabled != 0U) ? 1U : 0U;
+}
+
+uint8 control_get_followup_vision_localization_enabled(void)
+{
+    return g_control_use_followup_vision_localization;
 }
 
 /**

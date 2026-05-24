@@ -9,6 +9,9 @@ uint8 car_stop_flag = 0; // 停车标志
 
 static bool startup_start_switch = false;
 static bool startup_reset_switch = false;
+static uint8 startup_depart_dir_value = 0U;
+static bool diagonal_path_switch = true;
+static bool followup_vision_switch = true;
 
 path_follow_status_t path_follow_status = {0};
 control_plan_mode_t plan_mode = CONTROL_PLAN_MODE_1;
@@ -48,9 +51,11 @@ void Menu_Create(void)
     // 在此动态创建文件 //
     Create_Menu_File_dynamic(Startup, "Start", &startup_start_switch, bool_Box);
     Create_Menu_File_dynamic(Startup, "Reset", &startup_reset_switch, bool_Box);
-    Create_Menu_File_dynamic(Startup, "Start_Dir", &g_control_prestart_depart_dir, uint8_Box);
+    Create_Menu_File_dynamic(Startup, "Start_Dir", &startup_depart_dir_value, uint8_Box);
 
     Create_Menu_File_dynamic(Data, "test", &test1, uint8_Box);
+    Create_Menu_File_dynamic(Setting, "DiagPath", &diagonal_path_switch, bool_Box);
+    Create_Menu_File_dynamic(Setting, "FollowVis", &followup_vision_switch, bool_Box);
     Create_Menu_File_dynamic(Setting, "test", &test1, uint8_Box);
 }
 
@@ -58,10 +63,13 @@ static void Menu_Sync_Control_State(void)
 {
     startup_start_switch = (control_get_start_enabled() != 0U);
     startup_reset_switch = false;
+    startup_depart_dir_value = control_get_prestart_depart_dir();
+    diagonal_path_switch = (control_get_diagonal_path_enabled() != 0U);
+    followup_vision_switch = (control_get_followup_vision_localization_enabled() != 0U);
 }
 
 
-static bool Menu_Handle_Startup_Bool(Menu_Item *item, bool value)
+static bool Menu_Handle_Control_Bool(Menu_Item *item, bool value)
 {
     if (item == NULL || item->kind != bool_Box)
     {
@@ -83,6 +91,49 @@ static bool Menu_Handle_Startup_Bool(Menu_Item *item, bool value)
             startup_start_switch = false;
         }
         startup_reset_switch = false;
+        return true;
+    }
+
+    if (item->data == &diagonal_path_switch)
+    {
+        diagonal_path_switch = value;
+        control_set_diagonal_path_enabled(value ? 1U : 0U);
+        return true;
+    }
+
+    if (item->data == &followup_vision_switch)
+    {
+        followup_vision_switch = value;
+        control_set_followup_vision_localization_enabled(value ? 1U : 0U);
+        return true;
+    }
+
+    return false;
+}
+
+static bool Menu_Handle_Control_Uint8(Menu_Item *item, int16 delta)
+{
+    int16 value = 0;
+
+    if (item == NULL || item->kind != uint8_Box)
+    {
+        return false;
+    }
+
+    if (item->data == &startup_depart_dir_value)
+    {
+        value = (int16)startup_depart_dir_value + delta;
+        if (value < (int16)CONTROL_PRESTART_DEPART_DIR_MIN)
+        {
+            value = (int16)CONTROL_PRESTART_DEPART_DIR_MIN;
+        }
+        else if (value > (int16)CONTROL_PRESTART_DEPART_DIR_MAX)
+        {
+            value = (int16)CONTROL_PRESTART_DEPART_DIR_MAX;
+        }
+
+        startup_depart_dir_value = (uint8)value;
+        control_set_prestart_depart_dir(startup_depart_dir_value);
         return true;
     }
 
@@ -738,13 +789,16 @@ void Key_Plus(void) // 数据增大
         *(int8_t *)pointer->data += (int8_t)SetupNumber[SetupIndex];
         break;
     case uint8_Box:
-        *(uint8_t *)pointer->data += (uint8_t)SetupNumber[SetupIndex];
+        if (!Menu_Handle_Control_Uint8(pointer, (int16)SetupNumber[SetupIndex]))
+        {
+            *(uint8_t *)pointer->data += (uint8_t)SetupNumber[SetupIndex];
+        }
         break;
     case float_Box:
         *(float *)pointer->data += SetupNumber[SetupIndex];
         break;
     case bool_Box:
-        if (!Menu_Handle_Startup_Bool(pointer, true))
+        if (!Menu_Handle_Control_Bool(pointer, true))
         {
             *(bool *)pointer->data = true;
         }
@@ -773,13 +827,16 @@ void Key_Sub(void) // 数据减小
         *(int8_t *)pointer->data -= (int8_t)SetupNumber[SetupIndex];
         break;
     case uint8_Box:
-        *(uint8_t *)pointer->data -= (uint8_t)SetupNumber[SetupIndex];
+        if (!Menu_Handle_Control_Uint8(pointer, -(int16)SetupNumber[SetupIndex]))
+        {
+            *(uint8_t *)pointer->data -= (uint8_t)SetupNumber[SetupIndex];
+        }
         break;
     case float_Box:
         *(float *)pointer->data -= SetupNumber[SetupIndex];
         break;
     case bool_Box:
-        if (!Menu_Handle_Startup_Bool(pointer, false))
+        if (!Menu_Handle_Control_Bool(pointer, false))
         {
             *(bool *)pointer->data = false;
         }

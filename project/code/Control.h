@@ -164,6 +164,23 @@ void control_set_followup_vision_localization_enabled(uint8 enabled);
 uint8 control_get_followup_vision_localization_enabled(void);
 
 /**
+ * @brief 设置识别阶段是否启用段前提前转向。
+ *
+ * 开启后，每段识别短路程出发前会先转到识别朝向，到点后直接识别；
+ * 关闭后，到达识别点后再原地转向识别。
+ *
+ * @param enabled 1：启用；0：关闭。
+ */
+void control_set_identify_prerotate_enabled(uint8 enabled);
+
+/**
+ * @brief 获取识别阶段段前提前转向开关状态。
+ *
+ * @return uint8 1：启用；0：关闭。
+ */
+uint8 control_get_identify_prerotate_enabled(void);
+
+/**
  * @brief 设置控制流程使用的路径规划模式。
  *
  * @param mode 规划模式标志位：

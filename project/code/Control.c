@@ -2444,6 +2444,16 @@ uint8 control_get_followup_vision_localization_enabled(void)
     return g_control_use_followup_vision_localization;
 }
 
+void control_set_identify_prerotate_enabled(uint8 enabled)
+{
+    g_control_identify_prerotate_enabled = (enabled != 0U) ? 1U : 0U;
+}
+
+uint8 control_get_identify_prerotate_enabled(void)
+{
+    return g_control_identify_prerotate_enabled;
+}
+
 /**
  * @brief 手动设置推箱阶段规划模式。
  *

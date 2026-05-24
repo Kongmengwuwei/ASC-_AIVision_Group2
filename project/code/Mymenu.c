@@ -12,6 +12,7 @@ static bool startup_reset_switch = false;
 static uint8 startup_depart_dir_value = 0U;
 static bool diagonal_path_switch = true;
 static bool followup_vision_switch = true;
+static bool identify_prerotate_switch = true;
 
 path_follow_status_t path_follow_status = {0};
 control_plan_mode_t plan_mode = CONTROL_PLAN_MODE_1;
@@ -45,8 +46,8 @@ void Menu_Create(void)
 {
     // 在此动态创建文件夹 //
     Menu_Item *Startup = Create_Menu_Folder_dynamic(&Root, "Startup");
-    Menu_Item *Data = Create_Menu_Folder_dynamic(&Root, "Data");
     Menu_Item *Setting = Create_Menu_Folder_dynamic(&Root, "Setting");
+    Menu_Item *Data = Create_Menu_Folder_dynamic(&Root, "Data");
 
     // 在此动态创建文件 //
     Create_Menu_File_dynamic(Startup, "Start", &startup_start_switch, bool_Box);
@@ -55,8 +56,8 @@ void Menu_Create(void)
 
     Create_Menu_File_dynamic(Data, "test", &test1, uint8_Box);
     Create_Menu_File_dynamic(Setting, "DiagPath", &diagonal_path_switch, bool_Box);
-    Create_Menu_File_dynamic(Setting, "FollowVis", &followup_vision_switch, bool_Box);
-    Create_Menu_File_dynamic(Setting, "test", &test1, uint8_Box);
+    Create_Menu_File_dynamic(Setting, "FolVision", &followup_vision_switch, bool_Box);
+    Create_Menu_File_dynamic(Setting, "PreRotate", &identify_prerotate_switch, bool_Box);
 }
 
 static void Menu_Sync_Control_State(void)
@@ -66,6 +67,7 @@ static void Menu_Sync_Control_State(void)
     startup_depart_dir_value = control_get_prestart_depart_dir();
     diagonal_path_switch = (control_get_diagonal_path_enabled() != 0U);
     followup_vision_switch = (control_get_followup_vision_localization_enabled() != 0U);
+    identify_prerotate_switch = (control_get_identify_prerotate_enabled() != 0U);
 }
 
 
@@ -105,6 +107,13 @@ static bool Menu_Handle_Control_Bool(Menu_Item *item, bool value)
     {
         followup_vision_switch = value;
         control_set_followup_vision_localization_enabled(value ? 1U : 0U);
+        return true;
+    }
+
+    if (item->data == &identify_prerotate_switch)
+    {
+        identify_prerotate_switch = value;
+        control_set_identify_prerotate_enabled(value ? 1U : 0U);
         return true;
     }
 
@@ -899,9 +908,9 @@ void Menu_Switch(void)
 {
     // 按键在此更改
     key_state_enum k1 = key_get_state(KEY_1);
-    key_state_enum k2 = key_get_state(KEY_2);
+    key_state_enum k3 = key_get_state(KEY_2);
     key_state_enum k4 = key_get_state(KEY_3);
-    key_state_enum k3 = key_get_state(KEY_4);
+    key_state_enum k2 = key_get_state(KEY_4);
 
     if (k1 == KEY_SHORT_PRESS)
     {

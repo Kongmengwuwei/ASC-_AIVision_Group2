@@ -181,6 +181,23 @@ void control_set_identify_prerotate_enabled(uint8 enabled);
 uint8 control_get_identify_prerotate_enabled(void);
 
 /**
+ * @brief 设置是否启用三轮完整流程模式。
+ *
+ * 开启后，一轮推箱完成并返回右侧发车区、车头回正后，会再次发车开始新流程，
+ * 总共执行 3 次“发车->识别->推箱->返场”。
+ *
+ * @param enabled 1：启用三轮流程；0：单轮流程。
+ */
+void control_set_repeat_three_flow_enabled(uint8 enabled);
+
+/**
+ * @brief 获取三轮完整流程模式开关状态。
+ *
+ * @return uint8 1：启用三轮流程；0：单轮流程。
+ */
+uint8 control_get_repeat_three_flow_enabled(void);
+
+/**
  * @brief 设置控制流程使用的路径规划模式。
  *
  * @param mode 规划模式标志位：

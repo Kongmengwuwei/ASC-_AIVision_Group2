@@ -2308,18 +2308,17 @@ static int is_blocked_for_final_return(const planning_state_t *state,
     return 0;
 }
 
-/* 规划“返回发车点”的最短车行路径：
- * 发车点按用户坐标定义为 (x,y) = (0,4),(0,5),(13,4),(13,5)，
- * 转换到 Position(row,col) 为 (4,0),(5,0),(4,13),(5,13)。 */
+/* 规划“返回右侧发车区”的最短车行路径：
+ * 现在返场永久固定到右侧发车区，不再按最近发车点选择。
+ * 右侧发车区按用户坐标定义为 (x,y) = (13,4),(13,5)，
+ * 转换到 Position(row,col) 为 (4,13),(5,13)。 */
 static int build_shortest_return_path_to_depot(const planning_state_t *state,
                                                 Position *out_path,
                                                 int max_path,
                                                 Position *out_depot,
                                                 int ignore_obstacles)
 {
-    const Position depots[4] = {
-        {4, 0, 0},
-        {5, 0, 0},
+    const Position depots[2] = {
         {4, 13, 0},
         {5, 13, 0}
     };
@@ -2379,7 +2378,7 @@ static int build_shortest_return_path_to_depot(const planning_state_t *state,
         }
     }
 
-    for (i = 0; i < 4; i++)
+    for (i = 0; i < (int)(sizeof(depots) / sizeof(depots[0])); i++)
     {
         int drow = (int)depots[i].row;
         int dcol = (int)depots[i].col;
@@ -2432,10 +2431,10 @@ static int build_shortest_return_path_to_depot(const planning_state_t *state,
     return path_len;
 }
 
-/* 在现有规划末尾追加“返回最近发车点”路径。 */
-static void append_return_to_depot(planning_state_t *state,
-                                   Position *merged_path,
-                                   int *merged_len)
+/* 在现有规划末尾追加“返回右侧发车区”路径。 */
+static int append_return_to_depot(planning_state_t *state,
+                                  Position *merged_path,
+                                  int *merged_len)
 {
     Position ret_path[MAP_ROWS * MAP_COLS];
     Position depot;
@@ -2443,7 +2442,7 @@ static void append_return_to_depot(planning_state_t *state,
     int ignore_obstacles;
 
     if (!state || !merged_path || !merged_len)
-        return;
+        return 0;
 
     ignore_obstacles = (state->boxes_cnt <= 0) ? 1 : 0;
     ret_len = build_shortest_return_path_to_depot(state,
@@ -2452,10 +2451,11 @@ static void append_return_to_depot(planning_state_t *state,
                                                   &depot,
                                                   ignore_obstacles);
     if (ret_len <= 0)
-        return;
+        return 0;
 
     append_segment_path(merged_path, merged_len, ret_path, ret_len);
     state->car_state = depot;
+    return 1;
 }
 
 /* 仅小车移动的最短路径（4邻域 BFS）。 */
@@ -3703,7 +3703,11 @@ static void plan_mode1_simple(void)
         safety_round++;
     }
 
-    append_return_to_depot(&state, merged_path, &merged_len);
+    if (!append_return_to_depot(&state, merged_path, &merged_len))
+    {
+        Car_path_count = 0U;
+        return;
+    }
     save_state_to_globals(&state);
     save_path_to_globals(merged_path, merged_len);
 }
@@ -3751,7 +3755,11 @@ static void plan_mode2_pair_first(void)
         safety_round++;
     }
 
-    append_return_to_depot(&state, merged_path, &merged_len);
+    if (!append_return_to_depot(&state, merged_path, &merged_len))
+    {
+        Car_path_count = 0U;
+        return;
+    }
     save_state_to_globals(&state);
     save_path_to_globals(merged_path, merged_len);
 }

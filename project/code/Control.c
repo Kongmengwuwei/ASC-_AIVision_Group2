@@ -51,6 +51,10 @@ static uint8 g_control_identify_prerotate_enabled = 1U;
 #define CONTROL_CAMERA_POSE_SETTLE_DELAY_MS 200U
 /* 推炸弹到爆炸点后停留 0.5s，等待爆炸效果生效 */
 #define CONTROL_BOMB_EXPLOSION_PAUSE_MS 500U
+/* 多轮模式下总共发车/执行的次数。 */
+#define CONTROL_REPEAT_TOTAL_RUNS 3U
+/* 回到发车区后，车头回正到初始方向的角度容差。 */
+#define CONTROL_RETURN_YAW_ALIGN_TOL_DEG 5.0f
 
 
 /**
@@ -198,6 +202,9 @@ static uint8 g_plan_ready = 0U;
  */
 static control_plan_mode_t g_control_plan_mode = CONTROL_PLAN_MODE_1;
 static control_flow_phase_t g_control_flow_phase = CONTROL_FLOW_IDENTIFY;
+static uint8 g_control_repeat_three_enabled = 0U;
+static uint8 g_control_completed_flow_count = 0U;
+static uint8 g_return_heading_rotate_started = 0U;
 
 static float g_map_right_yaw_deg = 0.0f;
 static uint8 g_map_right_yaw_ready = 0U;
@@ -602,6 +609,8 @@ static void reset_control_runtime_state(void)
     g_path_plan_paused = 0U;
     g_plan_ready = 0U;
     g_exec_steps = 0U;
+    g_control_completed_flow_count = 0U;
+    g_return_heading_rotate_started = 0U;
     memset(g_exec_path, 0, sizeof(g_exec_path));
 
     reset_localization_accumulator();
@@ -626,6 +635,47 @@ static void reset_control_runtime_state(void)
     car_stop_flag = 0U;
     map_data_updated = false;
     car_pose_updated = false;
+}
+
+/**
+ * @brief 准备从右侧发车区开始下一轮完整流程。
+ *
+ * 多轮模式只复位“本轮任务运行态”，不改菜单开关，也不关闭启动标志。
+ * 下一轮仍会先执行发车偏移，再强制视觉初始定位、重新取地图和重新识别。
+ */
+static void prepare_next_full_flow_cycle(void)
+{
+    g_control_flow_phase = CONTROL_FLOW_IDENTIFY;
+    g_control_stage = CONTROL_STAGE_PRESTART_MOVE;
+    g_path_plan_paused = 0U;
+    g_plan_ready = 0U;
+    g_exec_steps = 0U;
+    memset(g_exec_path, 0, sizeof(g_exec_path));
+
+    reset_localization_accumulator();
+    g_prestart_move_started = 0U;
+    g_map_right_yaw_deg = 0.0f;
+    g_map_right_yaw_ready = 0U;
+    g_body_map_dir = CONTROL_MAP_DIR_RIGHT;
+    g_wait_new_map_frame = 0U;
+    g_wait_map_frame_base = 0U;
+    g_relocalize_force_fresh_pose = 0U;
+    g_return_heading_rotate_started = 0U;
+
+    reset_identify_runtime_state();
+    clear_saved_identify_ids();
+    vision_clear_pending_data();
+    clear_map_request_wait();
+    clear_car_request_wait();
+
+    path_follow_set_pause_indices(NULL, 0U, 0U);
+    path_follow_set_path(NULL, 0U);
+    path_follow_hold_current_yaw();
+
+    map_data_updated = false;
+    car_pose_updated = false;
+    car_go_flag = 0U;
+    car_stop_flag = 0U;
 }
 
 static uint8 identify_result_to_valid_id(const VisionRecognitionResult *result, uint8 *id_out)
@@ -2245,20 +2295,58 @@ static void handle_load_path_stage(void)
     set_control_phase_stage(CONTROL_PHASE_STEP_EXECUTE_PATH);
 }
 
+static void finish_pushbox_flow_after_return(void)
+{
+    car_go_flag = 1U;
+    car_stop_flag = 1U;
+    g_return_heading_rotate_started = 0U;
+
+    if (g_control_completed_flow_count < CONTROL_REPEAT_TOTAL_RUNS)
+    {
+        g_control_completed_flow_count++;
+    }
+
+    if (g_control_repeat_three_enabled &&
+        g_control_completed_flow_count < CONTROL_REPEAT_TOTAL_RUNS)
+    {
+        prepare_next_full_flow_cycle();
+        return;
+    }
+
+    set_control_phase_stage(CONTROL_PHASE_STEP_FINISHED);
+}
+
 /**
  * @brief 推箱执行阶段：轮询 path_follow 状态，路径结束后进入完成态并保持停车。
  */
 static void handle_pushbox_execute_path(void)
 {
     path_follow_status_t st = {0};
+    float return_yaw_deg = 0.0f;
+    float yaw_err_deg = 0.0f;
 
     path_follow_get_status(&st);
-    if (!st.active)
+    if (st.active)
+    {
+        return;
+    }
+
+    return_yaw_deg = map_dir_to_yaw_deg(CONTROL_MAP_DIR_RIGHT);
+    yaw_err_deg = wrap_yaw_deg_local(return_yaw_deg - eulerAngle.yaw);
+    if (fabsf(yaw_err_deg) > CONTROL_RETURN_YAW_ALIGN_TOL_DEG)
     {
         car_go_flag = 1U;
-        car_stop_flag = 1U;
-        set_control_phase_stage(CONTROL_PHASE_STEP_FINISHED);
+        car_stop_flag = 0U;
+        if (!g_return_heading_rotate_started)
+        {
+            path_follow_start_rotate_to_yaw(return_yaw_deg);
+            g_return_heading_rotate_started = 1U;
+        }
+        return;
     }
+
+    path_follow_hold_current_yaw();
+    finish_pushbox_flow_after_return();
 }
 
 /**
@@ -2452,6 +2540,16 @@ void control_set_identify_prerotate_enabled(uint8 enabled)
 uint8 control_get_identify_prerotate_enabled(void)
 {
     return g_control_identify_prerotate_enabled;
+}
+
+void control_set_repeat_three_flow_enabled(uint8 enabled)
+{
+    g_control_repeat_three_enabled = (enabled != 0U) ? 1U : 0U;
+}
+
+uint8 control_get_repeat_three_flow_enabled(void)
+{
+    return g_control_repeat_three_enabled;
 }
 
 /**

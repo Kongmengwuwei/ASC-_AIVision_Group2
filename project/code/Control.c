@@ -39,6 +39,13 @@ static uint8 g_control_prestart_depart_dir = 0U;
  */
 static uint8 g_control_identify_prerotate_enabled = 1U;
 
+/*
+ * Extra compensation for the first power-on departure move.
+ * Positive values extend the selected Start_Dir move, negative values shorten it.
+ * Unit: m. Default +0.05 m keeps the prestart move at 0.35 m total.
+ */
+float g_control_prestart_depart_compensate_m = -0.025f;
+
 /* ========================= 参数配置�?========================= */
 
 /*
@@ -257,6 +264,9 @@ static uint8 g_localize_camera_settled = 0U;
  * - 1：已下发，等待动作执行结�?
  */
 static uint8 g_prestart_move_started = 0U;
+static uint8 g_prestart_nominal_pose_valid = 0U;
+static float g_prestart_nominal_target_x_m = 0.0f;
+static float g_prestart_nominal_target_y_m = 0.0f;
 
 /**
  * @brief 初始定位阶段累计的视�?X 坐标和（米）�?
@@ -615,6 +625,9 @@ static void reset_control_runtime_state(void)
 
     reset_localization_accumulator();
     g_prestart_move_started = 0U;
+    g_prestart_nominal_pose_valid = 0U;
+    g_prestart_nominal_target_x_m = 0.0f;
+    g_prestart_nominal_target_y_m = 0.0f;
     g_map_right_yaw_deg = 0.0f;
     g_map_right_yaw_ready = 0U;
     g_body_map_dir = CONTROL_MAP_DIR_RIGHT;
@@ -1813,6 +1826,9 @@ static void handle_prestart_move(void)
     float hold_yaw_deg = 0.0f;
     float move_yaw_deg = 0.0f;
     float move_yaw_rad = 0.0f;
+    float prestart_distance_m = 0.0f;
+    float nominal_delta_x_m = 0.0f;
+    float nominal_delta_y_m = 0.0f;
     float start_x_m = 0.0f;
     float start_y_m = 0.0f;
     float delta_x_m = 0.0f;
@@ -1831,10 +1847,27 @@ static void handle_prestart_move(void)
         prestart_dir = get_prestart_depart_map_dir();
         move_yaw_deg = map_dir_to_yaw_deg(prestart_dir);
         move_yaw_rad = move_yaw_deg * CONTROL_DEG_TO_RAD;
+        prestart_distance_m = CONTROL_PRESTART_OFFSET_M +
+                              g_control_prestart_depart_compensate_m;
+        if (prestart_distance_m < 0.0f)
+        {
+            prestart_distance_m = 0.0f;
+        }
         start_x_m = st.x_m;
         start_y_m = st.y_m;
-        delta_x_m = cosf(move_yaw_rad) * CONTROL_PRESTART_OFFSET_M;
-        delta_y_m = sinf(move_yaw_rad) * CONTROL_PRESTART_OFFSET_M;
+
+        nominal_delta_x_m = cosf(move_yaw_rad) * CONTROL_PRESTART_OFFSET_M;
+        nominal_delta_y_m = sinf(move_yaw_rad) * CONTROL_PRESTART_OFFSET_M;
+        g_prestart_nominal_target_x_m = clampf_local(start_x_m + nominal_delta_x_m,
+                                                     0.0f,
+                                                     CONTROL_WORLD_X_MAX_M);
+        g_prestart_nominal_target_y_m = clampf_local(start_y_m + nominal_delta_y_m,
+                                                     0.0f,
+                                                     CONTROL_WORLD_Y_MAX_M);
+        g_prestart_nominal_pose_valid = 1U;
+
+        delta_x_m = cosf(move_yaw_rad) * prestart_distance_m;
+        delta_y_m = sinf(move_yaw_rad) * prestart_distance_m;
 
         /* 防止起步目标越界（负坐标�?uint8 会变 255，导致远距离猛冲）�?*/
         target_x_m = clampf_local(start_x_m + delta_x_m, 0.0f, CONTROL_WORLD_X_MAX_M);
@@ -1854,6 +1887,14 @@ static void handle_prestart_move(void)
         /* 起步动作结束后先回到静止，再进入初始定位阶段�?*/
         car_go_flag = 0U;
         car_stop_flag = 0U;
+        if (g_prestart_nominal_pose_valid)
+        {
+            path_follow_reset_pose(g_prestart_nominal_target_x_m,
+                                   g_prestart_nominal_target_y_m,
+                                   eulerAngle.yaw);
+            path_follow_hold_current_yaw();
+            g_prestart_nominal_pose_valid = 0U;
+        }
         reset_localization_accumulator();
         g_relocalize_force_fresh_pose = 0U;
         if (should_enter_vision_localization_stage())

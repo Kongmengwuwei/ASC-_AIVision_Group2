@@ -11,18 +11,10 @@ static bool startup_start_switch = false;
 static bool startup_reset_switch = false;
 static uint8 startup_depart_dir_value = 0U;
 static bool diagonal_path_switch = true;
-static bool followup_vision_switch = true;
-static bool identify_prerotate_switch = true;
 
 path_follow_status_t path_follow_status = {0};
-control_plan_mode_t plan_mode = CONTROL_PLAN_MODE_1;
 
 uint8 test1 = 0;
-
-#if ALGORITHM_TEST_ENABLE
-char move_cmd = 'X'; // 移动命令缓存
-uint8 move_ret = 0;  // 移动结果缓存
-#endif
 
 static void draw_exec_path_diamond(uint16 center_x, uint16 center_y)
 {
@@ -56,8 +48,6 @@ void Menu_Create(void)
 
     Create_Menu_File_dynamic(Data, "test", &test1, uint8_Box);
     Create_Menu_File_dynamic(Setting, "DiagPath", &diagonal_path_switch, bool_Box);
-    Create_Menu_File_dynamic(Setting, "FolVision", &followup_vision_switch, bool_Box);
-    Create_Menu_File_dynamic(Setting, "PreRotate", &identify_prerotate_switch, bool_Box);
 }
 
 static void Menu_Sync_Control_State(void)
@@ -66,8 +56,6 @@ static void Menu_Sync_Control_State(void)
     startup_reset_switch = false;
     startup_depart_dir_value = control_get_prestart_depart_dir();
     diagonal_path_switch = (control_get_diagonal_path_enabled() != 0U);
-    followup_vision_switch = (control_get_followup_vision_localization_enabled() != 0U);
-    identify_prerotate_switch = (control_get_identify_prerotate_enabled() != 0U);
 }
 
 
@@ -100,20 +88,6 @@ static bool Menu_Handle_Control_Bool(Menu_Item *item, bool value)
     {
         diagonal_path_switch = value;
         control_set_diagonal_path_enabled(value ? 1U : 0U);
-        return true;
-    }
-
-    if (item->data == &followup_vision_switch)
-    {
-        followup_vision_switch = value;
-        control_set_followup_vision_localization_enabled(value ? 1U : 0U);
-        return true;
-    }
-
-    if (item->data == &identify_prerotate_switch)
-    {
-        identify_prerotate_switch = value;
-        control_set_identify_prerotate_enabled(value ? 1U : 0U);
         return true;
     }
 
@@ -656,10 +630,6 @@ void Show_Map(void)
     // ips200_show_string(start_x + (map_cols + 1) * cell_size, start_y + FONT_H * 2, "BOM:");
     // ips200_show_uint(start_x + (map_cols + 1) * cell_size + FONT_W * 5, start_y + FONT_H * 2, Bombs_count, 2);
 
-#if ALGORITHM_TEST_ENABLE
-    ips200_show_char(start_x + (map_cols + 1) * cell_size, start_y + FONT_H * 5, move_cmd);
-    ips200_show_int(start_x + (map_cols + 1) * cell_size + FONT_W * 3, start_y + FONT_H * 5, move_ret, 1);
-#endif
     ips200_show_uint(start_x + (map_cols + 1) * cell_size, start_y + FONT_H * 6, s_path_index, 3);
     ips200_show_char(start_x + (map_cols + 1) * cell_size + FONT_W * 3, start_y + FONT_H * 6, '/');
     ips200_show_uint(start_x + (map_cols + 1) * cell_size + FONT_W * 4, start_y + FONT_H * 6, Car_path_count, 3);
@@ -668,11 +638,6 @@ void Show_Map(void)
 void State_Show(void)
 {
     ips200_show_string(168, 132, "State:");
-    /*
-     * 状态编号约定：
-     * 0/1 为全局状态；20~25 为识别阶段；30~35 为推箱子阶段；99 为错误重试。
-     * 这样现场调车时只看两位数字，就能先判断当前属于哪条流程。
-     */
     switch (g_control_stage)
     {
     case CONTROL_STAGE_IDLE:
@@ -681,41 +646,20 @@ void State_Show(void)
     case CONTROL_STAGE_PRESTART_MOVE:
         ips200_show_uint(216, 132, 1, 2);
         break;
-    case CONTROL_STAGE_IDENTIFY_LOCALIZE:
+    case CONTROL_STAGE_FAKE_LOCALIZE:
         ips200_show_uint(216, 132, 20, 2);
         break;
-    case CONTROL_STAGE_IDENTIFY_WAIT_CAMERA_DATA:
+    case CONTROL_STAGE_FAKE_IDENTIFY_PAUSE:
         ips200_show_uint(216, 132, 21, 2);
         break;
-    case CONTROL_STAGE_IDENTIFY_PLAN_PATH:
+    case CONTROL_STAGE_LOAD_CUSTOM_PATH:
         ips200_show_uint(216, 132, 22, 2);
         break;
-    case CONTROL_STAGE_IDENTIFY_LOAD_PATH:
+    case CONTROL_STAGE_EXECUTE_PATH:
         ips200_show_uint(216, 132, 23, 2);
         break;
-    case CONTROL_STAGE_IDENTIFY_EXECUTE_PATH:
+    case CONTROL_STAGE_FINISHED:
         ips200_show_uint(216, 132, 24, 2);
-        break;
-    case CONTROL_STAGE_IDENTIFY_FINISHED:
-        ips200_show_uint(216, 132, 25, 2);
-        break;
-    case CONTROL_STAGE_PUSHBOX_LOCALIZE:
-        ips200_show_uint(216, 132, 30, 2);
-        break;
-    case CONTROL_STAGE_PUSHBOX_WAIT_CAMERA_DATA:
-        ips200_show_uint(216, 132, 31, 2);
-        break;
-    case CONTROL_STAGE_PUSHBOX_PLAN_PATH:
-        ips200_show_uint(216, 132, 32, 2);
-        break;
-    case CONTROL_STAGE_PUSHBOX_LOAD_PATH:
-        ips200_show_uint(216, 132, 33, 2);
-        break;
-    case CONTROL_STAGE_PUSHBOX_EXECUTE_PATH:
-        ips200_show_uint(216, 132, 34, 2);
-        break;
-    case CONTROL_STAGE_PUSHBOX_FINISHED:
-        ips200_show_uint(216, 132, 35, 2);
         break;
     case CONTROL_STAGE_ERROR:
         ips200_show_uint(216, 132, 99, 2);
@@ -738,10 +682,6 @@ void State_Show(void)
     ips200_show_char(88, 176, ',');
     ips200_show_float(96, 176, path_follow_status.target_y_m, 1, 3);
     ips200_show_float(160, 176, path_follow_status.target_yaw_deg, 3, 1);
-
-    plan_mode = control_get_plan_mode();
-    ips200_show_string(170, 200, "Mode:");
-    ips200_show_uint(170 + FONT_W * 6, 200, plan_mode, 2);
 }
 
 // 菜单显示
@@ -914,33 +854,24 @@ void Menu_Switch(void)
 
     if (k1 == KEY_SHORT_PRESS)
     {
-#ifndef ALGORITHM_TEST_ENABLE
         // 常规模式下菜单操作：选中文件时增大数据，未选中时指针上移
         if (pointer->selected == false)
             Key_Up();
         else
             Key_Plus();
-#endif
     }
     else if (k2 == KEY_SHORT_PRESS)
     {
-#ifndef ALGORITHM_TEST_ENABLE
         // 常规模式下菜单操作：选中文件时减小数据，未选中时指针下移
         if (pointer->selected == false)
             Key_Down();
         else
             Key_Sub();
-#endif
     }
     else if (k3 == KEY_SHORT_PRESS)
     {
         // control_set_start_enabled(1);
 
-#if ALGORITHM_TEST_ENABLE
-        // 算法测试自动一次性执行完整路径
-        if (Algo_Test_auto)
-            move_ret = Test_Path_ALL();
-#else
         // 常规模式下菜单操作：进入文件夹或选中/取消选中文件
         if (pointer->kind == MENU_Folder)
             Key_Enter();
@@ -948,22 +879,15 @@ void Menu_Switch(void)
             Key_Select();
         else
             Key_SetupCtrl_Sub();
-#endif
     }
 
     else if (k4 == KEY_SHORT_PRESS)
     {
-#if ALGORITHM_TEST_ENABLE
-        // 算法测试自动执行路径一步
-        if (Algo_Test_auto)
-            move_ret = Test_Path_Step(&move_cmd);
-#else
         // 常规模式下菜单操作：选中文件时调整步进值，未选中时退出文件夹
         if (pointer->kind != MENU_Folder && pointer->selected == true)
             Key_Deselect();
         else
             Key_Exit();
-#endif
     }
 
     key_clear_state(KEY_1);

@@ -595,19 +595,14 @@
               <FilePath>..\code\串口数据处理使用说明.txt</FilePath>
             </File>
             <File>
-              <FileName>算法说明.txt</FileName>
-              <FileType>5</FileType>
-              <FilePath>..\code\算法说明.txt</FilePath>
-            </File>
-            <File>
               <FileName>姿态解算使用说明.txt</FileName>
               <FileType>5</FileType>
               <FilePath>..\code\姿态解算使用说明.txt</FilePath>
             </File>
             <File>
-              <FileName>Control.c</FileName>
+              <FileName>Control_Simple.c</FileName>
               <FileType>1</FileType>
-              <FilePath>..\code\Control.c</FilePath>
+              <FilePath>..\code\Control_Simple.c</FilePath>
             </File>
             <File>
               <FileName>Control.h</FileName>
@@ -623,6 +618,11 @@
               <FileName>wifi.h</FileName>
               <FileType>5</FileType>
               <FilePath>..\code\wifi.h</FilePath>
+            </File>
+            <File>
+              <FileName>Control_Simple.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\code\Control_Simple.h</FilePath>
             </File>
           </Files>
         </Group>

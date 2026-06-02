@@ -1,4 +1,5 @@
 #include "Map_Path_Data.h"
+#include "Control_Simple.h"
 
 // 当前生效地图对象数量
 size_t Obstacles_count = 0; // 当前障碍物数量
@@ -67,3 +68,29 @@ const char *map_text5 =".#.T....#.....\n"
                        "....#.........\n"
                        "....#.......T.\n"
                        "....#.........\n";
+
+/* ========================= 自定义路径（测试用） ========================= */
+
+/*
+ * 路径坐标约定：
+ *   row, col — grid,   1 单位 = GRID_SIZE_M (0.20m)
+ *   id = 0 → Normal waypoint
+ *   id = FAKE_IDENTIFY_POINT (10) → 到达后暂停 2s, pretend to recognize
+ *
+ * 相邻点要求: |Δrow| ≤ 1, |Δcol| ≤ 1
+ *
+ * 本条测试路径：
+ *   起点 (0,0) → 直走 5 格 → 暂停伪装识别 → 右转走 3 格 → 结束
+ */
+Position g_custom_path[MAX_CAR_PATH] = {
+    {0, 0, 0},   //  0: 起点
+    {0, 1, 0},   //  1
+    {0, 2, 0},   //  2
+    {0, 3, 0},   //  3
+    {0, 4, 0},   //  4
+    {0, 5, FAKE_IDENTIFY_POINT},  //  5: 到点暂停 2s 假装识别
+    {1, 5, 0},   //  6: 右转
+    {2, 5, 0},   //  7
+    {3, 5, 0},   //  8: 终点
+};
+size_t g_custom_path_steps = 9U;

@@ -102,6 +102,8 @@ float g_control_prestart_depart_compensate_m = -0.025f;
 #define CONTROL_IDENTIFY_MAX_TARGETS_PER_POINT (MAX_BOXES + MAX_TARGETS)
 #define CONTROL_IDENTIFY_YAW_ALIGN_TOL_DEG 5.0f
 #define CONTROL_IDENTIFY_RECOG_TIMEOUT_LOOPS 250U
+/* 连续超时多少次之后才真正重发识别命令（避免在摄像头处理过程中频繁清 FIFO 重发）。 */
+#define CONTROL_IDENTIFY_RECOG_MAX_RETRIES 5U
 #define CONTROL_IDENTIFY_ID_UNASSIGNED 0xFFU
 #define CONTROL_IDENTIFY_ID_MIN 0U
 #define CONTROL_IDENTIFY_ID_MAX 9U
@@ -241,6 +243,7 @@ static uint8 g_identify_box_id_assigned[MAX_BOXES] = {0U};
 static uint8 g_identify_target_id_assigned[MAX_TARGETS] = {0U};
 static uint8 g_identify_recog_waiting = 0U;
 static uint16 g_identify_recog_wait_loops = 0U;
+static uint8 g_identify_recog_retry_count = 0U;
 static VisionRecognitionType g_identify_recog_wait_type = VISION_RECOGNITION_NONE;
 /* 首个 IMG/NUM 识别结果用于判断后续是否按 ID 配对推箱。 */
 static uint8 g_identify_first_result_checked = 0U;
@@ -482,6 +485,7 @@ static void reset_identify_recognition_wait(void)
 {
     g_identify_recog_waiting = 0U;
     g_identify_recog_wait_loops = 0U;
+    g_identify_recog_retry_count = 0U;
     g_identify_recog_wait_type = VISION_RECOGNITION_NONE;
 }
 
@@ -1014,7 +1018,6 @@ static uint8 start_identify_recognition_request(const control_identify_target_t 
     }
 
     g_identify_recog_wait_loops = 0U;
-    vision_clear_pending_data();
 
     if (target->obj_type == CONTROL_IDENTIFY_OBJ_BOX)
     {
@@ -1130,15 +1133,26 @@ static uint8 identify_action_stub(const control_identify_target_t *target)
     {
         if (!g_identify_first_result_checked)
         {
+            g_identify_recog_retry_count++;
             /*
-             * 首个 IMG/NUM 决定后续 Mode1/Mode2，不能用“主循环轮询超时”直接判无效。
-             * control_process() 没有固定调用周期，250 次循环可能远小于一次 OpenMV 识别耗时；
-             * 超时这里只重发请求继续等，真正收到非 0~9 结果时才切 Mode1。
+             * OpenMV TFLite 推理耗时长（~300-800ms），主循环轮询 250 次可能远小于
+             * 一次识别耗时。连续超时前不要清 FIFO 重发命令，否则会把摄像头刚发回
+             * 的响应字节丢弃，导致永远收不到结果。
+             *
+             * 只在连续多次超时后才真正重发，应对摄像头确实丢命令的极端情况。
              */
-            if (!start_identify_recognition_request(target, distance))
+            if (g_identify_recog_retry_count >= CONTROL_IDENTIFY_RECOG_MAX_RETRIES)
             {
-                return 1U;
+                if (!start_identify_recognition_request(target, distance))
+                {
+                    return 1U;
+                }
+                return 0U;
             }
+            /* 不重发：只重置计数器，清除可能残留的旧 updated 标志，继续等待。 */
+            g_identify_recog_wait_loops = 0U;
+            vision_num_result_updated = false;
+            vision_img_result_updated = false;
             return 0U;
         }
         reset_identify_recognition_wait();

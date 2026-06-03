@@ -15,14 +15,14 @@
 /*
  * 图案/数字识别摄像头通信串口参数。
  *
- * loadmode.py 中 OpenMV 端使用 UART(12), baudrate=115200，
- * 主控端这里默认使用 UART4 与之相连。若实际接线不是 UART4，
+ * OpenMV 端使用 UART(12), baudrate=115200，
+ * 主控端通过 UART3 与之相连。若实际接线不是 UART3，
  * 只需要改下面 4 个宏，不影响地图/车姿串口 UART1 的解析。
  */
-#define VISION_UART_INDEX UART_4
+#define VISION_UART_INDEX UART_8
 #define VISION_UART_BAUDRATE 115200
-#define VISION_UART_TX_PIN UART4_TX_C16
-#define VISION_UART_RX_PIN UART4_RX_C17
+#define VISION_UART_TX_PIN UART8_TX_D16
+#define VISION_UART_RX_PIN UART8_RX_D17
 
 /* FIFO 与解析缓冲大小 */
 #define FIFO_SIZE 512

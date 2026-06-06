@@ -7,8 +7,17 @@
 #define CONTROL_PRESTART_DEPART_DIR_MIN 0U
 #define CONTROL_PRESTART_DEPART_DIR_MAX 4U
 
-/* 自定义路径点标记：到达该位置时自动暂停，假装执行摄像头识别 */
-#define FAKE_IDENTIFY_POINT 10U
+/* 自定义路径点标记：到达后转向面对目标 + 暂停 2 秒。
+ * 方向相对于路径前进方向（FAKE 点 → 下一个路径点）：
+ *   UP(11)    = 正前方（base）
+ *   RIGHT(10) = 右侧（base + 90°）
+ *   DOWN(13)  = 后方（base + 180°）
+ *   LEFT(12)  = 左侧（base - 90°）
+ */
+#define FAKE_IDENTIFY_FACE_RIGHT  10U
+#define FAKE_IDENTIFY_FACE_UP     11U
+#define FAKE_IDENTIFY_FACE_LEFT   12U
+#define FAKE_IDENTIFY_FACE_DOWN   13U
 
 /**
  * @brief 简化版控制流程阶段定义。

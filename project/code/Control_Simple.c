@@ -12,7 +12,6 @@
 #define CONTROL_DEG_TO_RAD                  0.01745329251994329577f
 #define CONTROL_FAKE_IDENTIFY_PAUSE_MS      2000U
 #define CONTROL_ERROR_RETRY_DELAY_MS        3000U
-#define CONTROL_FAKE_IDENTIFY_MAX_PAUSES    20U
 
 #define CONTROL_WORLD_X_MAX_M  ((float)MAP_ROWS * GRID_SIZE_M)
 #define CONTROL_WORLD_Y_MAX_M  ((float)MAP_COLS * GRID_SIZE_M)
@@ -26,6 +25,14 @@ typedef enum
     CONTROL_MAP_DIR_LEFT  = 2U,
     CONTROL_MAP_DIR_DOWN  = 3U
 } control_map_dir_t;
+
+typedef enum
+{
+    EXEC_PREPARE = 0U,
+    EXEC_MOVING,
+    EXEC_ROTATING,
+    EXEC_PAUSING,
+} exec_phase_t;
 
 /* ========================= 外部全局引用 ========================= */
 
@@ -47,6 +54,21 @@ static uint8           g_prestart_move_started    = 0U;
 static uint8           g_fake_identify_started    = 0U;
 static uint8           g_diagonal_enabled         = 1U;
 static uint8           g_control_prestart_depart_dir = 0U;
+
+/* 定点转向相关 */
+typedef struct
+{
+    size_t            index;
+    control_map_dir_t face_dir;
+} fake_point_t;
+
+static fake_point_t g_fake_points[MAX_CAR_PATH]   = {{0}};
+static size_t       g_fake_count                   = 0U;
+static size_t       g_fake_cursor                  = 0U;
+static exec_phase_t g_exec_phase                   = EXEC_PREPARE;
+static size_t       g_exec_seg_start               = 0U;
+static uint8        g_exec_rotate_started          = 0U;
+static uint32       g_exec_pause_counter           = 0U;
 
 /* ========================= 工具函数 ========================= */
 
@@ -94,6 +116,54 @@ static control_map_dir_t get_prestart_depart_map_dir(void)
     }
 }
 
+static uint8 is_fake_identify_id(uint8 id)
+{
+    return (id == FAKE_IDENTIFY_FACE_RIGHT ||
+            id == FAKE_IDENTIFY_FACE_UP    ||
+            id == FAKE_IDENTIFY_FACE_LEFT  ||
+            id == FAKE_IDENTIFY_FACE_DOWN) ? 1U : 0U;
+}
+
+static control_map_dir_t fake_id_to_dir(uint8 id)
+{
+    switch (id)
+    {
+    case FAKE_IDENTIFY_FACE_RIGHT: return CONTROL_MAP_DIR_RIGHT;
+    case FAKE_IDENTIFY_FACE_UP:    return CONTROL_MAP_DIR_UP;
+    case FAKE_IDENTIFY_FACE_LEFT:  return CONTROL_MAP_DIR_LEFT;
+    case FAKE_IDENTIFY_FACE_DOWN:  return CONTROL_MAP_DIR_DOWN;
+    default:                       return CONTROL_MAP_DIR_RIGHT;
+    }
+}
+
+/*
+ * 根据路径几何计算目标航向。
+ * base_yaw = FAKE 点 → 下一个路径点 的 heading。
+ * FACE_RIGHT = 朝行驶方向右侧看（base + 90°）
+ * FACE_UP    = 朝行驶方向正前方看（base）
+ * FACE_LEFT  = 朝行驶方向左侧看（base - 90°）
+ * FACE_DOWN  = 朝行驶方向后方看（base + 180°）
+ */
+static float face_dir_to_target_yaw(control_map_dir_t dir, size_t fake_idx)
+{
+    float base_yaw;
+
+    if (fake_idx + 1U < g_custom_path_steps)
+        base_yaw = path_follow_heading_deg(g_custom_path[fake_idx],
+                                           g_custom_path[fake_idx + 1U]);
+    else
+        base_yaw = g_map_right_yaw_ready ? g_map_right_yaw_deg : eulerAngle.yaw;
+
+    switch (dir)
+    {
+    case CONTROL_MAP_DIR_UP:    return wrap_yaw_deg_local(base_yaw);
+    case CONTROL_MAP_DIR_RIGHT: return wrap_yaw_deg_local(base_yaw + 90.0f);
+    case CONTROL_MAP_DIR_DOWN:  return wrap_yaw_deg_local(base_yaw + 180.0f);
+    case CONTROL_MAP_DIR_LEFT:  return wrap_yaw_deg_local(base_yaw - 90.0f);
+    default:                    return wrap_yaw_deg_local(base_yaw);
+    }
+}
+
 static void begin_path_plan_pause(void) { g_path_plan_paused = 1U; }
 static void end_path_plan_pause(void)   { g_path_plan_paused = 0U; }
 
@@ -119,32 +189,47 @@ static void reset_control_runtime_state(void)
 }
 
 /**
- * @brief 扫描路径中标记为 FAKE_IDENTIFY_POINT 的点，配置为 path_follow 暂停点。
+ * @brief 扫描 g_custom_path，收集所有 FAKE_IDENTIFY_FACE_* 点的索引和朝向。
  */
-static void configure_fake_identify_pauses(const Position *path, size_t steps)
+static void scan_fake_identify_points(void)
 {
-    size_t pause_indices[CONTROL_FAKE_IDENTIFY_MAX_PAUSES] = {0U};
-    size_t pause_count = 0U;
+    size_t i;
+    g_fake_count  = 0U;
+    g_fake_cursor = 0U;
+    memset(g_fake_points, 0, sizeof(g_fake_points));
+
+    for (i = 0U; i < g_custom_path_steps; i++)
+    {
+        if (is_fake_identify_id(g_custom_path[i].id))
+        {
+            if (g_fake_count < MAX_CAR_PATH)
+            {
+                g_fake_points[g_fake_count].index    = i;
+                g_fake_points[g_fake_count].face_dir =
+                    fake_id_to_dir(g_custom_path[i].id);
+                g_fake_count++;
+            }
+        }
+    }
+}
+
+/**
+ * @brief 将 g_custom_path 的一段拷贝到临时数组并下发给 path_follow。
+ */
+static void load_segment(size_t start_idx, size_t end_idx)
+{
+    Position seg[MAX_CAR_PATH];
+    size_t seg_steps = end_idx - start_idx + 1U;
     size_t i;
 
-    if (path == NULL || steps == 0U)
-    {
-        path_follow_set_pause_indices(NULL, 0U, 0U);
-        return;
-    }
+    if (seg_steps > MAX_CAR_PATH)
+        seg_steps = MAX_CAR_PATH;
 
-    for (i = 0U; i < steps; i++)
-    {
-        if (path[i].id != FAKE_IDENTIFY_POINT) continue;
-        if (pause_count >= CONTROL_FAKE_IDENTIFY_MAX_PAUSES) break;
-        pause_indices[pause_count++] = i;
-    }
+    for (i = 0U; i < seg_steps; i++)
+        seg[i] = g_custom_path[start_idx + i];
 
-    if (pause_count > 0U)
-        path_follow_set_pause_indices(pause_indices, pause_count,
-                                      CONTROL_FAKE_IDENTIFY_PAUSE_MS);
-    else
-        path_follow_set_pause_indices(NULL, 0U, 0U);
+    path_follow_hold_current_yaw();
+    path_follow_set_path(seg, seg_steps);
 }
 
 /* ========================= Handler 函数 ========================= */
@@ -241,8 +326,8 @@ static void handle_fake_identify_pause(void)
 /**
  * @brief 装载自定义路径阶段。
  *
- * 将用户定义的 g_custom_path 复制到内部执行路径缓存，
- * 配置假装识别暂停点，下发给 path_follow 并启动运动。
+ * 扫描 g_custom_path 中的所有 FAKE_IDENTIFY_FACE_* 点，
+ * 初始化分段执行状态：每段从一个 FAKE 点到下一个 FAKE 点（或路径终点）。
  */
 static void handle_load_custom_path(void)
 {
@@ -254,37 +339,118 @@ static void handle_load_custom_path(void)
 
     begin_path_plan_pause();
 
+    /*
+     * 保留 g_exec_path 供 control_get_exec_path() 返回，但实际执行
+     * 不再一次下发整条路径，而是由 handle_execute_path() 分段下发。
+     */
     memcpy(g_exec_path, g_custom_path, g_custom_path_steps * sizeof(Position));
     g_exec_steps = g_custom_path_steps;
     g_plan_ready = 1U;
 
-    configure_fake_identify_pauses(g_exec_path, g_exec_steps);
-    path_follow_hold_current_yaw();
-    path_follow_set_path(g_exec_path, g_exec_steps);
+    scan_fake_identify_points();
 
-    car_go_flag  = 1U;
-    car_stop_flag = 0U;
+    g_exec_phase          = EXEC_PREPARE;
+    g_exec_seg_start      = 0U;
+    g_exec_rotate_started = 0U;
+    g_exec_pause_counter  = 0U;
 
     end_path_plan_pause();
     g_control_stage = CONTROL_STAGE_EXECUTE_PATH;
 }
 
 /**
- * @brief 路径执行阶段。
+ * @brief 路径执行阶段（分段 + 定点转向）。
  *
- * 轮询 path_follow 状态。路径全部跑完后进入完成态。
- * 路径中途的暂停点由 path_follow 内部 pause_indices 机制自动处理。
+ * EXEC_PREPARE  → 装载当前段路径，启动行驶
+ * EXEC_MOVING   → 等待 path_follow 跑完当前段
+ * EXEC_ROTATING → 到达 FAKE_IDENTIFY_FACE_* 点后，原地旋转面对目标
+ * EXEC_PAUSING  → 旋转到位后停车约 2 秒，然后回到 PREPARE 装载下一段
  */
 static void handle_execute_path(void)
 {
     path_follow_status_t st = {0};
-
     path_follow_get_status(&st);
-    if (!st.active)
+
+    switch (g_exec_phase)
     {
+    case EXEC_PREPARE:
+    {
+        size_t seg_end;
+        if (g_fake_cursor < g_fake_count)
+            seg_end = g_fake_points[g_fake_cursor].index;
+        else
+            seg_end = g_custom_path_steps - 1U;
+
+        load_segment(g_exec_seg_start, seg_end);
+        car_go_flag  = 1U;
+        car_stop_flag = 0U;
+        g_exec_phase = EXEC_MOVING;
+        break;
+    }
+
+    case EXEC_MOVING:
+        if (st.active)
+            return;
+
+        /* 段行驶完成。若刚到达的是 FAKE 点则旋转 + 暂停。 */
+        if (g_fake_cursor < g_fake_count)
+        {
+            g_fake_cursor++;
+            g_exec_rotate_started = 0U;
+            g_exec_phase = EXEC_ROTATING;
+            return;
+        }
+
+        /* 没有更多 FAKE 点 → 完成 */
         car_go_flag  = 1U;
         car_stop_flag = 1U;
         g_control_stage = CONTROL_STAGE_FINISHED;
+        break;
+
+    case EXEC_ROTATING:
+    {
+        const fake_point_t *fp = &g_fake_points[g_fake_cursor - 1U];
+        float target_yaw = face_dir_to_target_yaw(fp->face_dir, fp->index);
+
+        if (!g_exec_rotate_started)
+        {
+            path_follow_start_rotate_to_yaw(target_yaw);
+            car_go_flag  = 1U;
+            car_stop_flag = 0U;
+            g_exec_rotate_started = 1U;
+            return;
+        }
+
+        if (!st.active)
+        {
+            g_exec_pause_counter = 0U;
+            g_exec_phase = EXEC_PAUSING;
+        }
+        break;
+    }
+
+    case EXEC_PAUSING:
+    {
+        /*
+         * 暂停循环计数近似 2 秒（假设主循环 ~250Hz）。
+         * 若不准，调整 CONTROL_FAKE_IDENTIFY_PAUSE_LOOPS。
+         */
+        #define CONTROL_FAKE_IDENTIFY_PAUSE_LOOPS 500U
+
+        car_go_flag  = 1U;
+        car_stop_flag = 1U;
+        g_exec_pause_counter++;
+        if (g_exec_pause_counter >= CONTROL_FAKE_IDENTIFY_PAUSE_LOOPS)
+        {
+            g_exec_seg_start = g_fake_points[g_fake_cursor - 1U].index;
+            g_exec_phase = EXEC_PREPARE;
+        }
+        break;
+    }
+
+    default:
+        g_control_stage = CONTROL_STAGE_FINISHED;
+        break;
     }
 }
 
@@ -307,6 +473,14 @@ static void handle_error(void)
     g_map_right_yaw_ready   = 0U;
     g_fake_identify_started = 0U;
     g_plan_ready            = 0U;
+
+    g_fake_count            = 0U;
+    g_fake_cursor           = 0U;
+    g_exec_phase            = EXEC_PREPARE;
+    g_exec_seg_start        = 0U;
+    g_exec_rotate_started   = 0U;
+    g_exec_pause_counter    = 0U;
+
     g_control_stage = CONTROL_STAGE_FAKE_LOCALIZE;
 }
 

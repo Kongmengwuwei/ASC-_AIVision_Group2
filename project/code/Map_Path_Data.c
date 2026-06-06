@@ -75,12 +75,12 @@ const char *map_text5 =".#.T....#.....\n"
  * 路径坐标约定：
  *   row, col — grid,   1 单位 = GRID_SIZE_M (0.20m)
  *   id = 0 → Normal waypoint
- *   id = FAKE_IDENTIFY_POINT (10) → 到达后暂停 2s, pretend to recognize
+ *   id = FAKE_IDENTIFY_FACE_* → 到达后转向面对目标 + 暂停 2s
  *
  * 相邻点要求: |Δrow| ≤ 1, |Δcol| ≤ 1
  *
  * 本条测试路径：
- *   起点 (0,0) → 直走 5 格 → 暂停伪装识别 → 右转走 3 格 → 结束
+ *   起点 (0,0) → 直走 5 格 → 右转面对目标 + 暂停 → 继续右转走 3 格 → 结束
  */
 Position g_custom_path[MAX_CAR_PATH] = {
     {0, 0, 0},   //  0: 起点
@@ -88,7 +88,7 @@ Position g_custom_path[MAX_CAR_PATH] = {
     {0, 2, 0},   //  2
     {0, 3, 0},   //  3
     {0, 4, 0},   //  4
-    {0, 5, FAKE_IDENTIFY_POINT},  //  5: 到点暂停 2s 假装识别
+    {0, 5, FAKE_IDENTIFY_FACE_RIGHT},  //  5: 停车→朝右看→停2s→继续
     {1, 5, 0},   //  6: 右转
     {2, 5, 0},   //  7
     {3, 5, 0},   //  8: 终点

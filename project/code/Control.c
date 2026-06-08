@@ -1,4 +1,5 @@
 #include "Control.h"
+#include "Algorithm_Test.h"
 #include "data_handle.h"
 #include "Game_logic.h"
 #include "Map_Path_Data.h"
@@ -56,6 +57,7 @@ float g_control_prestart_depart_compensate_m = -0.025f;
 #define CONTROL_REQ_CAR_RETRY_TIMEOUT_LOOPS 200U
 /* Wait before consuming CAR pose frames to avoid using delayed camera data. */
 #define CONTROL_CAMERA_POSE_SETTLE_DELAY_MS 200U
+#define CONTROL_PRESET_RECOGNITION_DELAY_MS 500U
 /* 推炸弹到爆炸点后停留 0.5s，等待爆炸效果生效 */
 #define CONTROL_BOMB_EXPLOSION_PAUSE_MS 500U
 /* 多轮模式下总共发车/执行的次数。 */
@@ -426,6 +428,15 @@ static void clear_car_request_wait(void)
 
 static void send_map_request_once(void)
 {
+#if ALGORITHM_TEST_ENABLE
+    if (Algorithm_Test_PresetInput_IsEnabled())
+    {
+        (void)Algorithm_Test_PresetInput_ProvideMapFrame();
+        g_map_request_waiting = 0U;
+        g_map_request_wait_loops = 0U;
+        return;
+    }
+#endif
     uart_send_map_request();
     g_map_request_waiting = 1U;
     g_map_request_wait_loops = 0U;
@@ -433,6 +444,15 @@ static void send_map_request_once(void)
 
 static void send_car_request_once(void)
 {
+#if ALGORITHM_TEST_ENABLE
+    if (Algorithm_Test_PresetInput_IsEnabled())
+    {
+        (void)Algorithm_Test_PresetInput_ProvideCarPoseFrame();
+        g_car_request_waiting = 0U;
+        g_car_request_wait_loops = 0U;
+        return;
+    }
+#endif
     uart_send_car_request();
     g_car_request_waiting = 1U;
     g_car_request_wait_loops = 0U;
@@ -892,28 +912,28 @@ static void finalize_identify_ids_for_pushbox(void)
 
     for (i = 0U; i < box_cnt; i++)
     {
-        if (g_identify_box_id_assigned[i] && boxes[i].id != CONTROL_IDENTIFY_ID_UNASSIGNED)
+        if (g_identify_box_id_assigned[i])
         {
             box_id_count[boxes[i].id]++;
             has_any_assigned = 1U;
         }
         else if (unassigned_box_count < MAX_BOXES)
         {
-            boxes[i].id = CONTROL_IDENTIFY_ID_UNASSIGNED;
+            boxes[i].id = MAP_PRESET_UNKNOWN_ID;
             unassigned_box_indices[unassigned_box_count++] = i;
         }
     }
 
     for (i = 0U; i < target_cnt; i++)
     {
-        if (g_identify_target_id_assigned[i] && targets[i].id != CONTROL_IDENTIFY_ID_UNASSIGNED)
+        if (g_identify_target_id_assigned[i])
         {
             target_id_count[targets[i].id]++;
             has_any_assigned = 1U;
         }
         else if (unassigned_target_count < MAX_TARGETS)
         {
-            targets[i].id = CONTROL_IDENTIFY_ID_UNASSIGNED;
+            targets[i].id = MAP_PRESET_UNKNOWN_ID;
             unassigned_target_indices[unassigned_target_count++] = i;
         }
     }
@@ -1061,6 +1081,69 @@ static uint8 identify_action_stub(const control_identify_target_t *target)
     car_go_flag = 1U;
     car_stop_flag = 1U;
 
+#if ALGORITHM_TEST_ENABLE
+    if (Algorithm_Test_PresetInput_IsEnabled())
+    {
+        map_preset_plan_mode_t preset_mode = Algorithm_Test_PresetInput_GetPlanMode();
+        result.type = (target->obj_type == CONTROL_IDENTIFY_OBJ_BOX) ? VISION_RECOGNITION_IMG : VISION_RECOGNITION_NUM;
+
+        system_delay_ms(CONTROL_PRESET_RECOGNITION_DELAY_MS);
+
+        if (preset_mode == MAP_PRESET_PLAN_MODE1)
+        {
+            result.success = false;
+            result.mode_marker = true;
+            result.label_is_number = false;
+            result.label_value = -1;
+            valid_id = 0U;
+        }
+        else
+        {
+            result.success = true;
+            result.mode_marker = false;
+            if (Algorithm_Test_PresetInput_GetObjectId(target->obj_pos_map,
+                                                       (target->obj_type == CONTROL_IDENTIFY_OBJ_TARGET) ? 1U : 0U,
+                                                       &recognized_id))
+            {
+                result.label_is_number = true;
+                result.label_value = (int32)recognized_id;
+                valid_id = 1U;
+            }
+            else
+            {
+                result.label_is_number = false;
+                result.label_value = -1;
+                valid_id = 0U;
+            }
+        }
+
+        if (!update_plan_mode_from_first_identify_result(&result, valid_id))
+        {
+            return 0U;
+        }
+
+        if (target->obj_type == CONTROL_IDENTIFY_OBJ_BOX &&
+            target->obj_index < MAX_BOXES &&
+            target->obj_index < Boxes_count &&
+            valid_id)
+        {
+            boxes[target->obj_index].id = recognized_id;
+            g_identify_box_id_assigned[target->obj_index] = 1U;
+        }
+        else if (target->obj_type == CONTROL_IDENTIFY_OBJ_TARGET &&
+                 target->obj_index < MAX_TARGETS &&
+                 target->obj_index < Targets_count &&
+                 valid_id)
+        {
+            targets[target->obj_index].id = recognized_id;
+            g_identify_target_id_assigned[target->obj_index] = 1U;
+        }
+
+        reset_identify_recognition_wait();
+        return 1U;
+    }
+#endif
+
     if (!g_identify_recog_waiting)
     {
         /*
@@ -1181,6 +1264,51 @@ static void identify_sort_targets_by_direction(void)
     }
 }
 
+static void add_identify_target_if_nearest(Position object_pos,
+                                           control_map_dir_t face_dir,
+                                           control_identify_obj_t obj_type,
+                                           uint8 obj_index,
+                                           int32 manhattan)
+{
+    size_t slot = CONTROL_IDENTIFY_MAX_TARGETS_PER_POINT;
+    size_t i = 0U;
+    control_identify_target_t candidate = {0};
+
+    for (i = 0U; i < g_identify_target_count; i++)
+    {
+        if (g_identify_targets[i].face_dir == face_dir)
+        {
+            slot = i;
+            break;
+        }
+    }
+
+    if (slot < g_identify_target_count)
+    {
+        uint8 old_dist = (g_identify_targets[slot].recog_distance == VISION_RECOGNITION_DISTANCE_TWO_GRID) ? 2U : 1U;
+        if ((uint8)manhattan >= old_dist)
+        {
+            return;
+        }
+    }
+    else
+    {
+        if (g_identify_target_count >= CONTROL_IDENTIFY_MAX_TARGETS_PER_POINT)
+        {
+            return;
+        }
+        slot = g_identify_target_count++;
+    }
+
+    candidate.obj_pos_map = object_pos;
+    candidate.face_dir = face_dir;
+    candidate.obj_type = obj_type;
+    candidate.recog_distance = (manhattan == 2) ? VISION_RECOGNITION_DISTANCE_TWO_GRID :
+                                                 VISION_RECOGNITION_DISTANCE_ONE_GRID;
+    candidate.obj_index = obj_index;
+    g_identify_targets[slot] = candidate;
+}
+
 static uint8 identify_cell_has_blocker(uint8 row, uint8 col)
 {
     size_t i = 0U;
@@ -1285,19 +1413,11 @@ static uint8 collect_identify_targets_on_exec_point(const Position *exec_point)
         {
             continue;
         }
-        if (g_identify_target_count >= CONTROL_IDENTIFY_MAX_TARGETS_PER_POINT)
-        {
-            break;
-        }
-
-        g_identify_targets[g_identify_target_count].obj_pos_map = boxes[i];
-        g_identify_targets[g_identify_target_count].face_dir = face_dir;
-        g_identify_targets[g_identify_target_count].obj_type = CONTROL_IDENTIFY_OBJ_BOX;
-        g_identify_targets[g_identify_target_count].recog_distance =
-            (manhattan == 2) ? VISION_RECOGNITION_DISTANCE_TWO_GRID :
-                               VISION_RECOGNITION_DISTANCE_ONE_GRID;
-        g_identify_targets[g_identify_target_count].obj_index = (uint8)i;
-        g_identify_target_count++;
+        add_identify_target_if_nearest(boxes[i],
+                                       face_dir,
+                                       CONTROL_IDENTIFY_OBJ_BOX,
+                                       (uint8)i,
+                                       manhattan);
     }
 
     for (i = 0U; i < Targets_count; i++)
@@ -1323,19 +1443,11 @@ static uint8 collect_identify_targets_on_exec_point(const Position *exec_point)
         {
             continue;
         }
-        if (g_identify_target_count >= CONTROL_IDENTIFY_MAX_TARGETS_PER_POINT)
-        {
-            break;
-        }
-
-        g_identify_targets[g_identify_target_count].obj_pos_map = targets[i];
-        g_identify_targets[g_identify_target_count].face_dir = face_dir;
-        g_identify_targets[g_identify_target_count].obj_type = CONTROL_IDENTIFY_OBJ_TARGET;
-        g_identify_targets[g_identify_target_count].recog_distance =
-            (manhattan == 2) ? VISION_RECOGNITION_DISTANCE_TWO_GRID :
-                               VISION_RECOGNITION_DISTANCE_ONE_GRID;
-        g_identify_targets[g_identify_target_count].obj_index = (uint8)i;
-        g_identify_target_count++;
+        add_identify_target_if_nearest(targets[i],
+                                       face_dir,
+                                       CONTROL_IDENTIFY_OBJ_TARGET,
+                                       (uint8)i,
+                                       manhattan);
     }
 
     identify_sort_targets_by_direction();
@@ -1621,6 +1733,15 @@ static void settle_camera_before_localization_once(void)
     {
         return;
     }
+
+#if ALGORITHM_TEST_ENABLE
+    if (Algorithm_Test_PresetInput_IsEnabled())
+    {
+        (void)Algorithm_Test_PresetInput_ProvideCarPoseFrame();
+        g_localize_camera_settled = 1U;
+        return;
+    }
+#endif
 
     /* Wait once at the start of a localization phase, then parse the latest CAR frame. */
     system_delay_ms(CONTROL_CAMERA_POSE_SETTLE_DELAY_MS);
@@ -2451,6 +2572,9 @@ void control_init(void)
 void control_restart(void)
 {
     reset_control_runtime_state();
+#if ALGORITHM_TEST_ENABLE
+    Algorithm_Test_PresetInput_Init(ALGORITHM_TEST_PRESET_INDEX);
+#endif
 }
 
 void control_set_start_enabled(uint8 enabled)
@@ -2496,8 +2620,16 @@ void control_process(void)
      *
      * 这样主状态机保留“流程骨架”，阶段细节放在命名函数里，后续调车时更容易定位问题。
      */
+#if ALGORITHM_TEST_ENABLE
+    if (!Algorithm_Test_PresetInput_IsEnabled())
+    {
+        process_blob_data();
+        process_vision_data();
+    }
+#else
     process_blob_data();
     process_vision_data();
+#endif
 
     if (!g_control_start_enabled)
     {

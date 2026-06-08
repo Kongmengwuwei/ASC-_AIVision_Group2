@@ -14,6 +14,14 @@
 #define MAX_TARGETS 10
 #define MAX_BOMBS 10
 #define MAX_CAR_PATH 1000
+#define MAP_PRESET_UNKNOWN_ID 0U
+
+typedef enum
+{
+    MAP_PRESET_PLAN_IDENTIFY = 0U,
+    MAP_PRESET_PLAN_MODE1 = 1U,
+    MAP_PRESET_PLAN_MODE2 = 2U
+} map_preset_plan_mode_t;
 
 //路径特殊点ID定义
 #define BOMB_EXPLOSION 1        // 炸弹爆炸位置标记
@@ -39,6 +47,22 @@ typedef struct
     float yaw;
 } CarPose;
 
+typedef struct
+{
+    const char *name;
+    map_preset_plan_mode_t plan_mode;
+    Position car_start;
+    float car_yaw_deg;
+    size_t obstacles_count;
+    size_t boxes_count;
+    size_t targets_count;
+    size_t bombs_count;
+    Position obstacles[MAX_OBSTACLES];
+    Position boxes[MAX_BOXES];
+    Position targets[MAX_TARGETS];
+    Position bombs[MAX_BOMBS];
+} MapPresetConfig;
+
 // 当前生效对象数量
 extern size_t Obstacles_count; // 当前障碍物数量
 extern size_t Boxes_count;     // 当前箱子数量
@@ -60,5 +84,8 @@ extern const char *map_text2; // 预设地图文本2
 extern const char *map_text3; // 预设地图文本3
 extern const char *map_text4; // 预设地图文本4
 extern const char *map_text5; // 预设地图文本5
+
+extern const MapPresetConfig map_presets[];
+extern const size_t Map_preset_count;
 
 #endif 

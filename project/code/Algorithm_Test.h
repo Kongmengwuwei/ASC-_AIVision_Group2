@@ -3,6 +3,18 @@
 
 #include "Map_Path_Data.h"
 
+#ifndef ALGORITHM_TEST_ENABLE
+#define ALGORITHM_TEST_ENABLE 1
+#endif
+
+#ifndef ALGORITHM_TEST_PRESET_INDEX
+#define ALGORITHM_TEST_PRESET_INDEX 0U
+#endif
+
+#ifndef ALGORITHM_TEST_MANUAL_SIM_ENABLE
+#define ALGORITHM_TEST_MANUAL_SIM_ENABLE 0
+#endif
+
 // 地图位图标志定义（按位存储）
 #define CELL_OBSTACLE 0x01
 #define CELL_BOX      0x02
@@ -57,5 +69,13 @@ int Test_Path_Step(char *out_cmd);
  * 说明：若路径中存在相邻重复点，会自动跳过该点。
  */
 int Test_Path_ALL(void);
+
+void Algorithm_Test_PresetInput_Init(size_t preset_index);
+uint8 Algorithm_Test_PresetInput_IsEnabled(void);
+const MapPresetConfig *Algorithm_Test_PresetInput_GetActive(void);
+map_preset_plan_mode_t Algorithm_Test_PresetInput_GetPlanMode(void);
+uint8 Algorithm_Test_PresetInput_ProvideMapFrame(void);
+uint8 Algorithm_Test_PresetInput_ProvideCarPoseFrame(void);
+uint8 Algorithm_Test_PresetInput_GetObjectId(Position object_pos, uint8 is_target, uint8 *id_out);
 
 #endif

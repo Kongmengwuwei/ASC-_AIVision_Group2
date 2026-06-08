@@ -41,8 +41,6 @@
 #define PIT_PRIORITY_1 (PIT_IRQn)
 #define PIT_PRIORITY_2 (PIT_IRQn)
 
-#define ALGORITHM_TEST_ENABLE 0 // 1: 启用算法测试，使用预设地图数据进行路径规划测试；0: 关闭算法测试，正常运行控制流程
-
 int main(void)
 {
   clock_init(SYSTEM_CLOCK_600M); // 不可删除
@@ -81,31 +79,13 @@ int main(void)
 
   control_init();
 
-  // 算法测试
 #if ALGORITHM_TEST_ENABLE
-  parse_map_from_string(map_text3);
-
-  boxes[0].id = 0;
-  boxes[1].id = 1;
-  boxes[2].id = 2;
-  targets[0].id = 0;
-  targets[1].id = 1;
-  targets[2].id = 2;
-
-  Test_Data_Load();     // 数据加载到内部测试地图
-  Plan_path_Identify(); // 路径规划
-
-  Test_Path_Init(); // 路径初始化
+  Algorithm_Test_PresetInput_Init(ALGORITHM_TEST_PRESET_INDEX);
 #endif
 
   // 主循环
   while (1)
   {
-    // 算法测试
-#if ALGORITHM_TEST_ENABLE
-    Test_Data_Save(); // 将内部测试地图数据保存回全局数组
-#endif
-
     // 控制主流程：初始定位 -> 摄像头数据到齐 -> 路径规划 -> 路径执行 -> 执行中动态校正
     control_process();
 

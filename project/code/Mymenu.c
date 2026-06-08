@@ -22,7 +22,7 @@ control_plan_mode_t plan_mode = CONTROL_PLAN_MODE_1;
 
 uint8 test1 = 0;
 
-#if ALGORITHM_TEST_ENABLE
+#if ALGORITHM_TEST_MANUAL_SIM_ENABLE
 char move_cmd = 'X'; // 移动命令缓存
 uint8 move_ret = 0;  // 移动结果缓存
 #endif
@@ -42,6 +42,11 @@ static void draw_exec_path_diamond(uint16 center_x, uint16 center_y)
             ips200_draw_line(x0, center_y - dy, x1, center_y - dy, RGB565_BLUE);
         }
     }
+}
+
+static uint8 display_object_id(uint8 id)
+{
+    return (id == 0xFFU) ? 0U : id;
 }
 
 // 创建菜单
@@ -416,14 +421,14 @@ void Show_Map(void)
     {
         id_sig = (id_sig ^ (uint32)(uint16)boxes[i].row) * 16777619u;
         id_sig = (id_sig ^ (uint32)(uint16)boxes[i].col) * 16777619u;
-        id_sig = (id_sig ^ (uint32)(uint16)boxes[i].id) * 16777619u;
+        id_sig = (id_sig ^ (uint32)(uint16)display_object_id(boxes[i].id)) * 16777619u;
     }
     id_sig = (id_sig ^ (uint32)Targets_count) * 16777619u;
     for (size_t i = 0; i < Targets_count; i++)
     {
         id_sig = (id_sig ^ (uint32)(uint16)targets[i].row) * 16777619u;
         id_sig = (id_sig ^ (uint32)(uint16)targets[i].col) * 16777619u;
-        id_sig = (id_sig ^ (uint32)(uint16)targets[i].id) * 16777619u;
+        id_sig = (id_sig ^ (uint32)(uint16)display_object_id(targets[i].id)) * 16777619u;
     }
 
     uint8 force_redraw = (inited == 0U ||
@@ -538,7 +543,7 @@ void Show_Map(void)
         uint16 cell_y = start_y + (uint16)(r + inner_row_offset) * cell_size;
 
         char id_buf[8];
-        sprintf(id_buf, "%d", boxes[i].id);
+        sprintf(id_buf, "%u", (unsigned int)display_object_id(boxes[i].id));
         uint16 text_w = (uint16)strlen(id_buf) * 6U;
         uint16 text_x = cell_x + ((text_w < cell_size) ? ((cell_size - text_w) / 2U) : 0U);
         uint16 text_y = cell_y + 1U;
@@ -560,7 +565,7 @@ void Show_Map(void)
         uint16 cell_y = start_y + (uint16)(r + inner_row_offset) * cell_size;
 
         char id_buf[8];
-        sprintf(id_buf, "%d", targets[i].id);
+        sprintf(id_buf, "%u", (unsigned int)display_object_id(targets[i].id));
         uint16 text_w = (uint16)strlen(id_buf) * 6U;
         uint16 text_x = cell_x + ((text_w < cell_size) ? ((cell_size - text_w) / 2U) : 0U);
         uint16 text_y = cell_y + 1U;
@@ -670,7 +675,7 @@ void Show_Map(void)
     // ips200_show_string(start_x + (map_cols + 1) * cell_size, start_y + FONT_H * 2, "BOM:");
     // ips200_show_uint(start_x + (map_cols + 1) * cell_size + FONT_W * 5, start_y + FONT_H * 2, Bombs_count, 2);
 
-#if ALGORITHM_TEST_ENABLE
+#if ALGORITHM_TEST_MANUAL_SIM_ENABLE
     ips200_show_char(start_x + (map_cols + 1) * cell_size, start_y + FONT_H * 5, move_cmd);
     ips200_show_int(start_x + (map_cols + 1) * cell_size + FONT_W * 3, start_y + FONT_H * 5, move_ret, 1);
 #endif
@@ -934,7 +939,7 @@ void Menu_Switch(void)
 
     if (k1 == KEY_SHORT_PRESS)
     {
-#ifndef ALGORITHM_TEST_ENABLE
+#if !ALGORITHM_TEST_MANUAL_SIM_ENABLE
         // 常规模式下菜单操作：选中文件时增大数据，未选中时指针上移
         if (pointer->selected == false)
             Key_Up();
@@ -944,7 +949,7 @@ void Menu_Switch(void)
     }
     else if (k2 == KEY_SHORT_PRESS)
     {
-#ifndef ALGORITHM_TEST_ENABLE
+#if !ALGORITHM_TEST_MANUAL_SIM_ENABLE
         // 常规模式下菜单操作：选中文件时减小数据，未选中时指针下移
         if (pointer->selected == false)
             Key_Down();
@@ -956,7 +961,7 @@ void Menu_Switch(void)
     {
         // control_set_start_enabled(1);
 
-#if ALGORITHM_TEST_ENABLE
+#if ALGORITHM_TEST_MANUAL_SIM_ENABLE
         // 算法测试自动一次性执行完整路径
         if (Algo_Test_auto)
             move_ret = Test_Path_ALL();
@@ -973,7 +978,7 @@ void Menu_Switch(void)
 
     else if (k4 == KEY_SHORT_PRESS)
     {
-#if ALGORITHM_TEST_ENABLE
+#if ALGORITHM_TEST_MANUAL_SIM_ENABLE
         // 算法测试自动执行路径一步
         if (Algo_Test_auto)
             move_ret = Test_Path_Step(&move_cmd);

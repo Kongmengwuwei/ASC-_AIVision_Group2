@@ -9,8 +9,7 @@ uint8 car_stop_flag = 0; // 停车标志
 
 static bool startup_start_switch = false;
 static bool startup_reset_switch = false;
-static uint8 startup_depart_dir_value = 0U;
-static bool diagonal_path_switch = true;
+static uint8 startup_start_route_value = 1U;
 
 path_follow_status_t path_follow_status = {0};
 
@@ -38,24 +37,21 @@ void Menu_Create(void)
 {
     // 在此动态创建文件夹 //
     Menu_Item *Startup = Create_Menu_Folder_dynamic(&Root, "Startup");
-    Menu_Item *Setting = Create_Menu_Folder_dynamic(&Root, "Setting");
     Menu_Item *Data = Create_Menu_Folder_dynamic(&Root, "Data");
 
     // 在此动态创建文件 //
     Create_Menu_File_dynamic(Startup, "Start", &startup_start_switch, bool_Box);
     Create_Menu_File_dynamic(Startup, "Reset", &startup_reset_switch, bool_Box);
-    Create_Menu_File_dynamic(Startup, "Start_Dir", &startup_depart_dir_value, uint8_Box);
+    Create_Menu_File_dynamic(Startup, "StartMap", &startup_start_route_value, uint8_Box);
 
     Create_Menu_File_dynamic(Data, "test", &test1, uint8_Box);
-    Create_Menu_File_dynamic(Setting, "DiagPath", &diagonal_path_switch, bool_Box);
 }
 
 static void Menu_Sync_Control_State(void)
 {
     startup_start_switch = (control_get_start_enabled() != 0U);
     startup_reset_switch = false;
-    startup_depart_dir_value = control_get_prestart_depart_dir();
-    diagonal_path_switch = (control_get_diagonal_path_enabled() != 0U);
+    startup_start_route_value = control_get_start_route_index();
 }
 
 
@@ -84,13 +80,6 @@ static bool Menu_Handle_Control_Bool(Menu_Item *item, bool value)
         return true;
     }
 
-    if (item->data == &diagonal_path_switch)
-    {
-        diagonal_path_switch = value;
-        control_set_diagonal_path_enabled(value ? 1U : 0U);
-        return true;
-    }
-
     return false;
 }
 
@@ -103,20 +92,20 @@ static bool Menu_Handle_Control_Uint8(Menu_Item *item, int16 delta)
         return false;
     }
 
-    if (item->data == &startup_depart_dir_value)
+    if (item->data == &startup_start_route_value)
     {
-        value = (int16)startup_depart_dir_value + delta;
-        if (value < (int16)CONTROL_PRESTART_DEPART_DIR_MIN)
+        value = (int16)startup_start_route_value + delta;
+        if (value < (int16)CONTROL_PRESET_START_ROUTE_MIN)
         {
-            value = (int16)CONTROL_PRESTART_DEPART_DIR_MIN;
+            value = (int16)CONTROL_PRESET_START_ROUTE_MIN;
         }
-        else if (value > (int16)CONTROL_PRESTART_DEPART_DIR_MAX)
+        else if (value > (int16)CONTROL_PRESET_START_ROUTE_MAX)
         {
-            value = (int16)CONTROL_PRESTART_DEPART_DIR_MAX;
+            value = (int16)CONTROL_PRESET_START_ROUTE_MAX;
         }
 
-        startup_depart_dir_value = (uint8)value;
-        control_set_prestart_depart_dir(startup_depart_dir_value);
+        startup_start_route_value = (uint8)value;
+        control_set_start_route_index(startup_start_route_value);
         return true;
     }
 
@@ -646,20 +635,38 @@ void State_Show(void)
     case CONTROL_STAGE_PRESTART_MOVE:
         ips200_show_uint(216, 132, 1, 2);
         break;
-    case CONTROL_STAGE_FAKE_LOCALIZE:
+    case CONTROL_STAGE_SNAP_TO_LANDING:
         ips200_show_uint(216, 132, 20, 2);
         break;
-    case CONTROL_STAGE_FAKE_IDENTIFY_PAUSE:
+    case CONTROL_STAGE_PRE_IDENTIFY_PAUSE:
         ips200_show_uint(216, 132, 21, 2);
         break;
-    case CONTROL_STAGE_LOAD_CUSTOM_PATH:
+    case CONTROL_STAGE_LOAD_SEGMENT:
         ips200_show_uint(216, 132, 22, 2);
         break;
-    case CONTROL_STAGE_EXECUTE_PATH:
+    case CONTROL_STAGE_RUN_SEGMENT:
         ips200_show_uint(216, 132, 23, 2);
         break;
-    case CONTROL_STAGE_FINISHED:
+    case CONTROL_STAGE_ROTATE_AT_POINT:
         ips200_show_uint(216, 132, 24, 2);
+        break;
+    case CONTROL_STAGE_PAUSE_AT_POINT:
+        ips200_show_uint(216, 132, 25, 2);
+        break;
+    case CONTROL_STAGE_RETURN_YAW_AT_END:
+        ips200_show_uint(216, 132, 26, 2);
+        break;
+    case CONTROL_STAGE_MAP_END_WAIT:
+        ips200_show_uint(216, 132, 27, 2);
+        break;
+    case CONTROL_STAGE_NEXT_ROUTE:
+        ips200_show_uint(216, 132, 28, 2);
+        break;
+    case CONTROL_STAGE_FINISHED:
+        ips200_show_uint(216, 132, 29, 2);
+        break;
+    case CONTROL_STAGE_RETURN_TO_START_ZONE:
+        ips200_show_uint(216, 132, 30, 2);
         break;
     case CONTROL_STAGE_ERROR:
         ips200_show_uint(216, 132, 99, 2);
@@ -670,6 +677,12 @@ void State_Show(void)
 
     ips200_show_string(0, 144, "Speed:");
     ips200_show_float(56, 144, path_follow_status.speed_ref_cmps, 1, 2);
+    ips200_show_string(168, 144, "R:");
+    ips200_show_uint(184, 144, control_get_current_route_index(), 1);
+    ips200_show_char(192, 144, '/');
+    ips200_show_uint(200, 144, CONTROL_PRESET_ROUTE_COUNT, 1);
+    ips200_show_string(216, 144, "S:");
+    ips200_show_uint(232, 144, control_get_start_route_index(), 1);
 
     ips200_show_string(0, 160, "Cur:");
     ips200_show_float(40, 160, path_follow_status.x_m, 1, 3);

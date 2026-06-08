@@ -600,9 +600,14 @@
               <FilePath>..\code\姿态解算使用说明.txt</FilePath>
             </File>
             <File>
-              <FileName>Control_Simple.c</FileName>
+              <FileName>Control_PresetRace.c</FileName>
               <FileType>1</FileType>
-              <FilePath>..\code\Control_Simple.c</FilePath>
+              <FilePath>..\code\Control_PresetRace.c</FilePath>
+            </File>
+            <File>
+              <FileName>Preset_Route_Data.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\code\Preset_Route_Data.c</FilePath>
             </File>
             <File>
               <FileName>Control.h</FileName>
@@ -620,9 +625,14 @@
               <FilePath>..\code\wifi.h</FilePath>
             </File>
             <File>
-              <FileName>Control_Simple.h</FileName>
+              <FileName>Control_PresetRace.h</FileName>
               <FileType>5</FileType>
-              <FilePath>..\code\Control_Simple.h</FilePath>
+              <FilePath>..\code\Control_PresetRace.h</FilePath>
+            </File>
+            <File>
+              <FileName>Preset_Route_Data.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\code\Preset_Route_Data.h</FilePath>
             </File>
           </Files>
         </Group>

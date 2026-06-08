@@ -7,7 +7,7 @@
 #include "menu.h"
 #include "Map_Path_Data.h"
 #include "Algorithm_Test.h"
-#include "Control_Simple.h"
+#include "Control_PresetRace.h"
 #include "path_follow.h"
 
 // 显示配置

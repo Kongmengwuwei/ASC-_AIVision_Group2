@@ -1,4 +1,4 @@
-﻿/*********************************************************************************************************************
+/*********************************************************************************************************************
  * RT1064DVL6A Opensourec Library 即（RT1064DVL6A 开源库）是一个基于官方 SDK 接口的第三方开源库
  * Copyright (c) 2022 SEEKFREE 逐飞科技
  *
@@ -41,23 +41,23 @@
 #define PIT_PRIORITY_1 (PIT_IRQn)
 #define PIT_PRIORITY_2 (PIT_IRQn)
 
-#define ALGORITHM_TEST_ENABLE 0     // 1: 启用算法测试，使用预设地图数据进行路径规划测试；0: 关闭算法测试，正常运行控制流程
+#define ALGORITHM_TEST_ENABLE 0 // 1: 启用算法测试，使用预设地图数据进行路径规划测试；0: 关闭算法测试，正常运行控制流程
 
 int main(void)
 {
   clock_init(SYSTEM_CLOCK_600M); // 不可删除
   debug_init();                  // 调试端口初始化
   // 模块初始化
-  system_delay_ms(300); // 等待主板其他外设上电完成
-  Menu_Init();          // 菜单系统初始化(包含按键，显示屏等相关初始化)
-  uart_blob_init();     // 摄像头串口接收与解析模块初始化
-  flash_init();         // Flash模块初始化
-  motor_init();         // 电机控制模块初始化
-  encoder_init();       // 电机编码器模块初始化
-  imu963ra_init();      // IMU模块初始化
-  Attitude_Init();      // 姿态解算模块初始化
-  wifi_init("HDUASC_saidao", "zyz520520", NULL);          // Wi-Fi模块初始化
-
+  system_delay_ms(300);                          // 等待主板其他外设上电完成
+  Menu_Init();                                   // 菜单系统初始化(包含按键，显示屏等相关初始化)
+  uart_blob_init();                              // 摄像头串口接收与解析模块初始化
+  flash_init();                                  // Flash模块初始化
+  motor_init();                                  // 电机控制模块初始化
+  encoder_init();                                // 电机编码器模块初始化
+  imu963ra_init();                               // IMU模块初始化
+  Attitude_Init();                               // 姿态解算模块初始化
+  wifi_init("HDUASC_saidao", "zyz520520", NULL); // Wi-Fi模块初始化
+  Blue_Serial_Init();
   PID_Init(&ULpid, &ULPidInitStruct);
   PID_Init(&URpid, &URPidInitStruct);
   PID_Init(&DLpid, &DLPidInitStruct);
@@ -69,7 +69,7 @@ int main(void)
   Kinematics_Init();
   path_follow_init(GRID_SIZE_M, (float)pulse_per_meter);
 
-  //中断初始化
+  // 中断初始化
   pit_ms_init(PIT_CH0, 20);                  // PIT0 periodic interrupt: 20 ms.
   interrupt_set_priority(PIT_PRIORITY_0, 2); // PIT0 interrupt priority.
   pit_ms_init(PIT_CH1, 10);                  // PIT1 periodic interrupt: 10 ms.
@@ -77,12 +77,12 @@ int main(void)
   pit_ms_init(PIT_CH2, 2);                   // PIT2 periodic interrupt: 2 ms.
   interrupt_set_priority(PIT_PRIORITY_2, 0); // PIT2 interrupt priority.
   interrupt_set_priority(LPUART1_IRQn, 3);   // UART1 interrupt priority.
-  interrupt_set_priority(LPUART8_IRQn, 4);   // UART8 interrupt priority (vision).
+  interrupt_set_priority(LPUART8_IRQn, 8);   // UART4 interrupt priority.
   interrupt_global_enable(0);
 
   control_init();
 
-  //算法测试
+  // 算法测试
 #if ALGORITHM_TEST_ENABLE
   parse_map_from_string(map_text3);
 
@@ -92,8 +92,8 @@ int main(void)
   targets[0].id = 0;
   targets[1].id = 1;
   targets[2].id = 2;
-	
-  Test_Data_Load();  // 数据加载到内部测试地图
+
+  Test_Data_Load();     // 数据加载到内部测试地图
   Plan_path_Identify(); // 路径规划
 
   Test_Path_Init(); // 路径初始化
@@ -102,10 +102,10 @@ int main(void)
   // 主循环
   while (1)
   {
-    //算法测试
-  #if ALGORITHM_TEST_ENABLE
+    // 算法测试
+#if ALGORITHM_TEST_ENABLE
     Test_Data_Save(); // 将内部测试地图数据保存回全局数组
-  #endif
+#endif
 
     // 控制主流程：初始定位 -> 摄像头数据到齐 -> 路径规划 -> 路径执行 -> 执行中动态校正
     control_process();
@@ -113,7 +113,7 @@ int main(void)
     // 菜单系统主循环调用：响应按键事件，更新显示等。
     Menu_Switch();
     Menu_Show();
-    
+    BlueSerial_PathDebugReport();
   }
 }
 
@@ -127,7 +127,7 @@ void pit_1_handler(void)
 {
   // 采样编码器
   encoder_get();
-
+  BlueSerial_PathDebugTick10ms();
   if (control_is_path_plan_paused())
   {
     // 规划保护期内，清零速度目标，避免执行层继续输出旧命令
@@ -178,7 +178,6 @@ void pit_1_handler(void)
   {
     motor_pwm(0, 0, 0, 0);
   }
-
 }
 
 /* PIT2 周期中断（2ms）：姿态解算 */

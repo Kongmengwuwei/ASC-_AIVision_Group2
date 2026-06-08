@@ -49,6 +49,8 @@
  * - 鑻ュ嚭鐜版槑鏄炬潵鍥炴娊鍔紝鍙€傚綋鍑忓皬銆?
  */
 #define PATH_LINE_GUIDE_MIN_CMPS 5.0f
+/* Keep a small sustained reference while physically pushing a box. */
+#define PATH_FOLLOW_PUSH_MIN_CMPS 8.0f
 /** @brief 鐩寸嚎娈垫硶鍚戠籂鍋忛€熷害闄愬箙锛屽崟浣?cm/s銆?*/
 #define PATH_LINE_GUIDE_MAX_CMPS 12.0f
 /** @brief 鐩寸嚎娈垫硶鍚戠籂鍋忔鍖猴紝鍗曚綅 m銆?*/
@@ -133,7 +135,7 @@
  *
  * @note 璇ュ€肩洿鎺ユ部鐢ㄧ幇鏈夊疄鐜颁腑鐨勬暟鍊艰涔夛紝鍙仛瀹忔娊鍙栵紝涓嶆敼鍙樺綋鍓嶆帶鍒舵鏋躲€?
  */
-#define PATH_FOLLOW_MAX_ANGULAR_SPEED_LIMIT 360.0f
+#define PATH_FOLLOW_MAX_ANGULAR_SPEED_LIMIT 240.0f
 
 /** @brief 涓栫晫绯讳綅缃幆 PID 姣斾緥绯绘暟銆?*/
 #define PATH_FOLLOW_PID_WORLD_KP 4.2f
@@ -1297,6 +1299,38 @@ static uint8 path_follow_compute_segment_progress_m(const pose2d_t *pose,
 
 #endif
 
+static uint8 path_follow_is_push_span_end_marker_local(uint8 marker_id)
+{
+    return (marker_id == PUSH_END_POINT ||
+            marker_id == BOMB_EXPLOSION) ? 1U : 0U;
+}
+
+static uint8 path_follow_current_segment_is_push(void)
+{
+    size_t i = 0U;
+
+    if (g_ctx.path == NULL || g_ctx.idx == 0U || g_ctx.idx >= g_ctx.steps)
+    {
+        return 0U;
+    }
+
+    i = g_ctx.idx;
+    while (i > 0U)
+    {
+        i--;
+        if (path_follow_is_push_span_end_marker_local(g_ctx.path[i].id))
+        {
+            return 0U;
+        }
+        if (g_ctx.path[i].id == PUSH_StART_POINT)
+        {
+            return 1U;
+        }
+    }
+
+    return 0U;
+}
+
 /**
  * @brief 璁＄畻褰撳墠璺緞娈垫湯绔笇鏈涗繚鐣欑殑杩囨浮閫熷害銆?
  *
@@ -2228,6 +2262,36 @@ static void path_follow_plan_speed(const path_follow_geometry_t *geometry,
                                                                           speed_plan->end_speed_cmps,
                                                                           g_ctx.active_scurve_cfg.max_speed_cmps,
                                                                           g_ctx.active_scurve_cfg.accel_cmpss);
+
+        if (g_ctx.profile_time_s >= g_ctx.active_profile.T &&
+            geometry->distance_m > g_ctx.pos_tol_m &&
+            speed_plan->ref_speed_cmps <= 0.0f)
+        {
+            path_follow_invalidate_active_profile();
+            build_ok = path_follow_build_active_profile(geometry, speed_plan);
+            if (g_ctx.profile_active)
+            {
+                g_ctx.profile_time_s += sample_dt_s;
+                if (g_ctx.profile_time_s > g_ctx.active_profile.T)
+                {
+                    g_ctx.profile_time_s = g_ctx.active_profile.T;
+                }
+
+                speed_plan->ref_speed_cmps = path_follow_sample_scurve_velocity(g_ctx.profile_time_s,
+                                                                                &g_ctx.active_profile);
+                speed_plan->end_speed_cmps = g_ctx.active_profile.v1;
+                speed_plan->safety_cap_cmps = path_follow_compute_brake_speed_cap(geometry->distance_m,
+                                                                                  speed_plan->end_speed_cmps,
+                                                                                  g_ctx.active_scurve_cfg.max_speed_cmps,
+                                                                                  g_ctx.active_scurve_cfg.accel_cmpss);
+            }
+            else if (!build_ok)
+            {
+                speed_plan->ref_speed_cmps = path_follow_compute_profile_fault_speed(g_ctx.last_ref_speed_cmps,
+                                                                                     speed_plan->safety_cap_cmps,
+                                                                                     g_ctx.active_scurve_cfg.accel_cmpss);
+            }
+        }
     }
 
     if (g_ctx.profile_active)
@@ -2258,6 +2322,13 @@ static void path_follow_plan_speed(const path_follow_geometry_t *geometry,
     speed_plan->ref_speed_cmps = fminf(speed_plan->ref_speed_cmps,
                                        speed_plan->safety_cap_cmps);
     speed_plan->ref_speed_cmps = fmaxf(speed_plan->ref_speed_cmps, 0.0f);
+
+    if (path_follow_current_segment_is_push() &&
+        geometry->distance_m > g_ctx.pos_tol_m &&
+        speed_plan->ref_speed_cmps < PATH_FOLLOW_PUSH_MIN_CMPS)
+    {
+        speed_plan->ref_speed_cmps = PATH_FOLLOW_PUSH_MIN_CMPS;
+    }
 
     if (geometry->distance_m <= g_ctx.pos_tol_m)
     {

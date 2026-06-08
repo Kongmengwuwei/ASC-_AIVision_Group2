@@ -97,6 +97,9 @@ float g_control_prestart_depart_compensate_m = -0.025f;
 #define CONTROL_COORD_FLIP_VERTICAL PATH_COORD_FLIP_VERTICAL
 #define CONTROL_WORLD_X_MAX_M PATH_WORLD_X_MAX_M
 #define CONTROL_WORLD_Y_MAX_M PATH_WORLD_Y_MAX_M
+/* New pushbox paths are planned from the current grid cell.  When switching
+ * phases, keep the follower pose coherent with that grid start if it is close. */
+#define CONTROL_EXEC_START_SNAP_MAX_M (GRID_SIZE_M * 1.10f)
 
 
 /* ========================= 内部数据结构 ========================= */
@@ -2437,6 +2440,33 @@ static void handle_plan_path_stage(void)
     end_path_plan_pause();
 }
 
+static void sync_path_follow_pose_to_exec_start_if_close(void)
+{
+    path_follow_status_t st = {0};
+    float start_x_m;
+    float start_y_m;
+    float dx_m;
+    float dy_m;
+    float max_delta_m;
+
+    if (g_exec_steps == 0U)
+    {
+        return;
+    }
+
+    path_follow_get_status(&st);
+    start_x_m = (float)g_exec_path[0].row * GRID_SIZE_M;
+    start_y_m = (float)g_exec_path[0].col * GRID_SIZE_M;
+    dx_m = st.x_m - start_x_m;
+    dy_m = st.y_m - start_y_m;
+    max_delta_m = CONTROL_EXEC_START_SNAP_MAX_M;
+
+    if ((dx_m * dx_m + dy_m * dy_m) <= (max_delta_m * max_delta_m))
+    {
+        path_follow_reset_pose(start_x_m, start_y_m, eulerAngle.yaw);
+    }
+}
+
 /**
  * @brief 下发阶段：根据当前大流程，把识别路径或推箱路径装载到 path_follow。
  *
@@ -2463,6 +2493,7 @@ static void handle_load_path_stage(void)
     }
 
     configure_bomb_pause_for_path(g_exec_path, g_exec_steps);
+    sync_path_follow_pose_to_exec_start_if_close();
     path_follow_hold_current_yaw();
     path_follow_set_path(g_exec_path, g_exec_steps);
 

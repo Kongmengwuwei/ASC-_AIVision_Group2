@@ -149,8 +149,13 @@ static float face_dir_to_target_yaw(control_map_dir_t dir, size_t fake_idx)
     float base_yaw;
 
     if (fake_idx + 1U < g_custom_path_steps)
-        base_yaw = path_follow_heading_deg(g_custom_path[fake_idx],
-                                           g_custom_path[fake_idx + 1U]);
+    {
+        Position from = g_custom_path[fake_idx];
+        Position to   = g_custom_path[fake_idx + 1U];
+        path_remap_exec_point(&from);
+        path_remap_exec_point(&to);
+        base_yaw = path_follow_heading_deg(from, to);
+    }
     else
         base_yaw = g_map_right_yaw_ready ? g_map_right_yaw_deg : eulerAngle.yaw;
 
@@ -226,7 +231,10 @@ static void load_segment(size_t start_idx, size_t end_idx)
         seg_steps = MAX_CAR_PATH;
 
     for (i = 0U; i < seg_steps; i++)
+    {
         seg[i] = g_custom_path[start_idx + i];
+        path_remap_exec_point(&seg[i]);
+    }
 
     path_follow_hold_current_yaw();
     path_follow_set_path(seg, seg_steps);

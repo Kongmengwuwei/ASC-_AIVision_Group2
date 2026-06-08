@@ -134,7 +134,7 @@
 #include "PID.h"
 #include "PID_config.h"
 #include "Control.h"
-#include "wifi.h"
+#include "BlueSerial.h"
 //===================================================用户自定义文件===================================================
 
 #endif

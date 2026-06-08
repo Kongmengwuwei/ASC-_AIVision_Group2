@@ -56,8 +56,7 @@ int main(void)
   encoder_init();                                // 电机编码器模块初始化
   imu963ra_init();                               // IMU模块初始化
   Attitude_Init();                               // 姿态解算模块初始化
-  wifi_init("HDUASC_saidao", "zyz520520", NULL); // Wi-Fi模块初始化
-  Blue_Serial_Init();
+  // Blue_Serial_Init();
   PID_Init(&ULpid, &ULPidInitStruct);
   PID_Init(&URpid, &URPidInitStruct);
   PID_Init(&DLpid, &DLPidInitStruct);
@@ -113,7 +112,7 @@ int main(void)
     // 菜单系统主循环调用：响应按键事件，更新显示等。
     Menu_Switch();
     Menu_Show();
-    BlueSerial_PathDebugReport();
+    // BlueSerial_PathDebugReport();
   }
 }
 
@@ -127,7 +126,7 @@ void pit_1_handler(void)
 {
   // 采样编码器
   encoder_get();
-  BlueSerial_PathDebugTick10ms();
+  // BlueSerial_PathDebugTick10ms();
   if (control_is_path_plan_paused())
   {
     // 规划保护期内，清零速度目标，避免执行层继续输出旧命令

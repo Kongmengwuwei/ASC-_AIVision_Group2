@@ -595,11 +595,6 @@
               <FilePath>..\code\串口数据处理使用说明.txt</FilePath>
             </File>
             <File>
-              <FileName>算法说明.txt</FileName>
-              <FileType>5</FileType>
-              <FilePath>..\code\算法说明.txt</FilePath>
-            </File>
-            <File>
               <FileName>姿态解算使用说明.txt</FileName>
               <FileType>5</FileType>
               <FilePath>..\code\姿态解算使用说明.txt</FilePath>
@@ -613,16 +608,6 @@
               <FileName>Control.h</FileName>
               <FileType>5</FileType>
               <FilePath>..\code\Control.h</FilePath>
-            </File>
-            <File>
-              <FileName>wifi.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>..\code\wifi.c</FilePath>
-            </File>
-            <File>
-              <FileName>wifi.h</FileName>
-              <FileType>5</FileType>
-              <FilePath>..\code\wifi.h</FilePath>
             </File>
           </Files>
         </Group>

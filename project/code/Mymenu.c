@@ -14,6 +14,8 @@ static bool diagonal_path_switch = true;
 static bool followup_vision_switch = true;
 static bool identify_prerotate_switch = true;
 static bool repeat_three_flow_switch = false;
+static bool show_map_switch = true;
+static bool state_show_switch = true;
 
 path_follow_status_t path_follow_status = {0};
 control_plan_mode_t plan_mode = CONTROL_PLAN_MODE_1;
@@ -56,6 +58,8 @@ void Menu_Create(void)
     Create_Menu_File_dynamic(Startup, "Start_Dir", &startup_depart_dir_value, uint8_Box);
 
     Create_Menu_File_dynamic(Data, "test", &test1, uint8_Box);
+    Create_Menu_File_dynamic(Data, "ShowMap", &show_map_switch, bool_Box);
+    Create_Menu_File_dynamic(Data, "StateShow", &state_show_switch, bool_Box);
     Create_Menu_File_dynamic(Setting, "DiagPath", &diagonal_path_switch, bool_Box);
     Create_Menu_File_dynamic(Setting, "FolVision", &followup_vision_switch, bool_Box);
     Create_Menu_File_dynamic(Setting, "PreRotate", &identify_prerotate_switch, bool_Box);
@@ -773,8 +777,14 @@ void Menu_Show(void)
     Show_Setup();
     Show_Number();
 
-    Show_Map();
-    State_Show();
+    if (show_map_switch)
+    {
+        Show_Map();
+    }
+    if (state_show_switch)
+    {
+        State_Show();
+    }
 }
 
 // 各类按键处理

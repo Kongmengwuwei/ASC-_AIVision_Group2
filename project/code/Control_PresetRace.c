@@ -10,7 +10,7 @@
 #define CONTROL_PRESET_LOOP_HZ 250U
 
 /* Fixed launch direction for the school-match preset flow. */
-#define CONTROL_PRESET_PRESTART_FACE PRESET_FACE_MAP_RIGHT
+#define CONTROL_PRESET_PRESTART_FACE PRESET_FACE_MAP_UP
 
 extern uint8 car_go_flag;
 extern uint8 car_stop_flag;

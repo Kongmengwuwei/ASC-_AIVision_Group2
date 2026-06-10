@@ -3,17 +3,17 @@
 
 #include "zf_common_typedef.h"
 
-#define MOTOR1_DIR              (C7)                           //…œ◊Û
-#define MOTOR1_PWM              (PWM2_MODULE0_CHA_C6)
+#define MOTOR1_DIR              (C9)                           // ‰∏äÂ∑¶
+#define MOTOR1_PWM              (PWM2_MODULE1_CHA_C8)
 
-#define MOTOR2_DIR              (C9)                          //…œ”“
-#define MOTOR2_PWM              (PWM2_MODULE1_CHA_C8)
+#define MOTOR2_DIR              (C7)                           // ‰∏äÂè≥
+#define MOTOR2_PWM              (PWM2_MODULE0_CHA_C6)
 
-#define MOTOR3_DIR              (C11)                          //œ¬◊Û
-#define MOTOR3_PWM              (PWM2_MODULE2_CHA_C10)
+#define MOTOR3_DIR              (D3)                           // ‰∏ãÂ∑¶
+#define MOTOR3_PWM              (PWM2_MODULE3_CHA_D2)
 
-#define MOTOR4_DIR              (D3)                           //œ¬”“
-#define MOTOR4_PWM              (PWM2_MODULE3_CHA_D2)
+#define MOTOR4_DIR              (C11)                          // ‰∏ãÂè≥
+#define MOTOR4_PWM              (PWM2_MODULE2_CHA_C10)
 
 
 #define ENCODER_1                   (QTIMER1_ENCODER2)

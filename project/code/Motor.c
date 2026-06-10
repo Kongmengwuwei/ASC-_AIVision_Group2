@@ -128,6 +128,10 @@ int16 Lowpass(int16 X_last,int16 X_new)
 
 void motor_pwm(int up_left_speed,int up_right_speed,int down_left_speed,int down_right_speed)
 {
+	up_left_speed*=-1; 
+	down_left_speed*=-1;
+	down_right_speed*=-1;
+	
 	if(up_left_speed > 0)                                                           // 正转
     {
 		gpio_set_level(MOTOR1_DIR, GPIO_LOW);                     // DIR输出高电平

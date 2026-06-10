@@ -57,10 +57,10 @@ int16 encoder_data_quaddec4 = 0;
 void encoder_get(void)
 {
 	static int16 encoder_L_up[5],encoder_R_up[5],encoder_L_down[5],encoder_R_down[5];
-	encoder_data_quaddec1 = -encoder_get_count(ENCODER_1);                  // 获取编码器计数 左上
-	encoder_data_quaddec2 = -encoder_get_count(ENCODER_2);                  // 获取编码器计数 右上
-	encoder_data_quaddec3 = -encoder_get_count(ENCODER_3);                  // 获取编码器计数 左下
-	encoder_data_quaddec4 = -encoder_get_count(ENCODER_4);                  // 获取编码器计数 右下
+	encoder_data_quaddec1 = encoder_get_count(ENCODER_1);                  // 获取编码器计数 左上
+	encoder_data_quaddec2 = encoder_get_count(ENCODER_2);                  // 获取编码器计数 右上
+	encoder_data_quaddec3 = encoder_get_count(ENCODER_3);                  // 获取编码器计数 左下
+	encoder_data_quaddec4 = encoder_get_count(ENCODER_4);                  // 获取编码器计数 右下
 	
 	
 	encoder_L_up[4]=encoder_L_up[3];//左上编码器
@@ -128,19 +128,15 @@ int16 Lowpass(int16 X_last,int16 X_new)
 
 void motor_pwm(int up_left_speed,int up_right_speed,int down_left_speed,int down_right_speed)
 {
-	up_left_speed*=-1; 
-	down_left_speed*=-1;
-	down_right_speed*=-1;
-	
 	if(up_left_speed > 0)                                                           // 正转
     {
 		gpio_set_level(MOTOR1_DIR, GPIO_LOW);                     // DIR输出高电平
-        pwm_set_duty(MOTOR1_PWM, up_left_speed);                   // 计算占空比
+        pwm_set_duty(MOTOR1_PWM, up_left_speed+500);                   // 计算占空比
      }
      else if (up_left_speed < 0)                                                                  // 反转
      {
 		gpio_set_level(MOTOR1_DIR, GPIO_HIGH);                    // DIR输出低电平
-        pwm_set_duty(MOTOR1_PWM, -up_left_speed);                // 计算占空比
+        pwm_set_duty(MOTOR1_PWM, -up_left_speed+500);                // 计算占空比
 
      }
 	 else if (up_left_speed == 0)
@@ -151,29 +147,29 @@ void motor_pwm(int up_left_speed,int up_right_speed,int down_left_speed,int down
 
 	 if (up_right_speed > 0)
 	 {
-		 gpio_set_level(MOTOR2_DIR, GPIO_HIGH);                       // DIR输出高电平
-         pwm_set_duty(MOTOR2_PWM, up_right_speed);                   // 计算占空比
+		 gpio_set_level(MOTOR2_DIR, GPIO_LOW);                       // DIR输出高电平
+         pwm_set_duty(MOTOR2_PWM, up_right_speed+400);                   // 计算占空比
 	 }
 	 else if (up_right_speed < 0)
 	 {
-		 gpio_set_level(MOTOR2_DIR, GPIO_LOW);                     // DIR输出低电平
-         pwm_set_duty(MOTOR2_PWM, -up_right_speed);                // 计算占空比
+		 gpio_set_level(MOTOR2_DIR, GPIO_HIGH);                     // DIR输出低电平
+         pwm_set_duty(MOTOR2_PWM, -up_right_speed+440);                // 计算占空比
 	 }
 	 else if (up_right_speed == 0)
 	 {
-		 gpio_set_level(MOTOR2_DIR, GPIO_HIGH);                       // DIR输出高电平
+		 gpio_set_level(MOTOR2_DIR, GPIO_LOW);                       // DIR输出高电平
 		 pwm_set_duty(MOTOR2_PWM, 0);                                 // 停止
 	 }
 
 	 if (down_left_speed > 0)
 	 {
 		 gpio_set_level(MOTOR3_DIR, GPIO_LOW);                       // DIR输出高电平
-         pwm_set_duty(MOTOR3_PWM, down_left_speed);                   // 计算占空比
+         pwm_set_duty(MOTOR3_PWM, down_left_speed+420);                   // 计算占空比
 	 }
 	 else if (down_left_speed < 0)
 	 {
 		 gpio_set_level(MOTOR3_DIR, GPIO_HIGH);                      // DIR输出低电平
-         pwm_set_duty(MOTOR3_PWM, -down_left_speed);                // 计算占空比
+         pwm_set_duty(MOTOR3_PWM, -down_left_speed+390);                // 计算占空比
 	 }
 	 else if (down_left_speed == 0)
 	 {
@@ -184,12 +180,12 @@ void motor_pwm(int up_left_speed,int up_right_speed,int down_left_speed,int down
 	 if (down_right_speed > 0)
 	 {
 		 gpio_set_level(MOTOR4_DIR, GPIO_HIGH);                       // DIR输出高电平
-         pwm_set_duty(MOTOR4_PWM, down_right_speed);                  // 计算占空比
+         pwm_set_duty(MOTOR4_PWM, down_right_speed+540);                  // 计算占空比
 	 }
 	 else if (down_right_speed < 0)
 	 {
 		 gpio_set_level(MOTOR4_DIR, GPIO_LOW);                       // DIR输出低电平
-         pwm_set_duty(MOTOR4_PWM, -down_right_speed);                // 计算占空比
+         pwm_set_duty(MOTOR4_PWM, -down_right_speed+530);                // 计算占空比
 	 }
 	 else if (down_right_speed == 0)
 	 {

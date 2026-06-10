@@ -33,7 +33,7 @@
 #define ENCODER_4_B                 (QTIMER1_ENCODER1_CH2_C1)
 
 //参数宏定义
-#define ENCODER_RESOLUTION      2300.0   //编码器分辨率, 轮子转一圈，编码器产生的脉冲数
+#define ENCODER_RESOLUTION      2280.0   //编码器分辨率, 轮子转一圈，编码器产生的脉冲数
 #define WHEEL_DIAMETER          0.058    //轮子直径,单位：米@
 #define D_X                     0.176     //底盘Y轴上两轮中心的间距
 #define D_Y                     0.20     //底盘X轴上两轮中心的间距
@@ -42,8 +42,8 @@
 #define LIMIT_PWM_MIN              -6000
 #define LIMIT_PWM_MAX               6000
 
-#define LIMIT_ENCODER_MIN          -500
-#define LIMIT_ENCODER_MAX           500
+#define LIMIT_ENCODER_MIN          -400
+#define LIMIT_ENCODER_MAX           400
 #define ENCODER_FILTER_ALPHA       0.35f
 
 

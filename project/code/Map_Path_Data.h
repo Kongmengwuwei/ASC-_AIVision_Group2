@@ -1,6 +1,7 @@
 #ifndef _MAP_PATH_DATA_H_
 #define _MAP_PATH_DATA_H_
 
+#include <stddef.h>
 #include "zf_common_typedef.h"
 
 // 地图尺寸定义
@@ -50,6 +51,18 @@ typedef struct
 typedef struct
 {
     const char *name;
+    const char *map_text;
+    map_preset_plan_mode_t plan_mode;
+    float car_yaw_deg;
+    const uint8 *box_ids;
+    size_t box_id_count;
+    const uint8 *target_ids;
+    size_t target_id_count;
+} MapPresetTextConfig;
+
+typedef struct
+{
+    const char *name;
     map_preset_plan_mode_t plan_mode;
     Position car_start;
     float car_yaw_deg;
@@ -79,13 +92,14 @@ extern Position car;                      // 车辆整数栅格位置
 extern Position car_path[MAX_CAR_PATH];   // 规划路径坐标列表
 extern CarPose car_position;              // 车辆浮点栅格位置
 
-extern const char *map_text1; // 预设地图文本1
-extern const char *map_text2; // 预设地图文本2
-extern const char *map_text3; // 预设地图文本3
-extern const char *map_text4; // 预设地图文本4
-extern const char *map_text5; // 预设地图文本5
+extern const char map_text1[]; // 预设地图文本1
+extern const char map_text2[]; // 预设地图文本2
+extern const char map_text3[]; // 预设地图文本3
+extern const char map_text4[]; // 预设地图文本4
+extern const char map_text5[]; // 预设地图文本5
 
-extern const MapPresetConfig map_presets[];
+extern const MapPresetTextConfig map_preset_texts[];
 extern const size_t Map_preset_count;
+uint8 Map_Preset_BuildConfig(size_t preset_index, MapPresetConfig *out_config);
 
 #endif 

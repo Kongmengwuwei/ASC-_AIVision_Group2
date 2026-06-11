@@ -4,7 +4,7 @@
 #include "Map_Path_Data.h"
 
 #ifndef ALGORITHM_TEST_ENABLE
-#define ALGORITHM_TEST_ENABLE 1
+#define ALGORITHM_TEST_ENABLE 0
 #endif
 
 #ifndef ALGORITHM_TEST_PRESET_INDEX

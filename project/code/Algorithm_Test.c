@@ -22,7 +22,7 @@ size_t s_path_index = 0u;
 static int s_box_id_map[MAP_ROWS * MAP_COLS];
 static int s_target_id_map[MAP_ROWS * MAP_COLS];
 static uint8 s_preset_input_enabled = 0U;
-static size_t s_preset_input_index = 0U;
+static MapPresetConfig s_active_preset;
 
 // 判断坐标是否在地图范围内。
 static int in_range(int row, int col)
@@ -57,11 +57,7 @@ static const MapPresetConfig *get_active_preset(void)
     {
         return 0;
     }
-    if (s_preset_input_index >= Map_preset_count)
-    {
-        return &map_presets[0];
-    }
-    return &map_presets[s_preset_input_index];
+    return &s_active_preset;
 }
 
 static void copy_preset_objects_to_globals(const MapPresetConfig *preset, uint8 reset_car_to_start)
@@ -176,7 +172,11 @@ void Algorithm_Test_PresetInput_Init(size_t preset_index)
     {
         preset_index = 0U;
     }
-    s_preset_input_index = preset_index;
+    if (!Map_Preset_BuildConfig(preset_index, &s_active_preset))
+    {
+        s_preset_input_enabled = 0U;
+        return;
+    }
     s_preset_input_enabled = 1U;
     uart_data_processing_enabled = false;
     vision_data_processing_enabled = false;

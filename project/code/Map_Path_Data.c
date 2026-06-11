@@ -1,4 +1,5 @@
 #include "Map_Path_Data.h"
+#include <string.h>
 
 // 当前生效地图对象数量
 size_t Obstacles_count = 0; // 当前障碍物数量
@@ -17,7 +18,7 @@ Position car_path[MAX_CAR_PATH] = {{0}};   // 预留路径坐标列表
 CarPose car_position = {1, 1, 0, 1.00, 1.00, 0.00};   // 车辆浮点栅格位置
 
 // 在此直接输入地图
-const char *map_text1 =".#............\n"
+const char map_text1[] =".#............\n"
                        ".T......#####.\n"
                        "#B###...#...#.\n"
                        "....#...#T#.#.\n"
@@ -27,7 +28,7 @@ const char *map_text1 =".#............\n"
                        "..............\n"
                        ".....####.....\n"
                        "..............\n";
-const char *map_text2 ="..#.#........T\n"
+const char map_text2[] ="..#.#........T\n"
                        "....#......#..\n"
                        ".B..#B........\n"
                        ".........#...#\n"
@@ -37,7 +38,7 @@ const char *map_text2 ="..#.#........T\n"
                        "####.##..##...\n"
                        "..............\n"
                        "T.......#.....\n";
-const char *map_text3 =".#...#..#....T\n"
+const char map_text3[] =".#...#..#....T\n"
                        "...#..#.####..\n"
                        "#.###.#.#.....\n"
                        ".T#.#.#.#..#..\n"
@@ -47,7 +48,7 @@ const char *map_text3 =".#...#..#....T\n"
                        "..B.#.....BD..\n"
                        ".B..########..\n"
                        "....#T........\n";
-const char *map_text4 ="......#....#T#\n"
+const char map_text4[] ="......#....#T#\n"
                        "...........#.#\n"
                        ".....#.#...#.#\n"
                        ".#.#..B....#..\n"
@@ -57,7 +58,7 @@ const char *map_text4 ="......#....#T#\n"
                        ".#.##.B..#.##.\n"
                        ".....#.#......\n"
                        "....T.......T.\n";
-const char *map_text5 =".#.T....#.....\n"
+const char map_text5[] =".#.T....#.....\n"
                        "........#..T..\n"
                        "......D.#.....\n"
                        "........#..B..\n"
@@ -68,113 +69,126 @@ const char *map_text5 =".#.T....#.....\n"
                        "....#.......T.\n"
                        "....#.........\n";
 
-const MapPresetConfig map_presets[] = {
-    {
-        "map1",
-        MAP_PRESET_PLAN_MODE2,
-        {5, 0, 0},
-        0.0f,
-        31U,
-        3U,
-        3U,
-        0U,
-        {
-            {0, 1, 0}, {1, 8, 0}, {1, 9, 0}, {1, 10, 0}, {1, 11, 0}, {1, 12, 0},
-            {2, 0, 0}, {2, 2, 0}, {2, 3, 0}, {2, 4, 0}, {2, 8, 0}, {2, 12, 0},
-            {3, 4, 0}, {3, 8, 0}, {3, 10, 0}, {3, 12, 0},
-            {4, 4, 0}, {4, 5, 0}, {4, 6, 0}, {4, 7, 0}, {4, 8, 0}, {4, 10, 0}, {4, 12, 0},
-            {5, 12, 0}, {6, 10, 0}, {6, 11, 0}, {6, 12, 0},
-            {8, 5, 0}, {8, 6, 0}, {8, 7, 0}, {8, 8, 0}
-        },
-        {{2, 1, 1}, {5, 7, 2}, {5, 10, 3}},
-        {{1, 1, 1}, {3, 9, 2}, {4, 9, 3}},
-        {{0}}
-    },
-    {
-        "map2",
-        MAP_PRESET_PLAN_MODE2,
-        {5, 0, 0},
-        0.0f,
-        21U,
-        3U,
-        3U,
-        0U,
-        {
-            {0, 2, 0}, {0, 4, 0}, {1, 4, 0}, {1, 11, 0}, {2, 4, 0},
-            {3, 9, 0}, {3, 13, 0}, {4, 2, 0}, {4, 7, 0},
-            {5, 3, 0}, {5, 6, 0}, {5, 10, 0},
-            {7, 0, 0}, {7, 1, 0}, {7, 2, 0}, {7, 3, 0},
-            {7, 5, 0}, {7, 6, 0}, {7, 9, 0}, {7, 10, 0}, {9, 8, 0}
-        },
-        {{2, 1, 1}, {2, 5, 2}, {6, 12, 3}},
-        {{0, 13, 1}, {5, 7, 2}, {9, 0, 3}},
-        {{0}}
-    },
-    {
-        "map3",
-        MAP_PRESET_PLAN_MODE2,
-        {6, 0, 0},
-        0.0f,
-        37U,
-        3U,
-        3U,
-        3U,
-        {
-            {0, 1, 0}, {0, 5, 0}, {0, 8, 0},
-            {1, 3, 0}, {1, 6, 0}, {1, 8, 0}, {1, 9, 0}, {1, 10, 0}, {1, 11, 0},
-            {2, 0, 0}, {2, 2, 0}, {2, 3, 0}, {2, 4, 0}, {2, 6, 0}, {2, 8, 0},
-            {3, 2, 0}, {3, 4, 0}, {3, 6, 0}, {3, 8, 0}, {3, 11, 0},
-            {4, 1, 0}, {4, 2, 0}, {4, 4, 0},
-            {5, 2, 0}, {5, 10, 0}, {5, 11, 0},
-            {6, 11, 0}, {7, 4, 0},
-            {8, 4, 0}, {8, 5, 0}, {8, 6, 0}, {8, 7, 0}, {8, 8, 0}, {8, 9, 0}, {8, 10, 0}, {8, 11, 0},
-            {9, 4, 0}
-        },
-        {{7, 2, 1}, {7, 10, 2}, {8, 1, 3}},
-        {{0, 13, 1}, {3, 1, 2}, {9, 5, 3}},
-        {{6, 1, 0}, {6, 9, 0}, {7, 11, 0}}
-    },
-    {
-        "map4",
-        MAP_PRESET_PLAN_MODE2,
-        {5, 0, 0},
-        0.0f,
-        32U,
-        3U,
-        3U,
-        0U,
-        {
-            {0, 6, 0}, {0, 11, 0}, {0, 13, 0}, {1, 11, 0}, {1, 13, 0},
-            {2, 5, 0}, {2, 7, 0}, {2, 11, 0}, {2, 13, 0},
-            {3, 1, 0}, {3, 3, 0}, {3, 11, 0},
-            {4, 1, 0}, {4, 3, 0}, {4, 5, 0}, {4, 7, 0},
-            {5, 1, 0}, {5, 3, 0}, {5, 9, 0}, {5, 11, 0},
-            {6, 5, 0}, {6, 7, 0}, {6, 9, 0}, {6, 11, 0},
-            {7, 1, 0}, {7, 3, 0}, {7, 4, 0}, {7, 9, 0}, {7, 11, 0}, {7, 12, 0},
-            {8, 5, 0}, {8, 7, 0}
-        },
-        {{3, 6, 1}, {5, 6, 2}, {7, 6, 3}},
-        {{0, 12, 1}, {9, 4, 2}, {9, 12, 3}},
-        {{0}}
-    },
-    {
-        "map5",
-        MAP_PRESET_PLAN_MODE2,
-        {4, 0, 0},
-        0.0f,
-        15U,
-        3U,
-        3U,
-        1U,
-        {
-            {0, 1, 0}, {0, 8, 0}, {1, 8, 0}, {2, 8, 0}, {3, 8, 0},
-            {4, 4, 0}, {4, 5, 0}, {4, 6, 0}, {4, 7, 0}, {4, 8, 0},
-            {5, 4, 0}, {6, 4, 0}, {7, 4, 0}, {8, 4, 0}, {9, 4, 0}
-        },
-        {{3, 11, 1}, {5, 2, 2}, {6, 9, 3}},
-        {{0, 3, 1}, {1, 11, 2}, {8, 12, 3}},
-        {{2, 6, 0}}
-    }
+const MapPresetTextConfig map_preset_texts[] = {
+    {"map1", map_text1, MAP_PRESET_PLAN_MODE2, 0.0f, 0, 0U, 0, 0U},
+    {"map2", map_text2, MAP_PRESET_PLAN_MODE2, 0.0f, 0, 0U, 0, 0U},
+    {"map3", map_text3, MAP_PRESET_PLAN_MODE2, 0.0f, 0, 0U, 0, 0U},
+    {"map4", map_text4, MAP_PRESET_PLAN_MODE2, 0.0f, 0, 0U, 0, 0U},
+    {"map5", map_text5, MAP_PRESET_PLAN_MODE2, 0.0f, 0, 0U, 0, 0U},
 };
 
-const size_t Map_preset_count = sizeof(map_presets) / sizeof(map_presets[0]);
+const size_t Map_preset_count = sizeof(map_preset_texts) / sizeof(map_preset_texts[0]);
+
+static uint8 map_preset_next_id(const uint8 *ids, size_t id_count, size_t index)
+{
+    if (ids != 0 && index < id_count)
+    {
+        return ids[index];
+    }
+    return (uint8)(index + 1U);
+}
+
+uint8 Map_Preset_BuildConfig(size_t preset_index, MapPresetConfig *out_config)
+{
+    const MapPresetTextConfig *src;
+    const char *p;
+    size_t row = 0U;
+    size_t col = 0U;
+    size_t box_index = 0U;
+    size_t target_index = 0U;
+    uint8 car_found = 0U;
+
+    if (out_config == 0 || Map_preset_count == 0U)
+    {
+        return 0U;
+    }
+
+    if (preset_index >= Map_preset_count)
+    {
+        preset_index = 0U;
+    }
+
+    src = &map_preset_texts[preset_index];
+    memset(out_config, 0, sizeof(*out_config));
+    out_config->name = src->name;
+    out_config->plan_mode = src->plan_mode;
+    out_config->car_start.row = 0U;
+    out_config->car_start.col = 0U;
+    out_config->car_start.id = 0U;
+    out_config->car_yaw_deg = src->car_yaw_deg;
+
+    p = src->map_text;
+    while (p != 0 && *p != '\0' && row < MAP_ROWS)
+    {
+        char ch = *p++;
+        Position pos;
+
+        if (ch == '\r')
+        {
+            continue;
+        }
+        if (ch == '\n')
+        {
+            row++;
+            col = 0U;
+            continue;
+        }
+        if (col >= MAP_COLS)
+        {
+            continue;
+        }
+
+        pos.row = (uint8)row;
+        pos.col = (uint8)col;
+        pos.id = 0U;
+
+        switch (ch)
+        {
+        case '#':
+            if (out_config->obstacles_count < MAX_OBSTACLES)
+            {
+                out_config->obstacles[out_config->obstacles_count++] = pos;
+            }
+            break;
+        case 'B':
+        case 'b':
+            if (out_config->boxes_count < MAX_BOXES)
+            {
+                pos.id = map_preset_next_id(src->box_ids, src->box_id_count, box_index);
+                out_config->boxes[out_config->boxes_count++] = pos;
+            }
+            box_index++;
+            break;
+        case 'T':
+        case 't':
+            if (out_config->targets_count < MAX_TARGETS)
+            {
+                pos.id = map_preset_next_id(src->target_ids, src->target_id_count, target_index);
+                out_config->targets[out_config->targets_count++] = pos;
+            }
+            target_index++;
+            break;
+        case 'D':
+        case 'd':
+            if (out_config->bombs_count < MAX_BOMBS)
+            {
+                out_config->bombs[out_config->bombs_count++] = pos;
+            }
+            break;
+        case 'C':
+        case 'c':
+            if (!car_found)
+            {
+                out_config->car_start = pos;
+                car_found = 1U;
+            }
+            break;
+        default:
+            break;
+        }
+
+        col++;
+    }
+
+    return 1U;
+}

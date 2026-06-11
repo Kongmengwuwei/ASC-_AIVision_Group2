@@ -2308,10 +2308,10 @@ static int is_blocked_for_final_return(const planning_state_t *state,
     return 0;
 }
 
-/* 规划“返回右侧发车区”的最短车行路径：
- * 现在返场永久固定到右侧发车区，不再按最近发车点选择。
- * 右侧发车区按用户坐标定义为 (x,y) = (13,4),(13,5)，
- * 转换到 Position(row,col) 为 (4,13),(5,13)。 */
+/* 规划“返回左侧发车区”的最短车行路径：
+ * 现在返场永久固定到左侧发车区，不再按最近发车点选择。
+ * 左侧发车区按用户坐标定义为 (x,y) = (0,4),(0,5)，
+ * 转换到 Position(row,col) 为 (4,0),(5,0)。 */
 static int build_shortest_return_path_to_depot(const planning_state_t *state,
                                                 Position *out_path,
                                                 int max_path,
@@ -2319,8 +2319,8 @@ static int build_shortest_return_path_to_depot(const planning_state_t *state,
                                                 int ignore_obstacles)
 {
     const Position depots[2] = {
-        {4, 13, 0},
-        {5, 13, 0}
+        {4, 0, 0},
+        {5, 0, 0}
     };
     const int dr[4] = {-1, 1, 0, 0};
     const int dc[4] = {0, 0, -1, 1};
@@ -2431,7 +2431,7 @@ static int build_shortest_return_path_to_depot(const planning_state_t *state,
     return path_len;
 }
 
-/* 在现有规划末尾追加“返回右侧发车区”路径。 */
+/* 在现有规划末尾追加“返回左侧发车区”路径。 */
 static int append_return_to_depot(planning_state_t *state,
                                   Position *merged_path,
                                   int *merged_len)

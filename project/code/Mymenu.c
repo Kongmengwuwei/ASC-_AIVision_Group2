@@ -859,13 +859,32 @@ void Key_SetupCtrl_Sub(void) // 步进值减小(可返回最大值)
 // 菜单切换
 void Menu_Switch(void)
 {
+    static uint8 enter_long_press_handled = 0U;
+
     // 按键在此更改
     key_state_enum k1 = key_get_state(KEY_1);
     key_state_enum k3 = key_get_state(KEY_2);
     key_state_enum k4 = key_get_state(KEY_3);
     key_state_enum k2 = key_get_state(KEY_4);
 
-    if (k1 == KEY_SHORT_PRESS)
+    if (k3 == KEY_RELEASE)
+    {
+        enter_long_press_handled = 0U;
+    }
+
+    if (k3 == KEY_LONG_PRESS)
+    {
+        if (!enter_long_press_handled)
+        {
+            enter_long_press_handled = 1U;
+            // 确认键长按复用退出键行为：选中文件时取消选中，未选中时退出文件夹。
+            if (pointer->kind != MENU_Folder && pointer->selected == true)
+                Key_Deselect();
+            else
+                Key_Exit();
+        }
+    }
+    else if (k1 == KEY_SHORT_PRESS)
     {
         // 常规模式下菜单操作：选中文件时增大数据，未选中时指针上移
         if (pointer->selected == false)
@@ -883,6 +902,7 @@ void Menu_Switch(void)
     }
     else if (k3 == KEY_SHORT_PRESS)
     {
+        enter_long_press_handled = 0U;
         // control_set_start_enabled(1);
 
         // 常规模式下菜单操作：进入文件夹或选中/取消选中文件
@@ -904,7 +924,10 @@ void Menu_Switch(void)
     }
 
     key_clear_state(KEY_1);
-    key_clear_state(KEY_2);
+    if (k3 != KEY_LONG_PRESS)
+    {
+        key_clear_state(KEY_2);
+    }
     key_clear_state(KEY_3);
     key_clear_state(KEY_4);
 }

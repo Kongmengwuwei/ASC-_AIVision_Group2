@@ -92,11 +92,13 @@ extern Position car;                      // 车辆整数栅格位置
 extern Position car_path[MAX_CAR_PATH];   // 规划路径坐标列表
 extern CarPose car_position;              // 车辆浮点栅格位置
 
+extern const char map_text0[]; // 预设地图文本0
 extern const char map_text1[]; // 预设地图文本1
 extern const char map_text2[]; // 预设地图文本2
 extern const char map_text3[]; // 预设地图文本3
 extern const char map_text4[]; // 预设地图文本4
 extern const char map_text5[]; // 预设地图文本5
+extern const char map_text6[]; // 预设地图文本6
 
 extern const MapPresetTextConfig map_preset_texts[];
 extern const size_t Map_preset_count;

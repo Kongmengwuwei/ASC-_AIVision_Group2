@@ -16,6 +16,7 @@ static bool identify_prerotate_switch = true;
 static bool repeat_three_flow_switch = false;
 static bool show_map_switch = true;
 static bool state_show_switch = true;
+static uint8 preset_map_index = ALGORITHM_TEST_PRESET_INDEX;
 
 path_follow_status_t path_follow_status = {0};
 control_plan_mode_t plan_mode = CONTROL_PLAN_MODE_1;
@@ -49,6 +50,35 @@ static uint8 display_object_id(uint8 id)
     return (id == 0xFFU) ? 0U : id;
 }
 
+static uint8 clamp_preset_map_index(uint8 index)
+{
+    if (Map_preset_count == 0U)
+    {
+        return 0U;
+    }
+    if ((size_t)index >= Map_preset_count)
+    {
+        return (uint8)(Map_preset_count - 1U);
+    }
+    return index;
+}
+
+uint8 Menu_Get_Preset_Map_Index(void)
+{
+    preset_map_index = clamp_preset_map_index(preset_map_index);
+    return preset_map_index;
+}
+
+static void Menu_Apply_Preset_Map_Index(void)
+{
+#if ALGORITHM_TEST_ENABLE
+    if (control_get_stage() == CONTROL_STAGE_IDLE)
+    {
+        Algorithm_Test_PresetInput_Init(Menu_Get_Preset_Map_Index());
+    }
+#endif
+}
+
 // 创建菜单
 void Menu_Create(void)
 {
@@ -63,8 +93,10 @@ void Menu_Create(void)
     Create_Menu_File_dynamic(Startup, "Start_Dir", &startup_depart_dir_value, uint8_Box);
 
     Create_Menu_File_dynamic(Data, "test", &test1, uint8_Box);
+    Create_Menu_File_dynamic(Data, "Map", &preset_map_index, uint8_Box);
     Create_Menu_File_dynamic(Data, "ShowMap", &show_map_switch, bool_Box);
     Create_Menu_File_dynamic(Data, "StateShow", &state_show_switch, bool_Box);
+
     Create_Menu_File_dynamic(Setting, "DiagPath", &diagonal_path_switch, bool_Box);
     Create_Menu_File_dynamic(Setting, "FolVision", &followup_vision_switch, bool_Box);
     Create_Menu_File_dynamic(Setting, "PreRotate", &identify_prerotate_switch, bool_Box);
@@ -162,6 +194,23 @@ static bool Menu_Handle_Control_Uint8(Menu_Item *item, int16 delta)
 
         startup_depart_dir_value = (uint8)value;
         control_set_prestart_depart_dir(startup_depart_dir_value);
+        return true;
+    }
+
+    if (item->data == &preset_map_index)
+    {
+        value = (int16)preset_map_index + delta;
+        if (value < 0)
+        {
+            value = 0;
+        }
+        else if (Map_preset_count > 0U && value >= (int16)Map_preset_count)
+        {
+            value = (int16)Map_preset_count - 1;
+        }
+
+        preset_map_index = clamp_preset_map_index((uint8)value);
+        Menu_Apply_Preset_Map_Index();
         return true;
     }
 

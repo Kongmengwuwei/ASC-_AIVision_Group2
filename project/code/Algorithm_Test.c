@@ -62,8 +62,6 @@ static const MapPresetConfig *get_active_preset(void)
 
 static void copy_preset_objects_to_globals(const MapPresetConfig *preset, uint8 reset_car_to_start)
 {
-    size_t i;
-
     if (preset == 0)
     {
         return;
@@ -85,19 +83,11 @@ static void copy_preset_objects_to_globals(const MapPresetConfig *preset, uint8 
     }
     if (Boxes_count > 0U)
     {
-        for (i = 0U; i < Boxes_count; i++)
-        {
-            boxes[i] = preset->boxes[i];
-            boxes[i].id = MAP_PRESET_UNKNOWN_ID;
-        }
+        memcpy(boxes, preset->boxes, Boxes_count * sizeof(Position));
     }
     if (Targets_count > 0U)
     {
-        for (i = 0U; i < Targets_count; i++)
-        {
-            targets[i] = preset->targets[i];
-            targets[i].id = MAP_PRESET_UNKNOWN_ID;
-        }
+        memcpy(targets, preset->targets, Targets_count * sizeof(Position));
     }
     if (Bombs_count > 0U)
     {

@@ -2604,7 +2604,7 @@ void control_restart(void)
 {
     reset_control_runtime_state();
 #if ALGORITHM_TEST_ENABLE
-    Algorithm_Test_PresetInput_Init(ALGORITHM_TEST_PRESET_INDEX);
+    Algorithm_Test_PresetInput_Init(Menu_Get_Preset_Map_Index());
 #endif
 }
 

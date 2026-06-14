@@ -13,18 +13,17 @@
 typedef enum
 {
     CONTROL_STAGE_IDLE = 0,          /**< 空闲态：流程未启动。 */
-    CONTROL_STAGE_PRESTART_MOVE = 1, /**< 起步态：先沿车头方向运动 0.2m，驶出发车区。 */
+    CONTROL_STAGE_PRESTART_MOVE = 1, /**< 起步态：先按发车方向平移驶出发车区。 */
 
     /* 识别阶段：负责到达识别点、识别箱子/目标 ID，并保存给后续推箱子阶段使用。 */
-    CONTROL_STAGE_IDENTIFY_LOCALIZE = 20,        /**< 识别-定位态：采集相机位姿并对齐里程计。 */
+    CONTROL_STAGE_IDENTIFY_LOCALIZE = 20,        /**< 识别-定位态：采集相机位置并对齐里程计。 */
     CONTROL_STAGE_IDENTIFY_WAIT_CAMERA_DATA = 21, /**< 识别-等待地图态：请求并等待识别用地图帧。 */
     CONTROL_STAGE_IDENTIFY_PLAN_PATH = 22,       /**< 识别-规划态：调用识别路径规划。 */
     CONTROL_STAGE_IDENTIFY_LOAD_PATH = 23,       /**< 识别-下发态：切分识别路径并准备分段执行。 */
     CONTROL_STAGE_IDENTIFY_EXECUTE_PATH = 24,    /**< 识别-执行态：移动、转向并触发识别。 */
-    CONTROL_STAGE_IDENTIFY_FINISHED = 25,        /**< 识别-完成态：识别流程结束，准备切入推箱子。 */
 
     /* 推箱子阶段：使用识别结果规划真实推箱路径，并下发给 path_follow 执行。 */
-    CONTROL_STAGE_PUSHBOX_LOCALIZE = 30,         /**< 推箱子-定位态：重新采集车位姿，降低阶段切换误差。 */
+    CONTROL_STAGE_PUSHBOX_LOCALIZE = 30,         /**< 推箱子-定位态：重新采集车位置，降低阶段切换误差。 */
     CONTROL_STAGE_PUSHBOX_WAIT_CAMERA_DATA = 31, /**< 推箱子-等待地图态：请求并等待推箱子地图帧。 */
     CONTROL_STAGE_PUSHBOX_PLAN_PATH = 32,        /**< 推箱子-规划态：调用 Game_logic 进行推箱路径规划。 */
     CONTROL_STAGE_PUSHBOX_LOAD_PATH = 33,        /**< 推箱子-下发态：把执行路径下发给 path_follow。 */
@@ -179,23 +178,6 @@ void control_set_identify_prerotate_enabled(uint8 enabled);
  * @return uint8 1：启用；0：关闭。
  */
 uint8 control_get_identify_prerotate_enabled(void);
-
-/**
- * @brief 设置是否启用三轮完整流程模式。
- *
- * 开启后，一轮推箱完成并返回左侧发车区、车头回正后，会再次发车开始新流程，
- * 总共执行 3 次“发车->识别->推箱->返场”。
- *
- * @param enabled 1：启用三轮流程；0：单轮流程。
- */
-void control_set_repeat_three_flow_enabled(uint8 enabled);
-
-/**
- * @brief 获取三轮完整流程模式开关状态。
- *
- * @return uint8 1：启用三轮流程；0：单轮流程。
- */
-uint8 control_get_repeat_three_flow_enabled(void);
 
 /**
  * @brief 设置控制流程使用的路径规划模式。

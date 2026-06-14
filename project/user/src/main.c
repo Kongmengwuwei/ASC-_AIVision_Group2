@@ -162,8 +162,6 @@ void pit_1_handler(void)
 /* PIT2 周期中断（2ms）：姿态解算 */
 void pit_2_handler(void)
 {
-  /* 规划保护期内不更新姿态，避免重规划期间姿态状态与路径状态不同步。 */
-  if (control_is_path_plan_paused())
-    return;
+  /* 姿态解算始终更新；规划保护期只暂停速度目标，不能让 IMU yaw 短暂停更。 */
   Attitude_Calculate();
 }

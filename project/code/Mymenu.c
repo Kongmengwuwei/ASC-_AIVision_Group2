@@ -13,7 +13,6 @@ static uint8 startup_depart_dir_value = 0U;
 static bool diagonal_path_switch = true;
 static bool followup_vision_switch = true;
 static bool identify_prerotate_switch = true;
-static bool repeat_three_flow_switch = false;
 static bool show_map_switch = true;
 static bool state_show_switch = true;
 static uint8 preset_map_index = ALGORITHM_TEST_PRESET_INDEX;
@@ -100,7 +99,6 @@ void Menu_Create(void)
     Create_Menu_File_dynamic(Setting, "DiagPath", &diagonal_path_switch, bool_Box);
     Create_Menu_File_dynamic(Setting, "FolVision", &followup_vision_switch, bool_Box);
     Create_Menu_File_dynamic(Setting, "PreRotate", &identify_prerotate_switch, bool_Box);
-    Create_Menu_File_dynamic(Setting, "Repeat3", &repeat_three_flow_switch, bool_Box);
 }
 
 static void Menu_Sync_Control_State(void)
@@ -111,7 +109,6 @@ static void Menu_Sync_Control_State(void)
     diagonal_path_switch = (control_get_diagonal_path_enabled() != 0U);
     followup_vision_switch = (control_get_followup_vision_localization_enabled() != 0U);
     identify_prerotate_switch = (control_get_identify_prerotate_enabled() != 0U);
-    repeat_three_flow_switch = (control_get_repeat_three_flow_enabled() != 0U);
 }
 
 
@@ -158,13 +155,6 @@ static bool Menu_Handle_Control_Bool(Menu_Item *item, bool value)
     {
         identify_prerotate_switch = value;
         control_set_identify_prerotate_enabled(value ? 1U : 0U);
-        return true;
-    }
-
-    if (item->data == &repeat_three_flow_switch)
-    {
-        repeat_three_flow_switch = value;
-        control_set_repeat_three_flow_enabled(value ? 1U : 0U);
         return true;
     }
 
@@ -738,7 +728,7 @@ void State_Show(void)
     ips200_show_string(168, 132, "State:");
     /*
      * 状态编号约定：
-     * 0/1 为全局状态；20~25 为识别阶段；30~35 为推箱子阶段；99 为错误重试。
+     * 0/1 为全局状态；20~24 为识别阶段；30~35 为推箱子阶段；99 为错误重试。
      * 这样现场调车时只看两位数字，就能先判断当前属于哪条流程。
      */
     switch (g_control_stage)
@@ -763,9 +753,6 @@ void State_Show(void)
         break;
     case CONTROL_STAGE_IDENTIFY_EXECUTE_PATH:
         ips200_show_uint(216, 132, 24, 2);
-        break;
-    case CONTROL_STAGE_IDENTIFY_FINISHED:
-        ips200_show_uint(216, 132, 25, 2);
         break;
     case CONTROL_STAGE_PUSHBOX_LOCALIZE:
         ips200_show_uint(216, 132, 30, 2);

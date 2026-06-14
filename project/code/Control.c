@@ -12,12 +12,12 @@
 #include <string.h>
 
 /*
- * 手动开关：初始定位之后，是否继续使用视觉 CAR 位姿修正定位。
+ * 手动开关：初始定位之后，是否继续使用视觉 CAR 位置修正定位。
  *
  * 注意：起步后的第一次定位始终强制使用视觉，因为系统需要先拿到小车真实位置，
- * 并把车头校正到地图绝对右方向；该开关只控制后续流程：
+ * 方向基准只取发车时的 IMU yaw；该开关只控制后续流程：
  * - 识别结束进入推箱子阶段前是否二次视觉定位；
- * - 等待地图阶段收到新 CAR 位姿时是否顺带同步 path_follow。
+ * - 等待地图阶段收到新 CAR 位置时是否顺带同步 path_follow。
  */
 static uint8 g_control_use_followup_vision_localization = 1U;
 
@@ -60,9 +60,7 @@ float g_control_prestart_depart_compensate_m = -0.025f;
 #define CONTROL_PRESET_RECOGNITION_DELAY_MS 500U
 /* 推炸弹到爆炸点后停留 0.5s，等待爆炸效果生效 */
 #define CONTROL_BOMB_EXPLOSION_PAUSE_MS 500U
-/* 多轮模式下总共发车/执行的次数。 */
-#define CONTROL_REPEAT_TOTAL_RUNS 3U
-/* 回到发车区后，车头回正到初始方向的角度容差。 */
+/* 回到发车区后，车头回正到发车方向基准的角度容差。 */
 #define CONTROL_RETURN_YAW_ALIGN_TOL_DEG 5.0f
 
 
@@ -77,7 +75,7 @@ float g_control_prestart_depart_compensate_m = -0.025f;
 /**
  * @brief 起步位移距离（米）�?
  *
- * 这里采用与地图网格一致的 `GRID_SIZE_M`，即 0.3m�?
+ * 这是实车调车参数，用于让车身离开发车区；不要求等于地图格长。
  */
 #define CONTROL_PRESTART_OFFSET_M 0.30f
 
@@ -90,18 +88,13 @@ float g_control_prestart_depart_compensate_m = -0.025f;
  * 现象：规划“向右”实际“向下”，规划“向上”实际“向左”，
  * 对应规划/执行坐标发生了行列转置。开启该开关后�?
  * - 路径�?(row,col) 在下发前转为 (col,row)
- * - 视觉位姿映射同步采用 (x=col, y=row)
+ * - 视觉位置映射同步采用 (x=col, y=row)
  */
 #define CONTROL_COORD_TRANSPOSE_COMPENSATE PATH_COORD_TRANSPOSE_COMPENSATE
 /* 在转置补偿基础上，额外翻转“上下轴”（对应 map �?row 方向）�?*/
 #define CONTROL_COORD_FLIP_VERTICAL PATH_COORD_FLIP_VERTICAL
 #define CONTROL_WORLD_X_MAX_M PATH_WORLD_X_MAX_M
 #define CONTROL_WORLD_Y_MAX_M PATH_WORLD_Y_MAX_M
-// /* New pushbox paths are planned from the current grid cell.  When switching
-//  * phases, keep the follower pose coherent with that grid start if it is close. */
-// #define CONTROL_EXEC_START_SNAP_MAX_M (GRID_SIZE_M * 1.10f)
-
-
 /* ========================= 内部数据结构 ========================= */
 
 #define CONTROL_IDENTIFY_MAX_TARGETS_PER_POINT (MAX_BOXES + MAX_TARGETS)
@@ -168,7 +161,7 @@ typedef enum
     CONTROL_IDENTIFY_EXEC_MOVE_SEGMENT,
     CONTROL_IDENTIFY_EXEC_ROTATE_TO_TARGET,
     CONTROL_IDENTIFY_EXEC_DO_RECOGNIZE,
-    CONTROL_IDENTIFY_EXEC_ROTATE_BACK
+    CONTROL_IDENTIFY_EXEC_ADVANCE_ENDPOINT
 } control_identify_exec_state_t;
 
 /* ========================= 内部状态变�?========================= */
@@ -216,16 +209,14 @@ static uint8 g_plan_ready = 0U;
  */
 static control_plan_mode_t g_control_plan_mode = CONTROL_PLAN_MODE_1;
 static control_flow_phase_t g_control_flow_phase = CONTROL_FLOW_IDENTIFY;
-static uint8 g_control_repeat_three_enabled = 0U;
-static uint8 g_control_completed_flow_count = 0U;
 static uint8 g_return_heading_rotate_started = 0U;
-
-static control_map_dir_t g_body_map_dir = CONTROL_MAP_DIR_RIGHT;
+static float g_start_yaw_deg = 0.0f;
+static uint8 g_start_yaw_ready = 0U;
 
 static uint8 g_wait_new_map_frame = 0U;
 static uint8 g_wait_map_frame_base = 0U;
 static uint8 g_relocalize_force_fresh_pose = 0U;
-/* 定位取样完成后，先用 IMU 闭环把车头转回地图绝对右方向，再允许进入取图/规划。 */
+/* 定位取样完成后，先用 IMU 闭环把车头转回发车方向基准，再允许进入取图/规划。 */
 static uint8 g_localize_yaw_align_started = 0U;
 
 static size_t g_identify_segment_start_idx = 0U;
@@ -372,7 +363,7 @@ static control_stage_t make_control_phase_stage(control_flow_phase_t phase,
         return CONTROL_STAGE_IDENTIFY_EXECUTE_PATH;
     case CONTROL_PHASE_STEP_FINISHED:
     default:
-        return CONTROL_STAGE_IDENTIFY_FINISHED;
+        return CONTROL_STAGE_ERROR;
     }
 }
 
@@ -575,41 +566,62 @@ static uint8 resolve_map_dir_from_delta(int32 d_row, int32 d_col, control_map_di
     return 0U;
 }
 
+static void capture_start_yaw_if_needed(void)
+{
+    if (!g_start_yaw_ready)
+    {
+        g_start_yaw_deg = wrap_yaw_deg_local(eulerAngle.yaw);
+        g_start_yaw_ready = 1U;
+    }
+}
+
+static float get_start_yaw_base_deg(void)
+{
+    if (g_start_yaw_ready)
+    {
+        return g_start_yaw_deg;
+    }
+
+    /*
+     * 正常流程会在发车动作首次下发前记录基准。
+     * 这里保留兜底，避免异常调试入口提前调用方向转换时得到未初始化角度。
+     */
+    return eulerAngle.yaw;
+}
+
 static float map_dir_to_yaw_deg(control_map_dir_t dir)
 {
+    float base_yaw_deg = get_start_yaw_base_deg();
+    float delta_yaw_deg = 0.0f;
+
     /*
-     * 地图坐标系的绝对方向约定：
-     * - 右：  0 deg
-     * - 上： 90 deg
-     * - 左：180 deg
-     * - 下：-90 deg
+     * 所有地图方向都以发车时记录的车头方向为基准：
+     * - 右：发车 yaw
+     * - 上：发车 yaw + 90 deg
+     * - 左：发车 yaw + 180 deg
+     * - 下：发车 yaw - 90 deg
      *
-     * 这里故意不使用小车刚开机时的 eulerAngle.yaw，也不使用视觉上报的 car_pose.yaw。
-     * 起步离开发车区之前还没有可靠地图方向，那一小段会走专用的相对方向函数；
-     * 一旦进入定位/识别/推箱流程，所有“转向到地图方向”的目标都必须落在这个绝对坐标系里。
+     * 这里不读取视觉传来的 yaw。相机只负责给出位置，方向闭环完全由 IMU 当前 yaw
+     * 向“发车 yaw + 偏移”收敛，避免视觉方向抖动或坐标定义不一致污染整车转向。
      */
     switch (dir)
     {
     case CONTROL_MAP_DIR_UP:
-        return 90.0f;
+        delta_yaw_deg = 90.0f;
+        break;
     case CONTROL_MAP_DIR_LEFT:
-        return 180.0f;
+        delta_yaw_deg = 180.0f;
+        break;
     case CONTROL_MAP_DIR_DOWN:
-        return -90.0f;
+        delta_yaw_deg = -90.0f;
+        break;
     case CONTROL_MAP_DIR_RIGHT:
     default:
-        return 0.0f;
+        delta_yaw_deg = 0.0f;
+        break;
     }
-}
 
-static float prestart_map_dir_to_current_yaw_deg(control_map_dir_t dir)
-{
-    /*
-     * 起步阶段车还在发车区内，视觉地图方向尚不可用，只能把菜单选择的
-     * “右/上/左/下”理解成相对当前车头的方向。离开发车区完成初始定位后，
-     * 后续所有转向都会改用 map_dir_to_yaw_deg() 的地图绝对方向。
-     */
-    return wrap_yaw_deg_local(eulerAngle.yaw + map_dir_to_yaw_deg(dir));
+    return wrap_yaw_deg_local(base_yaw_deg + delta_yaw_deg);
 }
 
 static control_map_dir_t get_prestart_depart_map_dir(void)
@@ -644,8 +656,9 @@ static void reset_control_runtime_state(void)
     g_path_plan_paused = 0U;
     g_plan_ready = 0U;
     g_exec_steps = 0U;
-    g_control_completed_flow_count = 0U;
     g_return_heading_rotate_started = 0U;
+    g_start_yaw_deg = 0.0f;
+    g_start_yaw_ready = 0U;
     memset(g_exec_path, 0, sizeof(g_exec_path));
 
     reset_localization_accumulator();
@@ -653,7 +666,6 @@ static void reset_control_runtime_state(void)
     g_prestart_nominal_pose_valid = 0U;
     g_prestart_nominal_target_x_m = 0.0f;
     g_prestart_nominal_target_y_m = 0.0f;
-    g_body_map_dir = CONTROL_MAP_DIR_RIGHT;
     g_wait_new_map_frame = 0U;
     g_wait_map_frame_base = 0U;
     g_relocalize_force_fresh_pose = 0U;
@@ -671,45 +683,6 @@ static void reset_control_runtime_state(void)
     car_stop_flag = 0U;
     map_data_updated = false;
     car_pose_updated = false;
-}
-
-/**
- * @brief 准备从左侧发车区开始下一轮完整流程。
- *
- * 多轮模式只复位“本轮任务运行态”，不改菜单开关，也不关闭启动标志。
- * 下一轮仍会先执行发车偏移，再强制视觉初始定位、重新取地图和重新识别。
- */
-static void prepare_next_full_flow_cycle(void)
-{
-    g_control_flow_phase = CONTROL_FLOW_IDENTIFY;
-    g_control_stage = CONTROL_STAGE_PRESTART_MOVE;
-    g_path_plan_paused = 0U;
-    g_plan_ready = 0U;
-    g_exec_steps = 0U;
-    memset(g_exec_path, 0, sizeof(g_exec_path));
-
-    reset_localization_accumulator();
-    g_prestart_move_started = 0U;
-    g_body_map_dir = CONTROL_MAP_DIR_RIGHT;
-    g_wait_new_map_frame = 0U;
-    g_wait_map_frame_base = 0U;
-    g_relocalize_force_fresh_pose = 0U;
-    g_return_heading_rotate_started = 0U;
-
-    reset_identify_runtime_state();
-    clear_saved_identify_ids();
-    vision_clear_pending_data();
-    clear_map_request_wait();
-    clear_car_request_wait();
-
-    path_follow_set_pause_indices(NULL, 0U, 0U);
-    path_follow_set_path(NULL, 0U);
-    path_follow_hold_current_yaw();
-
-    map_data_updated = false;
-    car_pose_updated = false;
-    car_go_flag = 0U;
-    car_stop_flag = 0U;
 }
 
 static uint8 identify_result_to_valid_id(const VisionRecognitionResult *result, uint8 *id_out)
@@ -1565,8 +1538,9 @@ static uint8 start_identify_segment(size_t end_idx)
 
 static void finish_identify_flow_and_relocalize(uint8 finalize_ids)
 {
-    car_go_flag = 0U;
-    car_stop_flag = 0U;
+    /* 识别路径刚结束时仍按行驶中停车处理，避免直接断 PWM 造成滑行。 */
+    car_go_flag = 1U;
+    car_stop_flag = 1U;
     path_follow_set_path(NULL, 0U);
     path_follow_set_pause_indices(NULL, 0U, 0U);
 
@@ -1672,7 +1646,7 @@ static void configure_bomb_pause_for_path(const Position *path, size_t steps)
 }
 
 /**
- * @brief 将视觉位姿转换为 path_follow 需要的米制坐标�?
+ * @brief 将视觉位置转换为 path_follow 需要的米制坐标�?
  *
  * 当前工程坐标约定�?
  * - data_handle �?`car_pose.x/y` 为“列/行”浮点栅格�?
@@ -1681,17 +1655,16 @@ static void configure_bomb_pause_for_path(const Position *path, size_t steps)
  *
  * @param[out] x_m 转换后的 x 坐标（米）�?
  * @param[out] y_m 转换后的 y 坐标（米）�?
- * @param[out] yaw_deg 给 path_follow 使用的地图绝对右方向 yaw（度）�?
  * @return uint8
  * - 1：转换成�?
- * - 0：输入参数无效或视觉位姿尚未就绪
+ * - 0：输入参数无效或视觉位置尚未就绪
  */
-static uint8 get_camera_pose_meter(float *x_m, float *y_m, float *yaw_deg)
+static uint8 get_camera_position_meter(float *x_m, float *y_m)
 {
     float row_f = 0.0f;
     float col_f = 0.0f;
 
-    if (x_m == NULL || y_m == NULL || yaw_deg == NULL)
+    if (x_m == NULL || y_m == NULL)
     {
         return 0U;
     }
@@ -1700,7 +1673,7 @@ static uint8 get_camera_pose_meter(float *x_m, float *y_m, float *yaw_deg)
         return 0U;
     }
 
-/* 视觉位姿到执行坐标系的映射需与路径点 remap 保持一致�?*/
+/* 视觉位置到执行坐标系的映射需与路径点 remap 保持一致�?*/
 #if CONTROL_COORD_TRANSPOSE_COMPENSATE
     row_f = car_pose.x;
     col_f = car_pose.y;
@@ -1715,12 +1688,6 @@ static uint8 get_camera_pose_meter(float *x_m, float *y_m, float *yaw_deg)
 
     *x_m = row_f * GRID_SIZE_M;
     *y_m = col_f * GRID_SIZE_M;
-    /*
-     * 视觉定位在本控制流程里只负责校正“车在哪个地图位置”。
-     * car_pose.yaw 若带有初始识别误差，不能再被当作地图右方向基准；
-     * 因此这里固定输出地图绝对右方向，后续由 path_follow 按 IMU yaw 闭环转正。
-     */
-    *yaw_deg = map_dir_to_yaw_deg(CONTROL_MAP_DIR_RIGHT);
     return 1U;
 }
 
@@ -1975,9 +1942,10 @@ static void handle_prestart_move(void)
         car_stop_flag = 0U;
 
         path_follow_get_status(&st);
-        hold_yaw_deg = eulerAngle.yaw;
+        capture_start_yaw_if_needed();
+        hold_yaw_deg = map_dir_to_yaw_deg(CONTROL_MAP_DIR_RIGHT);
         prestart_dir = get_prestart_depart_map_dir();
-        move_yaw_deg = prestart_map_dir_to_current_yaw_deg(prestart_dir);
+        move_yaw_deg = map_dir_to_yaw_deg(prestart_dir);
         move_yaw_rad = move_yaw_deg * CONTROL_DEG_TO_RAD;
         prestart_distance_m = CONTROL_PRESTART_OFFSET_M +
                               g_control_prestart_depart_compensate_m;
@@ -2028,7 +1996,7 @@ static void handle_prestart_move(void)
         {
             path_follow_reset_pose(g_prestart_nominal_target_x_m,
                                    g_prestart_nominal_target_y_m,
-                                   eulerAngle.yaw);
+                                   map_dir_to_yaw_deg(CONTROL_MAP_DIR_RIGHT));
             path_follow_hold_current_yaw();
             g_prestart_nominal_pose_valid = 0U;
         }
@@ -2040,7 +2008,6 @@ static void handle_prestart_move(void)
         }
         else
         {
-            g_body_map_dir = CONTROL_MAP_DIR_RIGHT;
             mark_wait_new_map_frame();
             set_control_phase_stage(CONTROL_PHASE_STEP_WAIT_CAMERA_DATA);
         }
@@ -2054,26 +2021,24 @@ static void handle_prestart_move(void)
  * - 按需请求视觉车位�?
  * - 采集多帧位置后取平均
  * - 将里程计位置重置到视觉平均位置
- * - 航向不采用视觉 yaw，而是先原地转向校正到地图绝对右方向
+ * - 航向不采用视觉 yaw，而是先原地转向校正回发车方向基准
  */
-static void handle_startup_localization(void)
+static void handle_localization_stage(void)
 {
     path_follow_status_t st = {0};
     uint8 accept_sample = 0U;
     uint8 min_samples = CONTROL_LOCALIZE_MIN_SAMPLES;
     float cam_x_m = 0.0f;
     float cam_y_m = 0.0f;
-    float cam_yaw_deg = 0.0f;
     float avg_x_m = 0.0f;
     float avg_y_m = 0.0f;
-    float map_right_yaw_deg = map_dir_to_yaw_deg(CONTROL_MAP_DIR_RIGHT);
+    float start_base_yaw_deg = map_dir_to_yaw_deg(CONTROL_MAP_DIR_RIGHT);
 
     if (!should_enter_vision_localization_stage())
     {
         /* 后续视觉定位关闭时，推箱子阶段重定位直接降级为“等地图->规划”。 */
         if (g_control_flow_phase == CONTROL_FLOW_IDENTIFY)
         {
-            g_body_map_dir = CONTROL_MAP_DIR_RIGHT;
         }
         g_relocalize_force_fresh_pose = 0U;
         clear_car_request_wait();
@@ -2085,7 +2050,7 @@ static void handle_startup_localization(void)
     if (g_localize_yaw_align_started)
     {
         /*
-         * 视觉位置已经写入 path_follow，当前只等待“车头回正到地图右方向”结束。
+         * 视觉位置已经写入 path_follow，当前只等待“车头回正到发车方向基准”结束。
          * 这里用 path_follow 的 active 标志做握手，避免在原地转向尚未完成时提前取图规划。
          */
         path_follow_get_status(&st);
@@ -2101,7 +2066,6 @@ static void handle_startup_localization(void)
         g_relocalize_force_fresh_pose = 0U;
         if (g_control_flow_phase == CONTROL_FLOW_IDENTIFY)
         {
-            g_body_map_dir = CONTROL_MAP_DIR_RIGHT;
         }
         mark_wait_new_map_frame();
         set_control_phase_stage(CONTROL_PHASE_STEP_WAIT_CAMERA_DATA);
@@ -2133,7 +2097,7 @@ static void handle_startup_localization(void)
         service_car_request_wait();
         return;
     }
-    if (!get_camera_pose_meter(&cam_x_m, &cam_y_m, &cam_yaw_deg))
+    if (!get_camera_position_meter(&cam_x_m, &cam_y_m))
     {
         service_car_request_wait();
         return;
@@ -2156,11 +2120,11 @@ static void handle_startup_localization(void)
     /*
      * 初始定位的关键修正：
      * - 视觉只提供地图位置平均值；
-     * - 航向目标强制采用地图绝对右方向；
-     * - 下发原地转向，让 IMU yaw 闭环把车头实际纠正到 0 deg。
+     * - 航向目标强制采用发车时记录的方向基准；
+     * - 下发原地转向，让 IMU yaw 闭环把车头实际纠正回发车方向。
      */
-    path_follow_reset_pose(avg_x_m, avg_y_m, map_right_yaw_deg);
-    path_follow_start_rotate_to_yaw(map_right_yaw_deg);
+    path_follow_reset_pose(avg_x_m, avg_y_m, start_base_yaw_deg);
+    path_follow_start_rotate_to_yaw(start_base_yaw_deg);
     car_go_flag = 1U;
     car_stop_flag = 0U;
     g_localize_yaw_align_started = 1U;
@@ -2170,24 +2134,25 @@ static void handle_startup_localization(void)
  * @brief 处理“等待地图”阶段�?
  *
  * 阶段目标�?
- * - 按需请求地图，并顺带消费可能到达的车位姿
+ * - 按需请求地图，并顺带消费可能到达的车位置
  * - 收到有效地图后切换到规划阶段
  */
 static void handle_wait_camera_data(void)
 {
     float cam_x_m = 0.0f;
     float cam_y_m = 0.0f;
-    float cam_yaw_deg = 0.0f;
 
     if (g_control_use_followup_vision_localization)
     {
         if (car_pose_updated)
         {
             car_pose_updated = false;
-            if (get_camera_pose_meter(&cam_x_m, &cam_y_m, &cam_yaw_deg))
+            if (get_camera_position_meter(&cam_x_m, &cam_y_m))
             {
-                /* 等地图阶段若拿到新位姿，顺带轻量同步一次里程计。 */
-                path_follow_reset_pose(cam_x_m, cam_y_m, cam_yaw_deg);
+                /* 等地图阶段若拿到新位置，顺带轻量同步一次里程计；方向仍使用发车基准。 */
+                path_follow_reset_pose(cam_x_m,
+                                       cam_y_m,
+                                       map_dir_to_yaw_deg(CONTROL_MAP_DIR_RIGHT));
             }
         }
     }
@@ -2234,10 +2199,9 @@ static uint8 load_identify_path_for_execution(void)
     return start_identify_segment(g_identify_endpoint_indices[0]);
 }
 
-static void finish_identify_rotation(control_map_dir_t face_dir)
+static void finish_identify_rotation(void)
 {
     g_identify_rotate_started = 0U;
-    g_body_map_dir = face_dir;
     reset_identify_recognition_wait();
 }
 
@@ -2278,7 +2242,7 @@ static void handle_identify_execute_path(void)
         yaw_err_deg = wrap_yaw_deg_local(target_yaw_deg - eulerAngle.yaw);
         if (fabsf(yaw_err_deg) <= CONTROL_IDENTIFY_YAW_ALIGN_TOL_DEG)
         {
-            finish_identify_rotation(curr_target->face_dir);
+            finish_identify_rotation();
             if (!begin_identify_segment_motion(g_identify_endpoint_indices[g_identify_endpoint_cursor]))
             {
                 g_control_stage = CONTROL_STAGE_ERROR;
@@ -2301,7 +2265,7 @@ static void handle_identify_execute_path(void)
             return;
         }
 
-        finish_identify_rotation(curr_target->face_dir);
+        finish_identify_rotation();
         if (!begin_identify_segment_motion(g_identify_endpoint_indices[g_identify_endpoint_cursor]))
         {
             g_control_stage = CONTROL_STAGE_ERROR;
@@ -2347,7 +2311,7 @@ static void handle_identify_execute_path(void)
         if (g_identify_target_cursor >= g_identify_target_count)
         {
             g_identify_rotate_started = 0U;
-            g_identify_exec_state = CONTROL_IDENTIFY_EXEC_ROTATE_BACK;
+            g_identify_exec_state = CONTROL_IDENTIFY_EXEC_ADVANCE_ENDPOINT;
             return;
         }
 
@@ -2356,7 +2320,7 @@ static void handle_identify_execute_path(void)
         yaw_err_deg = wrap_yaw_deg_local(target_yaw_deg - eulerAngle.yaw);
         if (fabsf(yaw_err_deg) <= CONTROL_IDENTIFY_YAW_ALIGN_TOL_DEG)
         {
-            finish_identify_rotation(curr_target->face_dir);
+            finish_identify_rotation();
             g_identify_exec_state = CONTROL_IDENTIFY_EXEC_DO_RECOGNIZE;
             return;
         }
@@ -2376,7 +2340,7 @@ static void handle_identify_execute_path(void)
             return;
         }
 
-        finish_identify_rotation(curr_target->face_dir);
+        finish_identify_rotation();
         g_identify_exec_state = CONTROL_IDENTIFY_EXEC_DO_RECOGNIZE;
         break;
 
@@ -2416,12 +2380,12 @@ static void handle_identify_execute_path(void)
         else
         {
             g_identify_rotate_started = 0U;
-            g_identify_exec_state = CONTROL_IDENTIFY_EXEC_ROTATE_BACK;
+            g_identify_exec_state = CONTROL_IDENTIFY_EXEC_ADVANCE_ENDPOINT;
         }
         break;
 
-    case CONTROL_IDENTIFY_EXEC_ROTATE_BACK:
-        /* 不再强制回正到“地图右向”，保持当前车头朝向直接进入下一段�?*/
+    case CONTROL_IDENTIFY_EXEC_ADVANCE_ENDPOINT:
+        /* 当前识别点处理完成，保持现有车头朝向，直接推进到下一段。 */
         g_identify_rotate_started = 0U;
         if (!advance_identify_endpoint_or_finish())
         {
@@ -2456,33 +2420,6 @@ static void handle_plan_path_stage(void)
     end_path_plan_pause();
 }
 
-// static void sync_path_follow_pose_to_exec_start_if_close(void)
-// {
-//     path_follow_status_t st = {0};
-//     float start_x_m;
-//     float start_y_m;
-//     float dx_m;
-//     float dy_m;
-//     float max_delta_m;
-
-//     if (g_exec_steps == 0U)
-//     {
-//         return;
-//     }
-
-//     path_follow_get_status(&st);
-//     start_x_m = (float)g_exec_path[0].row * GRID_SIZE_M;
-//     start_y_m = (float)g_exec_path[0].col * GRID_SIZE_M;
-//     dx_m = st.x_m - start_x_m;
-//     dy_m = st.y_m - start_y_m;
-//     max_delta_m = CONTROL_EXEC_START_SNAP_MAX_M;
-
-//     if ((dx_m * dx_m + dy_m * dy_m) <= (max_delta_m * max_delta_m))
-//     {
-//         path_follow_reset_pose(start_x_m, start_y_m, eulerAngle.yaw);
-//     }
-// }
-
 /**
  * @brief 下发阶段：根据当前大流程，把识别路径或推箱路径装载到 path_follow。
  *
@@ -2509,7 +2446,6 @@ static void handle_load_path_stage(void)
     }
 
     configure_bomb_pause_for_path(g_exec_path, g_exec_steps);
-    // sync_path_follow_pose_to_exec_start_if_close();
     path_follow_hold_current_yaw();
     path_follow_set_path(g_exec_path, g_exec_steps);
 
@@ -2523,19 +2459,6 @@ static void finish_pushbox_flow_after_return(void)
     car_go_flag = 1U;
     car_stop_flag = 1U;
     g_return_heading_rotate_started = 0U;
-
-    if (g_control_completed_flow_count < CONTROL_REPEAT_TOTAL_RUNS)
-    {
-        g_control_completed_flow_count++;
-    }
-
-    if (g_control_repeat_three_enabled &&
-        g_control_completed_flow_count < CONTROL_REPEAT_TOTAL_RUNS)
-    {
-        prepare_next_full_flow_cycle();
-        return;
-    }
-
     set_control_phase_stage(CONTROL_PHASE_STEP_FINISHED);
 }
 
@@ -2589,7 +2512,7 @@ static void handle_execute_path_stage(void)
 /**
  * @brief 错误阶段：安全停车，并等待新地图后重新尝试规划。
  *
- * 只按需请求新地图；车位姿由定位阶段单独获取。
+ * 只按需请求新地图；车位置由定位阶段单独获取。
  */
 static void handle_error_stage(void)
 {
@@ -2662,7 +2585,7 @@ void control_process(void)
 {
     /*
      * 控制主循环只做两件事：
-     * 1) 先消费串口 FIFO，保证地图、车位姿、识别结果缓存尽量新；
+     * 1) 先消费串口 FIFO，保证地图、车位置、识别结果缓存尽量新；
      * 2) 再按当前阶段调用对应 handler，handler 内部只负责推进一个阶段。
      *
      * 这样主状态机保留“流程骨架”，阶段细节放在命名函数里，后续调车时更容易定位问题。
@@ -2694,7 +2617,7 @@ void control_process(void)
 
     case CONTROL_STAGE_IDENTIFY_LOCALIZE:
     case CONTROL_STAGE_PUSHBOX_LOCALIZE:
-        handle_startup_localization();
+        handle_localization_stage();
         break;
 
     case CONTROL_STAGE_IDENTIFY_WAIT_CAMERA_DATA:
@@ -2717,7 +2640,6 @@ void control_process(void)
         handle_execute_path_stage();
         break;
 
-    case CONTROL_STAGE_IDENTIFY_FINISHED:
     case CONTROL_STAGE_PUSHBOX_FINISHED:
         /* 完成态保持停车，等待外部调用 control_restart()。 */
         break;
@@ -2774,16 +2696,6 @@ void control_set_identify_prerotate_enabled(uint8 enabled)
 uint8 control_get_identify_prerotate_enabled(void)
 {
     return g_control_identify_prerotate_enabled;
-}
-
-void control_set_repeat_three_flow_enabled(uint8 enabled)
-{
-    g_control_repeat_three_enabled = (enabled != 0U) ? 1U : 0U;
-}
-
-uint8 control_get_repeat_three_flow_enabled(void)
-{
-    return g_control_repeat_three_enabled;
 }
 
 /**

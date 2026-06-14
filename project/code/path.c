@@ -17,6 +17,7 @@ static uint16 s_prev_index[MAX_CAR_PATH] = {0U};
 static uint16 s_rebuild_indices[MAX_CAR_PATH] = {0U};
 static uint16 s_mandatory_prefix[MAX_CAR_PATH + 1U] = {0U};
 static uint16 s_push_edge_prefix[MAX_CAR_PATH + 1U] = {0U};
+static uint16 s_last_required_before[MAX_CAR_PATH] = {0U};
 /* 运行期开关：1 允许动态规划选择斜线捷径，0 时只保留水平/竖直执行段。 */
 static uint8 g_path_diagonal_enabled = 1U;
 
@@ -601,10 +602,12 @@ static void path_prepare_prefix(const Position *path, size_t count)
     size_t i = 0U;
     uint16 mandatory_count = 0U;
     uint16 push_edge_count = 0U;
+    uint16 last_required_index = PATH_INDEX_NONE;
     uint8 push_active = 0U;
 
     memset(s_mandatory_prefix, 0, sizeof(s_mandatory_prefix));
     memset(s_push_edge_prefix, 0, sizeof(s_push_edge_prefix));
+    memset(s_last_required_before, 0xFF, sizeof(s_last_required_before));
 
     if (path == NULL || count == 0U)
     {
@@ -613,9 +616,11 @@ static void path_prepare_prefix(const Position *path, size_t count)
 
     for (i = 0U; i < count; i++)
     {
+        s_last_required_before[i] = last_required_index;
         if (path_is_required_exec_marker(path[i].id))
         {
             mandatory_count++;
+            last_required_index = (uint16)i;
         }
         s_mandatory_prefix[i + 1U] = mandatory_count;
     }
@@ -769,6 +774,7 @@ uint8 path_build_exec_from_planner(const Position *planner_path,
     memset(s_path_cost, 0, sizeof(s_path_cost));
     memset(s_prev_index, 0, sizeof(s_prev_index));
     memset(s_rebuild_indices, 0, sizeof(s_rebuild_indices));
+    memset(s_last_required_before, 0xFF, sizeof(s_last_required_before));
 
     /* 第一步：复制原始规划点，并合并连续重复格子的事件 id。 */
     for (i = 0U; i < planner_steps; i++)
@@ -817,14 +823,36 @@ uint8 path_build_exec_from_planner(const Position *planner_path,
 
     for (j = 1U; j < raw_steps; j++)
     {
-        for (i = 0U; i < j; i++)
+        size_t first_candidate = 0U;
+        uint16 required_anchor = s_last_required_before[j];
+
+        if (required_anchor != PATH_INDEX_NONE)
         {
+            first_candidate = (size_t)required_anchor;
+        }
+
+        for (i = first_candidate; i < j; i++)
+        {
+            float segment_cost = 0.0f;
             float candidate_cost = 0.0f;
 
             if (s_path_cost[i] >= PATH_COST_INF * 0.5f)
             {
                 continue;
             }
+
+            /*
+             * 必经事件点已经把候选起点收窄到 last_required_before[j] 之后。
+             * 再先做代价下界剪枝，只有可能优于当前最优解的候选段才进入
+             * path_exec_segment_allowed() 的障碍/净空检查，降低长路径 DP 开销。
+             */
+            segment_cost = path_grid_segment_distance(&s_raw_path[i], &s_raw_path[j]);
+            candidate_cost = s_path_cost[i] + segment_cost;
+            if (candidate_cost >= s_path_cost[j])
+            {
+                continue;
+            }
+
             if (!path_exec_segment_allowed(s_raw_path,
                                            raw_steps,
                                            current_map,
@@ -835,8 +863,6 @@ uint8 path_build_exec_from_planner(const Position *planner_path,
                 continue;
             }
 
-            candidate_cost = s_path_cost[i] +
-                             path_grid_segment_distance(&s_raw_path[i], &s_raw_path[j]);
             if (candidate_cost < s_path_cost[j])
             {
                 s_path_cost[j] = candidate_cost;

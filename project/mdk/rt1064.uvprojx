@@ -609,6 +609,16 @@
               <FileType>5</FileType>
               <FilePath>..\code\Control.h</FilePath>
             </File>
+            <File>
+              <FileName>BlueSerial.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\code\BlueSerial.c</FilePath>
+            </File>
+            <File>
+              <FileName>BlueSerial.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\code\BlueSerial.h</FilePath>
+            </File>
           </Files>
         </Group>
         <Group>

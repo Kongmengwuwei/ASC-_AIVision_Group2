@@ -100,6 +100,7 @@ float g_control_prestart_depart_compensate_m = -0.025f;
 #define CONTROL_IDENTIFY_MAX_TARGETS_PER_POINT (MAX_BOXES + MAX_TARGETS)
 #define CONTROL_IDENTIFY_YAW_ALIGN_TOL_DEG 5.0f
 #define CONTROL_IDENTIFY_RECOG_TIMEOUT_LOOPS 250U
+#define CONTROL_IDENTIFY_HALF_GRID_M (GRID_SIZE_M * 0.5f)
 /* 连续超时多少次之后才真正重发识别命令（避免在摄像头处理过程中频繁清 FIFO 重发）。 */
 #define CONTROL_IDENTIFY_RECOG_MAX_RETRIES 5U
 #define CONTROL_IDENTIFY_ID_UNASSIGNED 0xFFU
@@ -140,10 +141,14 @@ typedef enum
 typedef struct
 {
     Position obj_pos_map;
+    Position stand_pos_map;
     control_map_dir_t face_dir;
     control_identify_obj_t obj_type;
     VisionRecognitionDistance recog_distance;
     uint8 obj_index;
+    uint8 near_half_step_enabled;
+    float near_half_step_x_m;
+    float near_half_step_y_m;
 } control_identify_target_t;
 
 typedef struct
@@ -160,6 +165,7 @@ typedef enum
     CONTROL_IDENTIFY_EXEC_ROTATE_BEFORE_SEGMENT,
     CONTROL_IDENTIFY_EXEC_MOVE_SEGMENT,
     CONTROL_IDENTIFY_EXEC_ROTATE_TO_TARGET,
+    CONTROL_IDENTIFY_EXEC_NEAR_HALF_STEP,
     CONTROL_IDENTIFY_EXEC_DO_RECOGNIZE,
     CONTROL_IDENTIFY_EXEC_ADVANCE_ENDPOINT
 } control_identify_exec_state_t;
@@ -231,6 +237,7 @@ static control_identify_target_t g_identify_targets[CONTROL_IDENTIFY_MAX_TARGETS
 static size_t g_identify_target_count = 0U;
 static size_t g_identify_target_cursor = 0U;
 static uint8 g_identify_rotate_started = 0U;
+static uint8 g_identify_near_half_step_started = 0U;
 static control_identify_exec_state_t g_identify_exec_state = CONTROL_IDENTIFY_EXEC_IDLE;
 
 static uint8 g_identified_box_flags[MAX_BOXES] = {0U};
@@ -512,6 +519,7 @@ static void reset_identify_runtime_state(void)
     g_identify_target_count = 0U;
     g_identify_target_cursor = 0U;
     g_identify_rotate_started = 0U;
+    g_identify_near_half_step_started = 0U;
     g_identify_exec_state = CONTROL_IDENTIFY_EXEC_IDLE;
     reset_identify_recognition_wait();
     g_identify_first_result_checked = 0U;
@@ -530,6 +538,16 @@ static void inverse_remap_exec_path_point(Position *p)
 
 /* 前向声明：供识别分段和主路径下发时复用炸弹停留配置。 */
 static void configure_bomb_pause_for_path(const Position *path, size_t steps);
+static uint8 identify_cell_has_blocker(uint8 row, uint8 col);
+static uint8 identify_cell_blocks_near_half_step(uint8 row, uint8 col);
+static void map_float_grid_to_exec_meter(float map_row_f,
+                                         float map_col_f,
+                                         float *x_m,
+                                         float *y_m);
+static uint8 identify_try_make_near_half_step(const Position *stand_pos,
+                                              const Position *object_pos,
+                                              float *x_m,
+                                              float *y_m);
 
 static uint8 is_identification_marker(uint8 marker_id)
 {
@@ -1234,7 +1252,8 @@ static void identify_sort_targets_by_direction(void)
     }
 }
 
-static void add_identify_target_if_nearest(Position object_pos,
+static void add_identify_target_if_nearest(Position stand_pos,
+                                           Position object_pos,
                                            control_map_dir_t face_dir,
                                            control_identify_obj_t obj_type,
                                            uint8 obj_index,
@@ -1271,11 +1290,20 @@ static void add_identify_target_if_nearest(Position object_pos,
     }
 
     candidate.obj_pos_map = object_pos;
+    candidate.stand_pos_map = stand_pos;
     candidate.face_dir = face_dir;
     candidate.obj_type = obj_type;
     candidate.recog_distance = (manhattan == 2) ? VISION_RECOGNITION_DISTANCE_TWO_GRID :
                                                  VISION_RECOGNITION_DISTANCE_ONE_GRID;
     candidate.obj_index = obj_index;
+    if (manhattan == 1 &&
+        identify_try_make_near_half_step(&stand_pos,
+                                         &object_pos,
+                                         &candidate.near_half_step_x_m,
+                                         &candidate.near_half_step_y_m))
+    {
+        candidate.near_half_step_enabled = 1U;
+    }
     g_identify_targets[slot] = candidate;
 }
 
@@ -1304,6 +1332,116 @@ static uint8 identify_cell_has_blocker(uint8 row, uint8 col)
             return 1U;
     }
     return 0U;
+}
+
+static uint8 identify_cell_blocks_near_half_step(uint8 row, uint8 col)
+{
+    size_t i = 0U;
+
+    /*
+     * 这里只服务于“近距离识别前后退半格”的可行性判断。
+     * 目标点本身可穿过，因此不把 targets[] 当成阻挡；但墙/障碍、炸弹、箱子
+     * 仍然不能穿过，保持原来的安全限制。
+     */
+    for (i = 0U; i < Obstacles_count; i++)
+    {
+        if (obstacles[i].row == row && obstacles[i].col == col)
+            return 1U;
+    }
+    for (i = 0U; i < Bombs_count; i++)
+    {
+        if (bombs[i].row == row && bombs[i].col == col)
+            return 1U;
+    }
+    for (i = 0U; i < Boxes_count; i++)
+    {
+        if (boxes[i].row == row && boxes[i].col == col)
+            return 1U;
+    }
+    return 0U;
+}
+
+static void map_float_grid_to_exec_meter(float map_row_f,
+                                         float map_col_f,
+                                         float *x_m,
+                                         float *y_m)
+{
+    float exec_row_f = map_row_f;
+    float exec_col_f = map_col_f;
+
+    if (x_m == NULL || y_m == NULL)
+    {
+        return;
+    }
+
+    /*
+     * 半格偏移不是整数 Position，不能直接调用 path_remap_exec_point()。
+     * 这里按同一套坐标映射开关做浮点版转换，保证临时识别点和执行路径坐标系一致。
+     */
+#if CONTROL_COORD_TRANSPOSE_COMPENSATE
+    exec_row_f = map_col_f;
+    exec_col_f = map_row_f;
+#endif
+
+#if CONTROL_COORD_FLIP_VERTICAL
+    exec_col_f = (float)(MAP_ROWS - 1U) - exec_col_f;
+#endif
+
+    *x_m = clampf_local(exec_row_f * GRID_SIZE_M, 0.0f, CONTROL_WORLD_X_MAX_M);
+    *y_m = clampf_local(exec_col_f * GRID_SIZE_M, 0.0f, CONTROL_WORLD_Y_MAX_M);
+}
+
+static uint8 identify_try_make_near_half_step(const Position *stand_pos,
+                                              const Position *object_pos,
+                                              float *x_m,
+                                              float *y_m)
+{
+    int32 d_row = 0;
+    int32 d_col = 0;
+    int32 back_row = 0;
+    int32 back_col = 0;
+    float half_row_f = 0.0f;
+    float half_col_f = 0.0f;
+
+    if (stand_pos == NULL || object_pos == NULL || x_m == NULL || y_m == NULL)
+    {
+        return 0U;
+    }
+
+    /*
+     * 只对一格近距离识别后退半格；两格远距离识别完全保持原逻辑。
+     * 后退方向取“站位 -> 远离目标”的方向，背后整格必须在地图内且没有墙/障碍/
+     * 箱子/炸弹等不可穿过对象。目标点可穿过，不会阻止半格后退。
+     */
+    d_row = (int32)object_pos->row - (int32)stand_pos->row;
+    d_col = (int32)object_pos->col - (int32)stand_pos->col;
+    if (((d_row == 0) ? 0 : ((d_row > 0) ? d_row : -d_row)) +
+            ((d_col == 0) ? 0 : ((d_col > 0) ? d_col : -d_col)) !=
+        1)
+    {
+        return 0U;
+    }
+    if (d_row != 0 && d_col != 0)
+    {
+        return 0U;
+    }
+
+    back_row = (int32)stand_pos->row - d_row;
+    back_col = (int32)stand_pos->col - d_col;
+    if (back_row < 0 || back_col < 0 ||
+        back_row >= (int32)MAP_ROWS || back_col >= (int32)MAP_COLS)
+    {
+        return 0U;
+    }
+    if (identify_cell_blocks_near_half_step((uint8)back_row, (uint8)back_col))
+    {
+        return 0U;
+    }
+
+    half_row_f = (float)stand_pos->row - 0.5f * (float)d_row;
+    half_col_f = (float)stand_pos->col - 0.5f * (float)d_col;
+    map_float_grid_to_exec_meter(half_row_f, half_col_f, x_m, y_m);
+    return 1U;
 }
 
 static uint8 identify_target_has_clear_view(const Position *map_point,
@@ -1383,7 +1521,8 @@ static uint8 collect_identify_targets_on_exec_point(const Position *exec_point)
         {
             continue;
         }
-        add_identify_target_if_nearest(boxes[i],
+        add_identify_target_if_nearest(map_point,
+                                       boxes[i],
                                        face_dir,
                                        CONTROL_IDENTIFY_OBJ_BOX,
                                        (uint8)i,
@@ -1413,7 +1552,8 @@ static uint8 collect_identify_targets_on_exec_point(const Position *exec_point)
         {
             continue;
         }
-        add_identify_target_if_nearest(targets[i],
+        add_identify_target_if_nearest(map_point,
+                                       targets[i],
                                        face_dir,
                                        CONTROL_IDENTIFY_OBJ_TARGET,
                                        (uint8)i,
@@ -1422,6 +1562,84 @@ static uint8 collect_identify_targets_on_exec_point(const Position *exec_point)
 
     identify_sort_targets_by_direction();
     return (g_identify_target_count > 0U) ? 1U : 0U;
+}
+
+static uint8 identify_exec_grid_to_half_path_point(const Position *src, Position *dst)
+{
+    uint16 row = 0U;
+    uint16 col = 0U;
+
+    if (src == NULL || dst == NULL)
+    {
+        return 0U;
+    }
+
+    row = (uint16)src->row * 2U;
+    col = (uint16)src->col * 2U;
+    if (row > 0xFFU || col > 0xFFU)
+    {
+        return 0U;
+    }
+
+    dst->row = (uint8)row;
+    dst->col = (uint8)col;
+    dst->id = src->id;
+    return 1U;
+}
+
+static uint8 identify_meter_to_half_path_point(float x_m,
+                                               float y_m,
+                                               uint8 marker_id,
+                                               Position *dst)
+{
+    int32 row = 0;
+    int32 col = 0;
+
+    if (dst == NULL)
+    {
+        return 0U;
+    }
+
+    row = (int32)lroundf(x_m / CONTROL_IDENTIFY_HALF_GRID_M);
+    col = (int32)lroundf(y_m / CONTROL_IDENTIFY_HALF_GRID_M);
+    if (row < 0 || col < 0 || row > 0xFF || col > 0xFF)
+    {
+        return 0U;
+    }
+
+    dst->row = (uint8)row;
+    dst->col = (uint8)col;
+    dst->id = marker_id;
+    return 1U;
+}
+
+static uint8 identify_get_segment_half_endpoint(size_t end_idx, Position *half_endpoint)
+{
+    const control_identify_target_t *target = NULL;
+
+    if (half_endpoint == NULL ||
+        g_identify_endpoint_cursor >= g_identify_endpoint_count ||
+        !g_identify_endpoint_need_action[g_identify_endpoint_cursor] ||
+        g_identify_target_count == 0U ||
+        end_idx >= g_exec_steps)
+    {
+        return 0U;
+    }
+
+    target = &g_identify_targets[g_identify_target_cursor];
+    if (!target->near_half_step_enabled)
+    {
+        return 0U;
+    }
+
+    /*
+     * 将原识别端点替换为半格识别点。路径仍保留 IDENTIFICATION 标记，
+     * 但坐标改用 0.1m 网格表示，让 path_follow 从一开始就追向半格位置。
+     */
+    return identify_meter_to_half_path_point(target->near_half_step_x_m,
+                                             target->near_half_step_y_m,
+                                             g_exec_path[end_idx].id,
+                                             half_endpoint);
 }
 
 static uint8 prepare_identify_endpoints(void)
@@ -1473,6 +1691,8 @@ static uint8 begin_identify_segment_motion(size_t end_idx)
 {
     size_t i = 0U;
     size_t seg_steps = 0U;
+    uint8 use_half_grid_path = 0U;
+    Position half_endpoint = {0};
 
     if (end_idx >= g_exec_steps || end_idx < g_identify_segment_start_idx)
     {
@@ -1481,6 +1701,7 @@ static uint8 begin_identify_segment_motion(size_t end_idx)
 
     seg_steps = end_idx - g_identify_segment_start_idx + 1U;
     g_identify_segment_running = 0U;
+    use_half_grid_path = identify_get_segment_half_endpoint(end_idx, &half_endpoint);
 
     if (seg_steps >= 2U)
     {
@@ -1491,41 +1712,74 @@ static uint8 begin_identify_segment_motion(size_t end_idx)
 
         for (i = 0U; i < seg_steps; i++)
         {
-            g_identify_segment_path[i] = g_exec_path[g_identify_segment_start_idx + i];
+            if (use_half_grid_path)
+            {
+                if (!identify_exec_grid_to_half_path_point(&g_exec_path[g_identify_segment_start_idx + i],
+                                                           &g_identify_segment_path[i]))
+                {
+                    return 0U;
+                }
+            }
+            else
+            {
+                g_identify_segment_path[i] = g_exec_path[g_identify_segment_start_idx + i];
+            }
+        }
+
+        if (use_half_grid_path)
+        {
+            g_identify_segment_path[seg_steps - 1U] = half_endpoint;
         }
 
         configure_bomb_pause_for_path(g_identify_segment_path, seg_steps);
         path_follow_hold_current_yaw();
-        path_follow_set_path(g_identify_segment_path, seg_steps);
+        if (use_half_grid_path)
+        {
+            path_follow_set_path_with_grid(g_identify_segment_path,
+                                           seg_steps,
+                                           CONTROL_IDENTIFY_HALF_GRID_M,
+                                           1U);
+        }
+        else
+        {
+            path_follow_set_path(g_identify_segment_path, seg_steps);
+        }
         g_identify_segment_running = 1U;
     }
 
     car_go_flag = 1U;
     car_stop_flag = 0U;
+    g_identify_near_half_step_started = 0U;
     g_identify_exec_state = CONTROL_IDENTIFY_EXEC_MOVE_SEGMENT;
     return 1U;
 }
 
 static uint8 start_identify_segment(size_t end_idx)
 {
+    uint8 has_identify_targets = 0U;
+
     if (end_idx >= g_exec_steps || end_idx < g_identify_segment_start_idx)
     {
         return 0U;
     }
 
     g_identify_rotate_started = 0U;
+    g_identify_near_half_step_started = 0U;
     memset(g_identify_targets, 0, sizeof(g_identify_targets));
     g_identify_target_count = 0U;
     g_identify_target_cursor = 0U;
+
+    if (g_identify_endpoint_cursor < g_identify_endpoint_count &&
+        g_identify_endpoint_need_action[g_identify_endpoint_cursor])
+    {
+        has_identify_targets = collect_identify_targets_on_exec_point(&g_exec_path[end_idx]);
+    }
 
     /*
      * 识别短段开始前先查看该段终点旁边要识别的物体。
      * 若存在待识别目标，先在短段起点转到识别朝向，再保持该朝向行驶到识别位。
      */
-    if (g_control_identify_prerotate_enabled &&
-        g_identify_endpoint_cursor < g_identify_endpoint_count &&
-        g_identify_endpoint_need_action[g_identify_endpoint_cursor] &&
-        collect_identify_targets_on_exec_point(&g_exec_path[end_idx]))
+    if (g_control_identify_prerotate_enabled && has_identify_targets)
     {
         car_go_flag = 1U;
         car_stop_flag = 0U;
@@ -2202,7 +2456,47 @@ static uint8 load_identify_path_for_execution(void)
 static void finish_identify_rotation(void)
 {
     g_identify_rotate_started = 0U;
+    g_identify_near_half_step_started = 0U;
     reset_identify_recognition_wait();
+}
+
+static void enter_identify_pre_recognition_state(void)
+{
+    g_identify_near_half_step_started = 0U;
+    g_identify_exec_state = CONTROL_IDENTIFY_EXEC_NEAR_HALF_STEP;
+}
+
+static void finish_current_identify_target(const control_identify_target_t *target)
+{
+    if (target != NULL)
+    {
+        if (target->obj_type == CONTROL_IDENTIFY_OBJ_BOX &&
+            target->obj_index < MAX_BOXES)
+        {
+            g_identified_box_flags[target->obj_index] = 1U;
+        }
+        else if (target->obj_type == CONTROL_IDENTIFY_OBJ_TARGET &&
+                 target->obj_index < MAX_TARGETS)
+        {
+            g_identified_target_flags[target->obj_index] = 1U;
+        }
+    }
+
+    if (g_identify_target_cursor < g_identify_target_count)
+    {
+        g_identify_target_cursor++;
+    }
+
+    g_identify_near_half_step_started = 0U;
+    if (g_identify_target_cursor < g_identify_target_count)
+    {
+        g_identify_exec_state = CONTROL_IDENTIFY_EXEC_ROTATE_TO_TARGET;
+    }
+    else
+    {
+        g_identify_rotate_started = 0U;
+        g_identify_exec_state = CONTROL_IDENTIFY_EXEC_ADVANCE_ENDPOINT;
+    }
 }
 
 static void handle_identify_execute_path(void)
@@ -2288,7 +2582,15 @@ static void handle_identify_execute_path(void)
         {
             if (g_identify_target_count > 0U)
             {
-                g_identify_exec_state = CONTROL_IDENTIFY_EXEC_DO_RECOGNIZE;
+                if (g_control_identify_prerotate_enabled)
+                {
+                    enter_identify_pre_recognition_state();
+                }
+                else
+                {
+                    g_identify_rotate_started = 0U;
+                    g_identify_exec_state = CONTROL_IDENTIFY_EXEC_ROTATE_TO_TARGET;
+                }
                 return;
             }
 
@@ -2321,7 +2623,7 @@ static void handle_identify_execute_path(void)
         if (fabsf(yaw_err_deg) <= CONTROL_IDENTIFY_YAW_ALIGN_TOL_DEG)
         {
             finish_identify_rotation();
-            g_identify_exec_state = CONTROL_IDENTIFY_EXEC_DO_RECOGNIZE;
+            enter_identify_pre_recognition_state();
             return;
         }
 
@@ -2341,6 +2643,51 @@ static void handle_identify_execute_path(void)
         }
 
         finish_identify_rotation();
+        enter_identify_pre_recognition_state();
+        break;
+
+    case CONTROL_IDENTIFY_EXEC_NEAR_HALF_STEP:
+        if (g_identify_target_cursor >= g_identify_target_count)
+        {
+            g_identify_near_half_step_started = 0U;
+            g_identify_exec_state = CONTROL_IDENTIFY_EXEC_ADVANCE_ENDPOINT;
+            return;
+        }
+
+        curr_target = &g_identify_targets[g_identify_target_cursor];
+        if (!curr_target->near_half_step_enabled)
+        {
+            g_identify_near_half_step_started = 0U;
+            g_identify_exec_state = CONTROL_IDENTIFY_EXEC_DO_RECOGNIZE;
+            return;
+        }
+
+        if (!g_identify_near_half_step_started)
+        {
+            /*
+             * 正常情况下识别段路径已经把端点替换成半格识别点；这里保留一次
+             * 到半格点的轻量修正，处理未提前收集目标或多目标切换时的补充移动。
+             * 识别串口请求必须等该位置修正结束后再发，避免车还在动时开始识别。
+             */
+            path_follow_hold_current_yaw();
+            path_follow_start_pose_correction(curr_target->near_half_step_x_m,
+                                              curr_target->near_half_step_y_m);
+            car_go_flag = 1U;
+            car_stop_flag = 0U;
+            g_identify_near_half_step_started = 1U;
+            return;
+        }
+
+        path_follow_get_status(&st);
+        if (st.active)
+        {
+            return;
+        }
+
+        path_follow_hold_current_yaw();
+        car_go_flag = 1U;
+        car_stop_flag = 1U;
+        g_identify_near_half_step_started = 0U;
         g_identify_exec_state = CONTROL_IDENTIFY_EXEC_DO_RECOGNIZE;
         break;
 
@@ -2359,29 +2706,11 @@ static void handle_identify_execute_path(void)
                 return;
             }
 
-            if (curr_target->obj_type == CONTROL_IDENTIFY_OBJ_BOX &&
-                curr_target->obj_index < MAX_BOXES)
-            {
-                g_identified_box_flags[curr_target->obj_index] = 1U;
-            }
-            else if (curr_target->obj_type == CONTROL_IDENTIFY_OBJ_TARGET &&
-                     curr_target->obj_index < MAX_TARGETS)
-            {
-                g_identified_target_flags[curr_target->obj_index] = 1U;
-            }
-
-            g_identify_target_cursor++;
+            finish_current_identify_target(curr_target);
+            return;
         }
 
-        if (g_identify_target_cursor < g_identify_target_count)
-        {
-            g_identify_exec_state = CONTROL_IDENTIFY_EXEC_ROTATE_TO_TARGET;
-        }
-        else
-        {
-            g_identify_rotate_started = 0U;
-            g_identify_exec_state = CONTROL_IDENTIFY_EXEC_ADVANCE_ENDPOINT;
-        }
+        g_identify_exec_state = CONTROL_IDENTIFY_EXEC_ADVANCE_ENDPOINT;
         break;
 
     case CONTROL_IDENTIFY_EXEC_ADVANCE_ENDPOINT:

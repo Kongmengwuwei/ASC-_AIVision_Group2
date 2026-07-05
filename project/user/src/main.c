@@ -54,7 +54,7 @@ int main(void)
   encoder_init();                                // 电机编码器模块初始化
   imu963ra_init();                               // IMU模块初始化
   Attitude_Init();                               // 姿态解算模块初始化
-  // Blue_Serial_Init();
+  Blue_Serial_Init();
   PID_Init(&ULpid, &ULPidInitStruct);
   PID_Init(&URpid, &URPidInitStruct);
   PID_Init(&DLpid, &DLPidInitStruct);
@@ -92,7 +92,7 @@ int main(void)
     // 菜单系统主循环调用：响应按键事件，更新显示等。
     Menu_Switch();
     Menu_Show();
-    // BlueSerial_PathDebugReport();
+    BlueSerial_PathDebugReport();
   }
 }
 
@@ -157,6 +157,8 @@ void pit_1_handler(void)
   {
     motor_pwm(0, 0, 0, 0);
   }
+
+  BlueSerial_PathDebugTick10ms();
 }
 
 /* PIT2 周期中断（2ms）：姿态解算 */

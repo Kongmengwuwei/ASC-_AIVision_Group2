@@ -51,6 +51,7 @@ typedef struct
 void path_follow_init(float grid_size_m, float pulses_per_meter);
 void path_follow_set_path(const Position *path, size_t steps);
 void path_follow_set_path_pause_enabled(const Position *path, size_t steps, uint8 pause_events_enabled);
+void path_follow_set_path_with_grid(const Position *path, size_t steps, float grid_m, uint8 pause_events_enabled);
 void path_follow_set_target(int target_row, int target_col);
 void path_follow_set_target_yaw(float target_yaw_deg);
 void path_follow_hold_current_yaw(void);
@@ -91,6 +92,17 @@ extern float path_follow_corner_hold_trim_scale;
 extern float path_line_guide_min_cmps;
 extern float path_corner_handover_enter_distance_m;
 extern float path_corner_handover_commit_distance_m;
+extern float path_yaw_feedforward_min_degps;
+extern float path_yaw_feedforward_deadband_deg;
+extern float path_yaw_target_base_comp_deg;
+extern float path_yaw_target_error_comp_k;
+extern float path_rotate_center_offset_x_cm;
+extern float path_rotate_center_offset_y_cm;
+extern float path_rotate_slowdown_band_deg;
+extern float path_rotate_slowdown_min_degps;
+extern float path_rotate_position_hold_kp_cmps_per_cm;
+extern float path_rotate_position_hold_max_cmps;
+extern float path_rotate_position_hold_deadband_cm;
 extern path_follow_scurve_band_cfg_t g_path_follow_scurve_band_cfg[PATH_FOLLOW_SCURVE_BAND_COUNT];
 
 #endif

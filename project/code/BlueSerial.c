@@ -15,17 +15,17 @@
 static volatile uint8 g_blueserial_path_report_pending = 0U;
 
 
-//初始化用的是UART8
+// BlueSerial uses UART4.
 void Blue_Serial_Init(void)
 {
-	uart_init(UART_8, 115200,UART8_TX_D16, UART8_RX_D17);
+	uart_init(UART_4, 115200, UART4_TX_C16, UART4_RX_C17);
 }
 
 
 
 void BlueSerial_SendByte(uint8_t Byte)
 {
-	uart_write_byte (UART_8, Byte);
+	uart_write_byte(UART_4, Byte);
 }
 
 void BlueSerial_SendArray(uint8_t *Array, uint16_t Length)
@@ -127,7 +127,7 @@ void BlueSerial_PathDebugReport(void)
 	float actual_vy_cmps = 0.0f;
 	float actual_omega_radps = 0.0f;
 
-		if (g_blueserial_path_report_pending == 0U)
+	if (g_blueserial_path_report_pending == 0U)
 	{
 		return;
 	}
@@ -136,7 +136,7 @@ void BlueSerial_PathDebugReport(void)
 	path_follow_get_status(&st);
 	BlueSerial_GetActualBodySpeed(&actual_vx_cmps, &actual_vy_cmps, &actual_omega_radps);
 
-	BlueSerial_Printf("TPOS %.3f %.3f APOS %.3f %.3f TVEL %.1f %.1f %.2f AVEL %.1f %.1f %.2f YAW %.2f\r\n",
+	BlueSerial_Printf("TPOS %.3f %.3f APOS %.3f %.3f TVEL %.1f %.1f %.2f AVEL %.1f %.1f %.2f TYAW %.2f\r\n",
 					  st.target_x_m,
 					  st.target_y_m,
 					  st.x_m,
@@ -147,5 +147,5 @@ void BlueSerial_PathDebugReport(void)
 					  actual_vx_cmps,
 					  actual_vy_cmps,
 					  actual_omega_radps,
-					  eulerAngle.yaw);
+					  st.target_yaw_deg);
 }

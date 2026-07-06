@@ -74,7 +74,8 @@ int main(void)
   pit_ms_init(PIT_CH2, 2);                   // PIT2 periodic interrupt: 2 ms.
   interrupt_set_priority(PIT_PRIORITY_2, 0); // PIT2 interrupt priority.
   interrupt_set_priority(LPUART1_IRQn, 3);   // UART1 interrupt priority.
-  interrupt_set_priority(LPUART8_IRQn, 8);   // UART4 interrupt priority.
+  interrupt_set_priority(LPUART4_IRQn, 8);   // UART4 vision recognition interrupt priority.
+  interrupt_set_priority(LPUART8_IRQn, 8);   // UART8 Bluetooth/debug serial interrupt priority.
   interrupt_global_enable(0);
 
   control_init();

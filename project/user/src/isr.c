@@ -113,6 +113,17 @@ void LPUART3_IRQHandler(void)
     LPUART_ClearStatusFlags(LPUART3, kLPUART_RxOverrunFlag);
 }
 
+void LPUART4_IRQHandler(void)
+{
+    if(kLPUART_RxDataRegFullFlag & LPUART_GetStatusFlags(LPUART4))
+    {
+        extern void vision_uart_rx_interrupt_handler(void);
+        vision_uart_rx_interrupt_handler();
+    }
+
+    LPUART_ClearStatusFlags(LPUART4, kLPUART_RxOverrunFlag);
+}
+
 void LPUART5_IRQHandler(void)
 {
     if(kLPUART_RxDataRegFullFlag & LPUART_GetStatusFlags(LPUART5))
@@ -140,8 +151,6 @@ void LPUART8_IRQHandler(void)
 {
     if(kLPUART_RxDataRegFullFlag & LPUART_GetStatusFlags(LPUART8))
     {
-        extern void vision_uart_rx_interrupt_handler(void);
-        vision_uart_rx_interrupt_handler();
         wireless_module_uart_handler();
     }
 

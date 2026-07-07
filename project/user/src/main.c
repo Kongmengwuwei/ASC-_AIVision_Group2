@@ -158,7 +158,7 @@ void pit_1_handler(void)
     motor_pwm(0, 0, 0, 0);
   }
 
-  BlueSerial_PathDebugTick10ms();
+  // BlueSerial_PathDebugTick10ms();
 }
 
 /* PIT2 周期中断（2ms）：姿态解算 */

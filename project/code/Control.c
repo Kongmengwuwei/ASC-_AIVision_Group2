@@ -7,6 +7,7 @@
 #include "path.h"
 #include "path_follow.h"
 #include "Attitude.h"
+#include "BlueSerial.h"
 #include "zf_driver_delay.h"
 #include <math.h>
 #include <string.h>
@@ -723,6 +724,91 @@ static uint8 identify_result_to_valid_id(const VisionRecognitionResult *result, 
     return 1U;
 }
 
+static const char *identify_recognition_type_name(VisionRecognitionType type)
+{
+    switch (type)
+    {
+    case VISION_RECOGNITION_IMG:
+        return "IMG";
+    case VISION_RECOGNITION_NUM:
+        return "NUM";
+    default:
+        return "NONE";
+    }
+}
+
+static const char *identify_object_type_name(control_identify_obj_t obj_type)
+{
+    return (obj_type == CONTROL_IDENTIFY_OBJ_BOX) ? "BOX" : "TARGET";
+}
+
+static void report_identify_result_bluetooth(const control_identify_target_t *target,
+                                             const VisionRecognitionResult *result,
+                                             uint8 valid_id,
+                                             uint8 recognized_id)
+{
+    const char *type_name = "NONE";
+    const char *obj_name = "UNKNOWN";
+    const char *label_text = "";
+
+    if (target == NULL || result == NULL)
+    {
+        return;
+    }
+
+    type_name = identify_recognition_type_name(result->type);
+    obj_name = identify_object_type_name(target->obj_type);
+    label_text = result->label;
+
+    if (label_text[0] == '\0')
+    {
+        if (valid_id)
+        {
+            BlueSerial_Printf("IDR %s %s idx=%u cell=%u,%u stand=%u,%u dist=%u label=%u score=%d ok=%u marker=%u valid=%u id=%u\r\n",
+                              type_name,
+                              obj_name,
+                              (unsigned int)target->obj_index,
+                              (unsigned int)target->obj_pos_map.row,
+                              (unsigned int)target->obj_pos_map.col,
+                              (unsigned int)target->stand_pos_map.row,
+                              (unsigned int)target->stand_pos_map.col,
+                              (unsigned int)target->recog_distance,
+                              (unsigned int)recognized_id,
+                              (int)result->score,
+                              result->success ? 1U : 0U,
+                              result->mode_marker ? 1U : 0U,
+                              (unsigned int)valid_id,
+                              (unsigned int)recognized_id);
+            return;
+        }
+
+        if (result->mode_marker || !result->success)
+        {
+            label_text = "-1";
+        }
+        else
+        {
+            label_text = "?";
+        }
+    }
+
+    BlueSerial_Printf("IDR %s %s idx=%u cell=%u,%u stand=%u,%u dist=%u label=%s score=%d ok=%u marker=%u valid=%u id=%u\r\n",
+                      type_name,
+                      obj_name,
+                      (unsigned int)target->obj_index,
+                      (unsigned int)target->obj_pos_map.row,
+                      (unsigned int)target->obj_pos_map.col,
+                      (unsigned int)target->stand_pos_map.row,
+                      (unsigned int)target->stand_pos_map.col,
+                      (unsigned int)target->recog_distance,
+                      label_text,
+                      (int)result->score,
+                      result->success ? 1U : 0U,
+                      result->mode_marker ? 1U : 0U,
+                      (unsigned int)valid_id,
+                      (unsigned int)recognized_id);
+}
+
 static uint8 update_plan_mode_from_first_identify_result(const VisionRecognitionResult *result,
                                                          uint8 valid_id)
 {
@@ -1083,6 +1169,7 @@ static uint8 identify_action_stub(const control_identify_target_t *target)
             result.mode_marker = true;
             result.label_is_number = false;
             result.label_value = -1;
+            result.score = 0;
             valid_id = 0U;
         }
         else
@@ -1095,15 +1182,19 @@ static uint8 identify_action_stub(const control_identify_target_t *target)
             {
                 result.label_is_number = true;
                 result.label_value = (int32)recognized_id;
+                result.score = 100;
                 valid_id = 1U;
             }
             else
             {
                 result.label_is_number = false;
                 result.label_value = -1;
+                result.score = -1;
                 valid_id = 0U;
             }
         }
+
+        report_identify_result_bluetooth(target, &result, valid_id, recognized_id);
 
         if (!update_plan_mode_from_first_identify_result(&result, valid_id))
         {
@@ -1151,6 +1242,7 @@ static uint8 identify_action_stub(const control_identify_target_t *target)
         if (vision_take_img_result(&result))
         {
             valid_id = identify_result_to_valid_id(&result, &recognized_id);
+            report_identify_result_bluetooth(target, &result, valid_id, recognized_id);
             if (!update_plan_mode_from_first_identify_result(&result, valid_id))
             {
                 if (!start_identify_recognition_request(target, distance))
@@ -1177,6 +1269,7 @@ static uint8 identify_action_stub(const control_identify_target_t *target)
         if (vision_take_num_result(&result))
         {
             valid_id = identify_result_to_valid_id(&result, &recognized_id);
+            report_identify_result_bluetooth(target, &result, valid_id, recognized_id);
             if (!update_plan_mode_from_first_identify_result(&result, valid_id))
             {
                 if (!start_identify_recognition_request(target, distance))

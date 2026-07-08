@@ -8,6 +8,7 @@
 #include "path_follow.h"
 #include "Attitude.h"
 #include "BlueSerial.h"
+#include "Motor.h"
 #include "zf_driver_delay.h"
 #include <math.h>
 #include <string.h>
@@ -57,14 +58,16 @@ float g_control_prestart_depart_compensate_m = -0.025f;
  */
 #define CONTROL_REQ_MAP_RETRY_TIMEOUT_LOOPS 200U
 #define CONTROL_REQ_CAR_RETRY_TIMEOUT_LOOPS 200U
-/* Wait before consuming CAR pose frames to avoid using delayed camera data. */
-#define CONTROL_CAMERA_POSE_SETTLE_DELAY_MS 200U
+/* Loop passes before consuming CAR pose frames to avoid using delayed camera data. */
+#define CONTROL_CAMERA_POSE_SETTLE_LOOPS 20U
 #define CONTROL_PRESET_RECOGNITION_DELAY_MS 500U
 /* 推炸弹到爆炸点后停留 0.5s，等待爆炸效果生效 */
 #define CONTROL_BOMB_EXPLOSION_PAUSE_MS 500U
 /* 回到发车区后，车头回正到发车方向基准的角度容差。 */
 #define CONTROL_RETURN_YAW_ALIGN_TOL_DEG 5.0f
 #define CONTROL_CONTINUOUS_LEVEL_COUNT 3U
+#define CONTROL_CONTINUOUS_STOP_ENCODER_TOL 5
+#define CONTROL_CONTINUOUS_STOP_STABLE_LOOPS 3U
 
 
 /**
@@ -173,6 +176,19 @@ typedef enum
     CONTROL_IDENTIFY_EXEC_ADVANCE_ENDPOINT
 } control_identify_exec_state_t;
 
+typedef struct
+{
+    uint8 need_identify;
+    control_plan_mode_t push_mode;
+} control_level_rule_t;
+
+typedef enum
+{
+    CONTROL_RECOG_STEP_DONE = 0U,
+    CONTROL_RECOG_STEP_RETRY,
+    CONTROL_RECOG_STEP_GIVE_UP
+} control_recognition_step_t;
+
 /* ========================= 内部状态变�?========================= */
 
 /**
@@ -220,6 +236,7 @@ static control_plan_mode_t g_control_plan_mode = CONTROL_PLAN_MODE_1;
 static control_flow_phase_t g_control_flow_phase = CONTROL_FLOW_IDENTIFY;
 static uint8 g_continuous_run_active = 0U;
 static uint8 g_continuous_level_index = 0U;
+static uint8 g_continuous_stop_stable_count = 0U;
 static uint8 g_level_start_localization_required = 0U;
 #if ALGORITHM_TEST_ENABLE
 static uint8 g_continuous_preset_base_index = 0U;
@@ -267,6 +284,7 @@ static uint8 g_saved_identify_ids_ready = 0U;
  */
 static uint8 g_localize_sample_count = 0U;
 static uint8 g_localize_camera_settled = 0U;
+static uint16 g_localize_camera_settle_loops = 0U;
 
 /**
  * @brief 起步动作是否已经触发�?
@@ -414,6 +432,7 @@ static void reset_localization_accumulator(void)
 {
     g_localize_sample_count = 0U;
     g_localize_camera_settled = 0U;
+    g_localize_camera_settle_loops = 0U;
     g_localize_sum_x_m = 0.0f;
     g_localize_sum_y_m = 0.0f;
     g_localize_yaw_align_started = 0U;
@@ -673,9 +692,50 @@ static void clear_saved_identify_ids(void)
     g_saved_identify_ids_ready = 0U;
 }
 
-static uint8 continuous_level_requires_identify(uint8 level_index)
+static const control_level_rule_t g_continuous_level_rules[CONTROL_CONTINUOUS_LEVEL_COUNT] =
 {
-    return (level_index == 0U) ? 0U : 1U;
+    {0U, CONTROL_PLAN_MODE_1},
+    {1U, CONTROL_PLAN_MODE_2},
+    {1U, CONTROL_PLAN_MODE_2}
+};
+
+static const control_level_rule_t *continuous_get_level_rule(uint8 level_index)
+{
+    if (level_index >= CONTROL_CONTINUOUS_LEVEL_COUNT)
+    {
+        level_index = (uint8)(CONTROL_CONTINUOUS_LEVEL_COUNT - 1U);
+    }
+    return &g_continuous_level_rules[level_index];
+}
+
+static int abs_int16_local(int16 v)
+{
+    return (v < 0) ? -(int)v : (int)v;
+}
+
+static uint8 continuous_wheels_stopped(void)
+{
+    return (abs_int16_local(up_L_all) <= CONTROL_CONTINUOUS_STOP_ENCODER_TOL &&
+            abs_int16_local(up_R_all) <= CONTROL_CONTINUOUS_STOP_ENCODER_TOL &&
+            abs_int16_local(down_L_all) <= CONTROL_CONTINUOUS_STOP_ENCODER_TOL &&
+            abs_int16_local(down_R_all) <= CONTROL_CONTINUOUS_STOP_ENCODER_TOL) ? 1U : 0U;
+}
+
+static uint8 continuous_stop_ready(void)
+{
+    if (continuous_wheels_stopped())
+    {
+        if (g_continuous_stop_stable_count < CONTROL_CONTINUOUS_STOP_STABLE_LOOPS)
+        {
+            g_continuous_stop_stable_count++;
+        }
+    }
+    else
+    {
+        g_continuous_stop_stable_count = 0U;
+    }
+
+    return (g_continuous_stop_stable_count >= CONTROL_CONTINUOUS_STOP_STABLE_LOOPS) ? 1U : 0U;
 }
 
 #if ALGORITHM_TEST_ENABLE
@@ -697,6 +757,7 @@ static void reset_level_runtime_state_for_launch(void)
     g_plan_ready = 0U;
     g_exec_steps = 0U;
     g_return_heading_rotate_started = 0U;
+    g_continuous_stop_stable_count = 0U;
     memset(g_exec_path, 0, sizeof(g_exec_path));
 
     reset_localization_accumulator();
@@ -725,15 +786,17 @@ static void reset_level_runtime_state_for_launch(void)
 
 static void configure_flow_for_level(uint8 level_index)
 {
-    if (g_continuous_run_active && !continuous_level_requires_identify(level_index))
+    const control_level_rule_t *rule = continuous_get_level_rule(level_index);
+
+    if (g_continuous_run_active && !rule->need_identify)
     {
         g_control_flow_phase = CONTROL_FLOW_PUSHBOX;
-        g_control_plan_mode = CONTROL_PLAN_MODE_1;
+        g_control_plan_mode = rule->push_mode;
         return;
     }
 
     g_control_flow_phase = CONTROL_FLOW_IDENTIFY;
-    g_control_plan_mode = CONTROL_PLAN_MODE_2;
+    g_control_plan_mode = rule->push_mode;
 }
 
 static void start_current_level_launch(void)
@@ -825,10 +888,8 @@ static const char *identify_recognition_type_name(VisionRecognitionType type)
     }
 }
 
-static const char *identify_object_type_name(control_identify_obj_t obj_type)
-{
-    return (obj_type == CONTROL_IDENTIFY_OBJ_BOX) ? "BOX" : "TARGET";
-}
+static uint8 start_identify_recognition_request(const control_identify_target_t *target,
+                                                VisionRecognitionDistance distance);
 
 static void report_identify_result_bluetooth(const control_identify_target_t *target,
                                              const VisionRecognitionResult *result,
@@ -836,8 +897,8 @@ static void report_identify_result_bluetooth(const control_identify_target_t *ta
                                              uint8 recognized_id)
 {
     const char *type_name = "NONE";
-    const char *obj_name = "UNKNOWN";
     const char *label_text = "";
+    char obj_char = 'U';
 
     if (target == NULL || result == NULL)
     {
@@ -845,28 +906,24 @@ static void report_identify_result_bluetooth(const control_identify_target_t *ta
     }
 
     type_name = identify_recognition_type_name(result->type);
-    obj_name = identify_object_type_name(target->obj_type);
+    obj_char = (target->obj_type == CONTROL_IDENTIFY_OBJ_BOX) ? 'B' : 'T';
     label_text = result->label;
 
     if (label_text[0] == '\0')
     {
         if (valid_id)
         {
-            BlueSerial_Printf("IDR %s %s idx=%u cell=%u,%u stand=%u,%u dist=%u label=%u score=%d ok=%u marker=%u valid=%u id=%u\r\n",
+            BlueSerial_Printf("IDR %s %c%u %u,%u d%u id=%u s=%d ok=%u m=%u\r\n",
                               type_name,
-                              obj_name,
+                              obj_char,
                               (unsigned int)target->obj_index,
                               (unsigned int)target->obj_pos_map.row,
                               (unsigned int)target->obj_pos_map.col,
-                              (unsigned int)target->stand_pos_map.row,
-                              (unsigned int)target->stand_pos_map.col,
                               (unsigned int)target->recog_distance,
                               (unsigned int)recognized_id,
                               (int)result->score,
                               result->success ? 1U : 0U,
-                              result->mode_marker ? 1U : 0U,
-                              (unsigned int)valid_id,
-                              (unsigned int)recognized_id);
+                              result->mode_marker ? 1U : 0U);
             return;
         }
 
@@ -880,14 +937,12 @@ static void report_identify_result_bluetooth(const control_identify_target_t *ta
         }
     }
 
-    BlueSerial_Printf("IDR %s %s idx=%u cell=%u,%u stand=%u,%u dist=%u label=%s score=%d ok=%u marker=%u valid=%u id=%u\r\n",
+    BlueSerial_Printf("IDR %s %c%u %u,%u d%u lb=%s s=%d ok=%u m=%u v=%u id=%u\r\n",
                       type_name,
-                      obj_name,
+                      obj_char,
                       (unsigned int)target->obj_index,
                       (unsigned int)target->obj_pos_map.row,
                       (unsigned int)target->obj_pos_map.col,
-                      (unsigned int)target->stand_pos_map.row,
-                      (unsigned int)target->stand_pos_map.col,
                       (unsigned int)target->recog_distance,
                       label_text,
                       (int)result->score,
@@ -895,6 +950,81 @@ static void report_identify_result_bluetooth(const control_identify_target_t *ta
                       result->mode_marker ? 1U : 0U,
                       (unsigned int)valid_id,
                       (unsigned int)recognized_id);
+}
+
+static control_recognition_step_t classify_identify_recognition_result(const VisionRecognitionResult *result,
+                                                                       uint8 valid_id)
+{
+    if (result == NULL)
+    {
+        return CONTROL_RECOG_STEP_GIVE_UP;
+    }
+
+    if (valid_id)
+    {
+        return CONTROL_RECOG_STEP_DONE;
+    }
+
+    if ((!result->success || result->mode_marker) &&
+        g_identify_recog_retry_count < CONTROL_IDENTIFY_RECOG_MAX_RETRIES)
+    {
+        g_identify_recog_retry_count++;
+        return CONTROL_RECOG_STEP_RETRY;
+    }
+
+    return CONTROL_RECOG_STEP_GIVE_UP;
+}
+
+static void apply_identify_result_to_map(const control_identify_target_t *target,
+                                         uint8 valid_id,
+                                         uint8 recognized_id)
+{
+    if (target == NULL || !valid_id)
+    {
+        return;
+    }
+
+    if (target->obj_type == CONTROL_IDENTIFY_OBJ_BOX &&
+        target->obj_index < MAX_BOXES &&
+        target->obj_index < Boxes_count)
+    {
+        boxes[target->obj_index].id = recognized_id;
+        g_identify_box_id_assigned[target->obj_index] = 1U;
+    }
+    else if (target->obj_type == CONTROL_IDENTIFY_OBJ_TARGET &&
+             target->obj_index < MAX_TARGETS &&
+             target->obj_index < Targets_count)
+    {
+        targets[target->obj_index].id = recognized_id;
+        g_identify_target_id_assigned[target->obj_index] = 1U;
+    }
+}
+
+static uint8 finish_or_retry_identify_result(const control_identify_target_t *target,
+                                             const VisionRecognitionResult *result,
+                                             uint8 valid_id,
+                                             uint8 recognized_id,
+                                             VisionRecognitionDistance distance)
+{
+    control_recognition_step_t step = classify_identify_recognition_result(result, valid_id);
+
+    if (step == CONTROL_RECOG_STEP_RETRY)
+    {
+        if (!start_identify_recognition_request(target, distance))
+        {
+            reset_identify_recognition_wait();
+            return 1U;
+        }
+        return 0U;
+    }
+
+    if (step == CONTROL_RECOG_STEP_DONE)
+    {
+        apply_identify_result_to_map(target, valid_id, recognized_id);
+    }
+
+    reset_identify_recognition_wait();
+    return 1U;
 }
 
 static void save_identify_ids_from_current_map(void)
@@ -1238,24 +1368,7 @@ static uint8 identify_action_stub(const control_identify_target_t *target)
         }
 
         report_identify_result_bluetooth(target, &result, valid_id, recognized_id);
-
-        if (target->obj_type == CONTROL_IDENTIFY_OBJ_BOX &&
-            target->obj_index < MAX_BOXES &&
-            target->obj_index < Boxes_count &&
-            valid_id)
-        {
-            boxes[target->obj_index].id = recognized_id;
-            g_identify_box_id_assigned[target->obj_index] = 1U;
-        }
-        else if (target->obj_type == CONTROL_IDENTIFY_OBJ_TARGET &&
-                 target->obj_index < MAX_TARGETS &&
-                 target->obj_index < Targets_count &&
-                 valid_id)
-        {
-            targets[target->obj_index].id = recognized_id;
-            g_identify_target_id_assigned[target->obj_index] = 1U;
-        }
-
+        apply_identify_result_to_map(target, valid_id, recognized_id);
         reset_identify_recognition_wait();
         return 1U;
     }
@@ -1280,27 +1393,11 @@ static uint8 identify_action_stub(const control_identify_target_t *target)
         {
             valid_id = identify_result_to_valid_id(&result, &recognized_id);
             report_identify_result_bluetooth(target, &result, valid_id, recognized_id);
-            if (!result.success && !result.mode_marker &&
-                g_identify_recog_retry_count < CONTROL_IDENTIFY_RECOG_MAX_RETRIES)
-            {
-                g_identify_recog_retry_count++;
-                if (!start_identify_recognition_request(target, distance))
-                {
-                    return 1U;
-                }
-                return 0U;
-            }
-
-            if (target->obj_type == CONTROL_IDENTIFY_OBJ_BOX &&
-                target->obj_index < MAX_BOXES &&
-                target->obj_index < Boxes_count &&
-                valid_id)
-            {
-                boxes[target->obj_index].id = recognized_id;
-                g_identify_box_id_assigned[target->obj_index] = 1U;
-            }
-            reset_identify_recognition_wait();
-            return 1U;
+            return finish_or_retry_identify_result(target,
+                                                   &result,
+                                                   valid_id,
+                                                   recognized_id,
+                                                   distance);
         }
     }
     else if (g_identify_recog_wait_type == VISION_RECOGNITION_NUM)
@@ -1309,27 +1406,11 @@ static uint8 identify_action_stub(const control_identify_target_t *target)
         {
             valid_id = identify_result_to_valid_id(&result, &recognized_id);
             report_identify_result_bluetooth(target, &result, valid_id, recognized_id);
-            if (!result.success && !result.mode_marker &&
-                g_identify_recog_retry_count < CONTROL_IDENTIFY_RECOG_MAX_RETRIES)
-            {
-                g_identify_recog_retry_count++;
-                if (!start_identify_recognition_request(target, distance))
-                {
-                    return 1U;
-                }
-                return 0U;
-            }
-
-            if (target->obj_type == CONTROL_IDENTIFY_OBJ_TARGET &&
-                target->obj_index < MAX_TARGETS &&
-                target->obj_index < Targets_count &&
-                valid_id)
-            {
-                targets[target->obj_index].id = recognized_id;
-                g_identify_target_id_assigned[target->obj_index] = 1U;
-            }
-            reset_identify_recognition_wait();
-            return 1U;
+            return finish_or_retry_identify_result(target,
+                                                   &result,
+                                                   valid_id,
+                                                   recognized_id,
+                                                   distance);
         }
     }
 
@@ -2076,11 +2157,11 @@ static uint8 get_camera_position_meter(float *x_m, float *y_m)
     return 1U;
 }
 
-static void settle_camera_before_localization_once(void)
+static uint8 settle_camera_before_localization_once(void)
 {
     if (g_localize_camera_settled)
     {
-        return;
+        return 1U;
     }
 
 #if ALGORITHM_TEST_ENABLE
@@ -2088,14 +2169,23 @@ static void settle_camera_before_localization_once(void)
     {
         (void)Algorithm_Test_PresetInput_ProvideCarPoseFrame();
         g_localize_camera_settled = 1U;
-        return;
+        return 1U;
     }
 #endif
 
-    /* Wait once at the start of a localization phase, then parse the latest CAR frame. */
-    system_delay_ms(CONTROL_CAMERA_POSE_SETTLE_DELAY_MS);
+    /*
+     * Let the camera FIFO drain over several control-loop passes instead of
+     * blocking the whole chassis task with system_delay_ms().
+     */
     process_blob_data();
+    if (g_localize_camera_settle_loops < CONTROL_CAMERA_POSE_SETTLE_LOOPS)
+    {
+        g_localize_camera_settle_loops++;
+        return 0U;
+    }
+
     g_localize_camera_settled = 1U;
+    return 1U;
 }
 
 /**
@@ -2464,7 +2554,11 @@ static void handle_localization_stage(void)
         min_samples = CONTROL_RELOCALIZE_MIN_SAMPLES_PUSHBOX;
     }
 
-    settle_camera_before_localization_once();
+    if (!settle_camera_before_localization_once())
+    {
+        service_car_request_wait();
+        return;
+    }
 
     if (car_pose_updated)
     {
@@ -2974,12 +3068,18 @@ static void handle_pushbox_finished_stage(void)
     {
         if ((uint8)(g_continuous_level_index + 1U) < CONTROL_CONTINUOUS_LEVEL_COUNT)
         {
+            if (!continuous_stop_ready())
+            {
+                return;
+            }
+            g_continuous_stop_stable_count = 0U;
             g_continuous_level_index++;
             start_current_level_launch();
             return;
         }
     }
 
+    g_continuous_stop_stable_count = 0U;
     g_continuous_run_active = 0U;
 }
 

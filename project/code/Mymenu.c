@@ -1,6 +1,8 @@
 #include "Mymenu.h"
 #include "path.h"
 
+#define MENU_SHOW_PERIOD_LOOPS 3U
+
 Menu_Item Root;     // 根目录
 Menu_Item *pointer; // 指针
 
@@ -20,6 +22,7 @@ static uint8 preset_map_index = ALGORITHM_TEST_PRESET_INDEX;
 
 path_follow_status_t path_follow_status = {0};
 uint8 plan_mode = 0U;
+static uint8 menu_show_divider = MENU_SHOW_PERIOD_LOOPS;
 
 uint8 test1 = 0;
 
@@ -27,6 +30,11 @@ uint8 test1 = 0;
 char move_cmd = 'X'; // 移动命令缓存
 uint8 move_ret = 0;  // 移动结果缓存
 #endif
+
+static void Menu_Request_Redraw(void)
+{
+    menu_show_divider = MENU_SHOW_PERIOD_LOOPS;
+}
 
 static void draw_exec_path_diamond(uint16 center_x, uint16 center_y)
 {
@@ -831,6 +839,13 @@ void Menu_Show(void)
 
     Menu_Sync_Control_State();
 
+    if (menu_show_divider < MENU_SHOW_PERIOD_LOOPS)
+    {
+        menu_show_divider++;
+        return;
+    }
+    menu_show_divider = 0U;
+
     Show_title();
     for (int i = 1; i < r->sons + 1; i++)
     {
@@ -854,16 +869,19 @@ void Menu_Show(void)
 // 各类按键处理
 void Key_Up(void) // 指针上移
 {
+    Menu_Request_Redraw();
     if (pointer->Last_Brother != NULL)
         pointer = pointer->Last_Brother;
 }
 void Key_Down(void) // 指针下移
 {
+    Menu_Request_Redraw();
     if (pointer->Next_Brother != NULL)
         pointer = pointer->Next_Brother;
 }
 void Key_Plus(void) // 数据增大
 {
+    Menu_Request_Redraw();
     switch (pointer->kind)
     {
     case int32_Box:
@@ -902,6 +920,7 @@ void Key_Plus(void) // 数据增大
 }
 void Key_Sub(void) // 数据减小
 {
+    Menu_Request_Redraw();
     switch (pointer->kind)
     {
     case int32_Box:
@@ -940,6 +959,7 @@ void Key_Sub(void) // 数据减小
 }
 void Key_Enter(void) // 进入文件夹
 {
+    Menu_Request_Redraw();
     if (pointer->kind == MENU_Folder)
     {
         pointer = pointer->First_Son;
@@ -955,6 +975,7 @@ void Key_Enter(void) // 进入文件夹
 }
 void Key_Exit(void) // 退出文件夹
 {
+    Menu_Request_Redraw();
     if (pointer->Father->Father != NULL)
     {
         pointer = pointer->Father;
@@ -970,20 +991,24 @@ void Key_Exit(void) // 退出文件夹
 }
 void Key_Select(void) // 取消选中
 {
+    Menu_Request_Redraw();
     if (pointer->kind != MENU_Folder)
         pointer->selected = 1;
 }
 void Key_Deselect(void) // 取消选中
 {
+    Menu_Request_Redraw();
     if (pointer->kind != MENU_Folder)
         pointer->selected = 0;
 }
 void Key_SetupCtrl_Plus(void) // 步进值增大
 {
+    Menu_Request_Redraw();
     SetupIndex = (SetupIndex + 1) % SETUP_LEN;
 }
 void Key_SetupCtrl_Sub(void) // 步进值减小(可返回最大值)
 {
+    Menu_Request_Redraw();
     SetupIndex = (SetupIndex - 1 + SETUP_LEN) % SETUP_LEN;
 }
 

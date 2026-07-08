@@ -40,6 +40,7 @@ static uint8 g_control_prestart_depart_dir = 0U;
  * 0：关闭提前转向，恢复为到达识别点后再原地转向识别。
  */
 static uint8 g_control_identify_prerotate_enabled = 1U;
+static uint8 g_control_continuous_levels_enabled = 0U;
 
 /*
  * Extra compensation for the first power-on departure move.
@@ -63,6 +64,7 @@ float g_control_prestart_depart_compensate_m = -0.025f;
 #define CONTROL_BOMB_EXPLOSION_PAUSE_MS 500U
 /* 回到发车区后，车头回正到发车方向基准的角度容差。 */
 #define CONTROL_RETURN_YAW_ALIGN_TOL_DEG 5.0f
+#define CONTROL_CONTINUOUS_LEVEL_COUNT 3U
 
 
 /**
@@ -209,13 +211,19 @@ static size_t g_exec_steps = 0U;
 static uint8 g_plan_ready = 0U;
 /*
  * 推箱阶段使用的规划模式：
- * - 默认 Mode1，表示识别阶段得到 0~9 后按箱子/目标 ID 配对推箱；
- * - 首个 IMG/NUM 识别若收到明确的非 0~9 结果，会自动切到 Mode1；
- * - 首个 IMG/NUM 等待超时只重发请求，不直接判 Mode1，避免主循环过快导致误判；
+ * - 连续发车关卡一不识别，直接使用 Mode1；
+ * - 连续发车关卡二/三识别后使用 Mode2；
+ * - 单次发车识别后使用 Mode2；
  * - 仍保留 control_set_plan_mode() 作为外部手动覆盖入口。
  */
 static control_plan_mode_t g_control_plan_mode = CONTROL_PLAN_MODE_1;
 static control_flow_phase_t g_control_flow_phase = CONTROL_FLOW_IDENTIFY;
+static uint8 g_continuous_run_active = 0U;
+static uint8 g_continuous_level_index = 0U;
+static uint8 g_level_start_localization_required = 0U;
+#if ALGORITHM_TEST_ENABLE
+static uint8 g_continuous_preset_base_index = 0U;
+#endif
 static uint8 g_return_heading_rotate_started = 0U;
 static float g_start_yaw_deg = 0.0f;
 static uint8 g_start_yaw_ready = 0U;
@@ -249,10 +257,6 @@ static uint8 g_identify_recog_waiting = 0U;
 static uint16 g_identify_recog_wait_loops = 0U;
 static uint8 g_identify_recog_retry_count = 0U;
 static VisionRecognitionType g_identify_recog_wait_type = VISION_RECOGNITION_NONE;
-/* 首个 IMG/NUM 识别结果用于判断后续是否按 ID 配对推箱。 */
-static uint8 g_identify_first_result_checked = 0U;
-/* 首个 IMG/NUM 收到非 0~9 结果时置 1，当前识别阶段会立刻结束并转 Mode1。 */
-static uint8 g_identify_abort_to_mode1 = 0U;
 
 static control_identify_id_record_t g_saved_box_id_records[MAX_BOXES] = {{0}};
 static control_identify_id_record_t g_saved_target_id_records[MAX_TARGETS] = {{0}};
@@ -395,6 +399,10 @@ static void set_control_phase_stage(control_phase_step_t step)
  */
 static uint8 should_enter_vision_localization_stage(void)
 {
+    if (g_level_start_localization_required)
+    {
+        return 1U;
+    }
     if (g_control_flow_phase == CONTROL_FLOW_IDENTIFY)
     {
         return 1U;
@@ -523,8 +531,6 @@ static void reset_identify_runtime_state(void)
     g_identify_near_half_step_started = 0U;
     g_identify_exec_state = CONTROL_IDENTIFY_EXEC_IDLE;
     reset_identify_recognition_wait();
-    g_identify_first_result_checked = 0U;
-    g_identify_abort_to_mode1 = 0U;
 
     memset(g_identified_box_flags, 0, sizeof(g_identified_box_flags));
     memset(g_identified_target_flags, 0, sizeof(g_identified_target_flags));
@@ -667,17 +673,30 @@ static void clear_saved_identify_ids(void)
     g_saved_identify_ids_ready = 0U;
 }
 
-static void reset_control_runtime_state(void)
+static uint8 continuous_level_requires_identify(uint8 level_index)
 {
-    g_control_start_enabled = 0U;
-    g_control_stage = CONTROL_STAGE_IDLE;
-    g_control_flow_phase = CONTROL_FLOW_IDENTIFY;
+    return (level_index == 0U) ? 0U : 1U;
+}
+
+#if ALGORITHM_TEST_ENABLE
+static size_t continuous_preset_index_for_level(uint8 level_index)
+{
+    size_t preset_index = (size_t)g_continuous_preset_base_index + (size_t)level_index;
+
+    if (Map_preset_count == 0U)
+    {
+        return 0U;
+    }
+    return preset_index % Map_preset_count;
+}
+#endif
+
+static void reset_level_runtime_state_for_launch(void)
+{
     g_path_plan_paused = 0U;
     g_plan_ready = 0U;
     g_exec_steps = 0U;
     g_return_heading_rotate_started = 0U;
-    g_start_yaw_deg = 0.0f;
-    g_start_yaw_ready = 0U;
     memset(g_exec_path, 0, sizeof(g_exec_path));
 
     reset_localization_accumulator();
@@ -702,6 +721,75 @@ static void reset_control_runtime_state(void)
     car_stop_flag = 0U;
     map_data_updated = false;
     car_pose_updated = false;
+}
+
+static void configure_flow_for_level(uint8 level_index)
+{
+    if (g_continuous_run_active && !continuous_level_requires_identify(level_index))
+    {
+        g_control_flow_phase = CONTROL_FLOW_PUSHBOX;
+        g_control_plan_mode = CONTROL_PLAN_MODE_1;
+        return;
+    }
+
+    g_control_flow_phase = CONTROL_FLOW_IDENTIFY;
+    g_control_plan_mode = CONTROL_PLAN_MODE_2;
+}
+
+static void start_current_level_launch(void)
+{
+    reset_level_runtime_state_for_launch();
+    configure_flow_for_level(g_continuous_level_index);
+    g_level_start_localization_required = 1U;
+
+#if ALGORITHM_TEST_ENABLE
+    if (Algorithm_Test_PresetInput_IsEnabled())
+    {
+        Algorithm_Test_PresetInput_Init(continuous_preset_index_for_level(g_continuous_level_index));
+    }
+#endif
+
+    g_control_stage = CONTROL_STAGE_PRESTART_MOVE;
+}
+
+static void start_single_launch(void)
+{
+    reset_level_runtime_state_for_launch();
+    g_continuous_run_active = 0U;
+    g_continuous_level_index = 0U;
+    g_control_flow_phase = CONTROL_FLOW_IDENTIFY;
+    g_control_plan_mode = CONTROL_PLAN_MODE_2;
+    g_level_start_localization_required = 1U;
+    g_control_stage = CONTROL_STAGE_PRESTART_MOVE;
+}
+
+static void start_continuous_launch(void)
+{
+    g_continuous_run_active = 1U;
+    g_continuous_level_index = 0U;
+#if ALGORITHM_TEST_ENABLE
+    g_continuous_preset_base_index = Menu_Get_Preset_Map_Index();
+#endif
+    start_current_level_launch();
+}
+
+static void reset_control_runtime_state(void)
+{
+    g_control_start_enabled = 0U;
+    g_control_stage = CONTROL_STAGE_IDLE;
+    g_control_flow_phase = CONTROL_FLOW_IDENTIFY;
+    g_control_plan_mode = CONTROL_PLAN_MODE_1;
+    g_continuous_run_active = 0U;
+    g_continuous_level_index = 0U;
+    g_level_start_localization_required = 0U;
+#if ALGORITHM_TEST_ENABLE
+    g_continuous_preset_base_index = 0U;
+#endif
+    g_start_yaw_deg = 0.0f;
+    g_start_yaw_ready = 0U;
+    reset_level_runtime_state_for_launch();
+    g_control_stage = CONTROL_STAGE_IDLE;
+    g_level_start_localization_required = 0U;
 }
 
 static uint8 identify_result_to_valid_id(const VisionRecognitionResult *result, uint8 *id_out)
@@ -807,51 +895,6 @@ static void report_identify_result_bluetooth(const control_identify_target_t *ta
                       result->mode_marker ? 1U : 0U,
                       (unsigned int)valid_id,
                       (unsigned int)recognized_id);
-}
-
-static uint8 update_plan_mode_from_first_identify_result(const VisionRecognitionResult *result,
-                                                         uint8 valid_id)
-{
-    if (g_identify_first_result_checked)
-    {
-        return 1U;
-    }
-
-    if (!valid_id && result != NULL && result->mode_marker)
-    {
-        g_identify_first_result_checked = 1U;
-        /*
-         * 新版摄像头用 IMG/NUM,-1,0 表示首帧已识别到关卡模式纯色块。
-         * 这不是串口错误，也不是普通识别失败；它表示本关不需要继续做 ID 配对，
-         * 因此保持原本要求：立即切到 Mode1，并结束识别阶段。
-         */
-        g_control_plan_mode = CONTROL_PLAN_MODE_1;
-        g_identify_abort_to_mode1 = 1U;
-        return 1U;
-    }
-
-    if (!valid_id && result != NULL && !result->success)
-    {
-        /*
-         * IMG/NUM,-1,-1 现在只表示本次图案/数字识别失败。
-         * 它不再作为 Mode1 的判断依据，首个有效模式结果到来前继续重发等待。
-         */
-        return 0U;
-    }
-
-    g_identify_first_result_checked = 1U;
-    if (valid_id)
-    {
-        /* 首个 IMG/NUM 识别到 0~9：说明需要按 ID 配对，后续推箱使用 Mode2。 */
-        g_control_plan_mode = CONTROL_PLAN_MODE_2;
-    }
-    else
-    {
-        /* 首个 IMG/NUM 没有正常数字：说明无需配对，立即结束识别并转 Mode1。 */
-        g_control_plan_mode = CONTROL_PLAN_MODE_1;
-        g_identify_abort_to_mode1 = 1U;
-    }
-    return 1U;
 }
 
 static void save_identify_ids_from_current_map(void)
@@ -1196,11 +1239,6 @@ static uint8 identify_action_stub(const control_identify_target_t *target)
 
         report_identify_result_bluetooth(target, &result, valid_id, recognized_id);
 
-        if (!update_plan_mode_from_first_identify_result(&result, valid_id))
-        {
-            return 0U;
-        }
-
         if (target->obj_type == CONTROL_IDENTIFY_OBJ_BOX &&
             target->obj_index < MAX_BOXES &&
             target->obj_index < Boxes_count &&
@@ -1226,9 +1264,8 @@ static uint8 identify_action_stub(const control_identify_target_t *target)
     if (!g_identify_recog_waiting)
     {
         /*
-         * 每次开始新的识别请求前都清一次视觉识别缓存。
-         * 原因：NUM/IMG 返回是异步串口行，如果上一轮迟到的失败帧还挂在 updated 标志上，
-         * 首个识别点会立刻吃到旧的失败结果，从而被误判为 Mode1。
+         * Clear stale vision data before a new request so this target only consumes
+         * the response generated for the current IMG/NUM command.
          */
         if (!start_identify_recognition_request(target, distance))
         {
@@ -1243,8 +1280,10 @@ static uint8 identify_action_stub(const control_identify_target_t *target)
         {
             valid_id = identify_result_to_valid_id(&result, &recognized_id);
             report_identify_result_bluetooth(target, &result, valid_id, recognized_id);
-            if (!update_plan_mode_from_first_identify_result(&result, valid_id))
+            if (!result.success && !result.mode_marker &&
+                g_identify_recog_retry_count < CONTROL_IDENTIFY_RECOG_MAX_RETRIES)
             {
+                g_identify_recog_retry_count++;
                 if (!start_identify_recognition_request(target, distance))
                 {
                     return 1U;
@@ -1270,8 +1309,10 @@ static uint8 identify_action_stub(const control_identify_target_t *target)
         {
             valid_id = identify_result_to_valid_id(&result, &recognized_id);
             report_identify_result_bluetooth(target, &result, valid_id, recognized_id);
-            if (!update_plan_mode_from_first_identify_result(&result, valid_id))
+            if (!result.success && !result.mode_marker &&
+                g_identify_recog_retry_count < CONTROL_IDENTIFY_RECOG_MAX_RETRIES)
             {
+                g_identify_recog_retry_count++;
                 if (!start_identify_recognition_request(target, distance))
                 {
                     return 1U;
@@ -1295,7 +1336,7 @@ static uint8 identify_action_stub(const control_identify_target_t *target)
     g_identify_recog_wait_loops++;
     if (g_identify_recog_wait_loops >= CONTROL_IDENTIFY_RECOG_TIMEOUT_LOOPS)
     {
-        if (!g_identify_first_result_checked)
+        if (g_identify_recog_retry_count < CONTROL_IDENTIFY_RECOG_MAX_RETRIES)
         {
             g_identify_recog_retry_count++;
             /*
@@ -1883,7 +1924,7 @@ static uint8 start_identify_segment(size_t end_idx)
     return begin_identify_segment_motion(end_idx);
 }
 
-static void finish_identify_flow_and_relocalize(uint8 finalize_ids)
+static void finish_identify_flow_and_relocalize(void)
 {
     /* 识别路径刚结束时仍按行驶中停车处理，避免直接断 PWM 造成滑行。 */
     car_go_flag = 1U;
@@ -1891,14 +1932,11 @@ static void finish_identify_flow_and_relocalize(uint8 finalize_ids)
     path_follow_set_path(NULL, 0U);
     path_follow_set_pause_indices(NULL, 0U, 0U);
 
-    /* 正常完成识别时保留并补齐 ID；Mode1 快速退出时不需要这些配对信息。 */
-    if (finalize_ids)
-    {
-        finalize_identify_ids_for_pushbox();
-    }
+    finalize_identify_ids_for_pushbox();
     vision_clear_pending_data();
 
     g_control_flow_phase = CONTROL_FLOW_PUSHBOX;
+    g_control_plan_mode = CONTROL_PLAN_MODE_2;
     g_plan_ready = 0U;
     reset_identify_runtime_state();
     clear_map_request_wait();
@@ -1937,7 +1975,7 @@ static uint8 advance_identify_endpoint_or_finish(void)
 
     if (g_identify_endpoint_cursor >= g_identify_endpoint_count)
     {
-        finish_identify_flow_and_relocalize(1U);
+        finish_identify_flow_and_relocalize();
         return 1U;
     }
 
@@ -2193,9 +2231,9 @@ static void snapshot_restore(const path_map_snapshot_t *snap)
 /**
  * @brief 完成一次路径规划并构建执行路径�?
  *
- * 规划策略�?
- * - 先尝�?Mode2（按 ID 配对�?
- * - 若失败，回退�?Mode1（全局贪心�?
+ * Planning policy:
+ * - identify phase always uses Plan_path_Identify();
+ * - pushbox phase uses the current g_control_plan_mode.
  *
  * @return uint8
  * - 1：规划成功且可执行路径已准备�?
@@ -2387,6 +2425,7 @@ static void handle_localization_stage(void)
         if (g_control_flow_phase == CONTROL_FLOW_IDENTIFY)
         {
         }
+        g_level_start_localization_required = 0U;
         g_relocalize_force_fresh_pose = 0U;
         clear_car_request_wait();
         mark_wait_new_map_frame();
@@ -2410,6 +2449,7 @@ static void handle_localization_stage(void)
 
         g_localize_yaw_align_started = 0U;
         path_follow_hold_current_yaw();
+        g_level_start_localization_required = 0U;
         g_relocalize_force_fresh_pose = 0U;
         if (g_control_flow_phase == CONTROL_FLOW_IDENTIFY)
         {
@@ -2602,7 +2642,7 @@ static void handle_identify_execute_path(void)
 
     if (g_identify_endpoint_cursor >= g_identify_endpoint_count)
     {
-        finish_identify_flow_and_relocalize(1U);
+        finish_identify_flow_and_relocalize();
         return;
     }
 
@@ -2793,12 +2833,6 @@ static void handle_identify_execute_path(void)
                 return;
             }
 
-            if (g_identify_abort_to_mode1)
-            {
-                finish_identify_flow_and_relocalize(0U);
-                return;
-            }
-
             finish_current_identify_target(curr_target);
             return;
         }
@@ -2931,6 +2965,24 @@ static void handle_execute_path_stage(void)
     handle_pushbox_execute_path();
 }
 
+static void handle_pushbox_finished_stage(void)
+{
+    car_go_flag = 1U;
+    car_stop_flag = 1U;
+
+    if (g_continuous_run_active && g_control_continuous_levels_enabled)
+    {
+        if ((uint8)(g_continuous_level_index + 1U) < CONTROL_CONTINUOUS_LEVEL_COUNT)
+        {
+            g_continuous_level_index++;
+            start_current_level_launch();
+            return;
+        }
+    }
+
+    g_continuous_run_active = 0U;
+}
+
 /**
  * @brief 错误阶段：安全停车，并等待新地图后重新尝试规划。
  *
@@ -2976,7 +3028,14 @@ void control_set_start_enabled(uint8 enabled)
         g_control_start_enabled = 1U;
         if (g_control_stage == CONTROL_STAGE_IDLE)
         {
-            g_control_stage = CONTROL_STAGE_PRESTART_MOVE;
+            if (g_control_continuous_levels_enabled)
+            {
+                start_continuous_launch();
+            }
+            else
+            {
+                start_single_launch();
+            }
         }
         return;
     }
@@ -3063,7 +3122,8 @@ void control_process(void)
         break;
 
     case CONTROL_STAGE_PUSHBOX_FINISHED:
-        /* 完成态保持停车，等待外部调用 control_restart()。 */
+        handle_pushbox_finished_stage();
+        /* Single-run stops here; continuous-run may launch the next level. */
         break;
 
     case CONTROL_STAGE_ERROR:
@@ -3120,11 +3180,25 @@ uint8 control_get_identify_prerotate_enabled(void)
     return g_control_identify_prerotate_enabled;
 }
 
+void control_set_continuous_levels_enabled(uint8 enabled)
+{
+    g_control_continuous_levels_enabled = (enabled != 0U) ? 1U : 0U;
+    if (!g_control_continuous_levels_enabled)
+    {
+        g_continuous_run_active = 0U;
+    }
+}
+
+uint8 control_get_continuous_levels_enabled(void)
+{
+    return g_control_continuous_levels_enabled;
+}
+
 /**
  * @brief 手动设置推箱阶段规划模式。
  *
  * 为了避免非法输入破坏流程，除 CONTROL_PLAN_MODE_1 外都按
- * CONTROL_PLAN_MODE_2 处理；识别阶段的首个 IMG/NUM 结果仍可能自动覆盖该值。
+ * CONTROL_PLAN_MODE_2 处理；识别阶段不再自动覆盖该值。
  */
 void control_set_plan_mode(control_plan_mode_t mode)
 {

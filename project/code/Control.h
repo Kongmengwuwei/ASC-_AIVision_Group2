@@ -179,6 +179,9 @@ void control_set_identify_prerotate_enabled(uint8 enabled);
  */
 uint8 control_get_identify_prerotate_enabled(void);
 
+void control_set_continuous_levels_enabled(uint8 enabled);
+uint8 control_get_continuous_levels_enabled(void);
+
 /**
  * @brief 设置控制流程使用的路径规划模式。
  *

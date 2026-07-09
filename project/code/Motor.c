@@ -58,9 +58,9 @@ void encoder_get(void)
 {
 	static int16 encoder_L_up[5],encoder_R_up[5],encoder_L_down[5],encoder_R_down[5];
 	encoder_data_quaddec1 = -encoder_get_count(ENCODER_1);                  // 获取编码器计数 左上
-	encoder_data_quaddec2 = -encoder_get_count(ENCODER_2);                  // 获取编码器计数 右上
+	encoder_data_quaddec2 = -encoder_get_count(ENCODER_4);                  // 获取编码器计数 右上
 	encoder_data_quaddec3 = -encoder_get_count(ENCODER_3);                  // 获取编码器计数 左下
-	encoder_data_quaddec4 = -encoder_get_count(ENCODER_4);                  // 获取编码器计数 右下
+	encoder_data_quaddec4 = -encoder_get_count(ENCODER_2);                  // 获取编码器计数 右下
 	
 	
 	encoder_L_up[4]=encoder_L_up[3];//左上编码器

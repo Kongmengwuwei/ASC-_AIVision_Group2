@@ -36,6 +36,7 @@
 #include "zf_common_headfile.h"
 #include <stdio.h>
 #include <string.h>
+#include "MotorTest.h"
 
 #define PIT_PRIORITY_0 (PIT_IRQn)
 #define PIT_PRIORITY_1 (PIT_IRQn)
@@ -47,6 +48,12 @@ int main(void)
   debug_init();                  // 调试端口初始化
   // 模块初始化
   system_delay_ms(300);                          // 等待主板其他外设上电完成
+#if MOTOR_BOARD_TEST_ENABLE
+  motor_board_test_run();
+  while (1) {
+    BlueSerial_Printf("\r\nMOTOR\r\n");
+  }
+#else
   Menu_Init();                                   // 菜单系统初始化(包含按键，显示屏等相关初始化)
   uart_blob_init();                              // 摄像头串口接收与解析模块初始化
   flash_init();                                  // Flash模块初始化
@@ -74,13 +81,15 @@ int main(void)
   pit_ms_init(PIT_CH2, 2);                   // PIT2 periodic interrupt: 2 ms.
   interrupt_set_priority(PIT_PRIORITY_2, 0); // PIT2 interrupt priority.
   interrupt_set_priority(LPUART1_IRQn, 3);   // UART1 interrupt priority.
-  interrupt_set_priority(LPUART8_IRQn, 8);   // UART4 interrupt priority.
+  interrupt_set_priority(LPUART4_IRQn, 8);   // UART4 vision recognition interrupt priority.
+  interrupt_set_priority(LPUART8_IRQn, 8);   // UART8 Bluetooth/debug serial interrupt priority.
   interrupt_global_enable(0);
 
   control_init();
 
 #if ALGORITHM_TEST_ENABLE
   Algorithm_Test_PresetInput_Init(Menu_Get_Preset_Map_Index());
+#endif
 #endif
 
   // 主循环

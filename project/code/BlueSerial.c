@@ -15,17 +15,17 @@
 static volatile uint8 g_blueserial_path_report_pending = 0U;
 
 
-// BlueSerial uses UART4.
+// BlueSerial uses UART8.
 void Blue_Serial_Init(void)
 {
-	uart_init(UART_4, 115200, UART4_TX_C16, UART4_RX_C17);
+	uart_init(UART_8, 115200, UART8_TX_D16, UART8_RX_D17);
 }
 
 
 
 void BlueSerial_SendByte(uint8_t Byte)
 {
-	uart_write_byte(UART_4, Byte);
+	uart_write_byte(UART_8, Byte);
 }
 
 void BlueSerial_SendArray(uint8_t *Array, uint16_t Length)

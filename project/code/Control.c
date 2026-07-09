@@ -7,7 +7,6 @@
 #include "path.h"
 #include "path_follow.h"
 #include "Attitude.h"
-#include "BlueSerial.h"
 #include "zf_driver_delay.h"
 #include <math.h>
 #include <string.h>
@@ -62,7 +61,6 @@ float g_control_prestart_depart_compensate_m = -0.025f;
 /* 推炸弹到爆炸点后停留 0.5s，等待爆炸效果生效 */
 #define CONTROL_BOMB_EXPLOSION_PAUSE_MS 500U
 /* 回到发车区后，车头回正到发车方向基准的角度容差。 */
-#define CONTROL_RETURN_YAW_ALIGN_TOL_DEG 5.0f
 
 
 /**
@@ -216,7 +214,6 @@ static uint8 g_plan_ready = 0U;
  */
 static control_plan_mode_t g_control_plan_mode = CONTROL_PLAN_MODE_1;
 static control_flow_phase_t g_control_flow_phase = CONTROL_FLOW_IDENTIFY;
-static uint8 g_return_heading_rotate_started = 0U;
 static float g_start_yaw_deg = 0.0f;
 static uint8 g_start_yaw_ready = 0U;
 
@@ -224,7 +221,6 @@ static uint8 g_wait_new_map_frame = 0U;
 static uint8 g_wait_map_frame_base = 0U;
 static uint8 g_relocalize_force_fresh_pose = 0U;
 /* 定位取样完成后，先用 IMU 闭环把车头转回发车方向基准，再允许进入取图/规划。 */
-static uint8 g_localize_yaw_align_started = 0U;
 
 static size_t g_identify_segment_start_idx = 0U;
 static size_t g_identify_endpoint_indices[MAX_CAR_PATH] = {0U};
@@ -408,7 +404,6 @@ static void reset_localization_accumulator(void)
     g_localize_camera_settled = 0U;
     g_localize_sum_x_m = 0.0f;
     g_localize_sum_y_m = 0.0f;
-    g_localize_yaw_align_started = 0U;
 }
 
 static void clear_map_request_wait(void)
@@ -675,7 +670,6 @@ static void reset_control_runtime_state(void)
     g_path_plan_paused = 0U;
     g_plan_ready = 0U;
     g_exec_steps = 0U;
-    g_return_heading_rotate_started = 0U;
     g_start_yaw_deg = 0.0f;
     g_start_yaw_ready = 0U;
     memset(g_exec_path, 0, sizeof(g_exec_path));
@@ -722,91 +716,6 @@ static uint8 identify_result_to_valid_id(const VisionRecognitionResult *result, 
 
     *id_out = (uint8)result->label_value;
     return 1U;
-}
-
-static const char *identify_recognition_type_name(VisionRecognitionType type)
-{
-    switch (type)
-    {
-    case VISION_RECOGNITION_IMG:
-        return "IMG";
-    case VISION_RECOGNITION_NUM:
-        return "NUM";
-    default:
-        return "NONE";
-    }
-}
-
-static const char *identify_object_type_name(control_identify_obj_t obj_type)
-{
-    return (obj_type == CONTROL_IDENTIFY_OBJ_BOX) ? "BOX" : "TARGET";
-}
-
-static void report_identify_result_bluetooth(const control_identify_target_t *target,
-                                             const VisionRecognitionResult *result,
-                                             uint8 valid_id,
-                                             uint8 recognized_id)
-{
-    const char *type_name = "NONE";
-    const char *obj_name = "UNKNOWN";
-    const char *label_text = "";
-
-    if (target == NULL || result == NULL)
-    {
-        return;
-    }
-
-    type_name = identify_recognition_type_name(result->type);
-    obj_name = identify_object_type_name(target->obj_type);
-    label_text = result->label;
-
-    if (label_text[0] == '\0')
-    {
-        if (valid_id)
-        {
-            BlueSerial_Printf("IDR %s %s idx=%u cell=%u,%u stand=%u,%u dist=%u label=%u score=%d ok=%u marker=%u valid=%u id=%u\r\n",
-                              type_name,
-                              obj_name,
-                              (unsigned int)target->obj_index,
-                              (unsigned int)target->obj_pos_map.row,
-                              (unsigned int)target->obj_pos_map.col,
-                              (unsigned int)target->stand_pos_map.row,
-                              (unsigned int)target->stand_pos_map.col,
-                              (unsigned int)target->recog_distance,
-                              (unsigned int)recognized_id,
-                              (int)result->score,
-                              result->success ? 1U : 0U,
-                              result->mode_marker ? 1U : 0U,
-                              (unsigned int)valid_id,
-                              (unsigned int)recognized_id);
-            return;
-        }
-
-        if (result->mode_marker || !result->success)
-        {
-            label_text = "-1";
-        }
-        else
-        {
-            label_text = "?";
-        }
-    }
-
-    BlueSerial_Printf("IDR %s %s idx=%u cell=%u,%u stand=%u,%u dist=%u label=%s score=%d ok=%u marker=%u valid=%u id=%u\r\n",
-                      type_name,
-                      obj_name,
-                      (unsigned int)target->obj_index,
-                      (unsigned int)target->obj_pos_map.row,
-                      (unsigned int)target->obj_pos_map.col,
-                      (unsigned int)target->stand_pos_map.row,
-                      (unsigned int)target->stand_pos_map.col,
-                      (unsigned int)target->recog_distance,
-                      label_text,
-                      (int)result->score,
-                      result->success ? 1U : 0U,
-                      result->mode_marker ? 1U : 0U,
-                      (unsigned int)valid_id,
-                      (unsigned int)recognized_id);
 }
 
 static uint8 update_plan_mode_from_first_identify_result(const VisionRecognitionResult *result,
@@ -1169,7 +1078,6 @@ static uint8 identify_action_stub(const control_identify_target_t *target)
             result.mode_marker = true;
             result.label_is_number = false;
             result.label_value = -1;
-            result.score = 0;
             valid_id = 0U;
         }
         else
@@ -1182,19 +1090,15 @@ static uint8 identify_action_stub(const control_identify_target_t *target)
             {
                 result.label_is_number = true;
                 result.label_value = (int32)recognized_id;
-                result.score = 100;
                 valid_id = 1U;
             }
             else
             {
                 result.label_is_number = false;
                 result.label_value = -1;
-                result.score = -1;
                 valid_id = 0U;
             }
         }
-
-        report_identify_result_bluetooth(target, &result, valid_id, recognized_id);
 
         if (!update_plan_mode_from_first_identify_result(&result, valid_id))
         {
@@ -1242,7 +1146,6 @@ static uint8 identify_action_stub(const control_identify_target_t *target)
         if (vision_take_img_result(&result))
         {
             valid_id = identify_result_to_valid_id(&result, &recognized_id);
-            report_identify_result_bluetooth(target, &result, valid_id, recognized_id);
             if (!update_plan_mode_from_first_identify_result(&result, valid_id))
             {
                 if (!start_identify_recognition_request(target, distance))
@@ -1269,7 +1172,6 @@ static uint8 identify_action_stub(const control_identify_target_t *target)
         if (vision_take_num_result(&result))
         {
             valid_id = identify_result_to_valid_id(&result, &recognized_id);
-            report_identify_result_bluetooth(target, &result, valid_id, recognized_id);
             if (!update_plan_mode_from_first_identify_result(&result, valid_id))
             {
                 if (!start_identify_recognition_request(target, distance))
@@ -2334,7 +2236,7 @@ static void handle_prestart_move(void)
         /*
          * 起步动作刚结束时车仍可能有惯性，不能直接 go=0 断 PWM。
          * 这里沿用其他行驶中停车的标志组合：go=1 且 stop=1，
-         * 让 main.c 中的 motor_control(car_stop_array) 继续做闭环零速刹停，
+         * 让 main.c 中的停车分支保留 yaw 闭环、只清零平移速度，
          * 等四轮编码器接近静止后再由底层清 PID 并断 PWM，避免小车滑动。
          */
         car_go_flag = 1U;
@@ -2368,18 +2270,16 @@ static void handle_prestart_move(void)
  * - 按需请求视觉车位�?
  * - 采集多帧位置后取平均
  * - 将里程计位置重置到视觉平均位置
- * - 航向不采用视觉 yaw，而是先原地转向校正回发车方向基准
+ * - 航向目标保持不变，角度环继续维持现有车头方向
  */
 static void handle_localization_stage(void)
 {
-    path_follow_status_t st = {0};
     uint8 accept_sample = 0U;
     uint8 min_samples = CONTROL_LOCALIZE_MIN_SAMPLES;
     float cam_x_m = 0.0f;
     float cam_y_m = 0.0f;
     float avg_x_m = 0.0f;
     float avg_y_m = 0.0f;
-    float start_base_yaw_deg = map_dir_to_yaw_deg(CONTROL_MAP_DIR_RIGHT);
 
     if (!should_enter_vision_localization_stage())
     {
@@ -2389,31 +2289,6 @@ static void handle_localization_stage(void)
         }
         g_relocalize_force_fresh_pose = 0U;
         clear_car_request_wait();
-        mark_wait_new_map_frame();
-        set_control_phase_stage(CONTROL_PHASE_STEP_WAIT_CAMERA_DATA);
-        return;
-    }
-
-    if (g_localize_yaw_align_started)
-    {
-        /*
-         * 视觉位置已经写入 path_follow，当前只等待“车头回正到发车方向基准”结束。
-         * 这里用 path_follow 的 active 标志做握手，避免在原地转向尚未完成时提前取图规划。
-         */
-        path_follow_get_status(&st);
-        if (st.active)
-        {
-            car_go_flag = 1U;
-            car_stop_flag = 0U;
-            return;
-        }
-
-        g_localize_yaw_align_started = 0U;
-        path_follow_hold_current_yaw();
-        g_relocalize_force_fresh_pose = 0U;
-        if (g_control_flow_phase == CONTROL_FLOW_IDENTIFY)
-        {
-        }
         mark_wait_new_map_frame();
         set_control_phase_stage(CONTROL_PHASE_STEP_WAIT_CAMERA_DATA);
         return;
@@ -2465,16 +2340,15 @@ static void handle_localization_stage(void)
 
     clear_car_request_wait();
     /*
-     * 初始定位的关键修正：
-     * - 视觉只提供地图位置平均值；
-     * - 航向目标强制采用发车时记录的方向基准；
-     * - 下发原地转向，让 IMU yaw 闭环把车头实际纠正回发车方向。
+     * Vision localization only refreshes position.  The yaw target stays
+     * unchanged so non-identify stages keep holding the existing heading.
      */
-    path_follow_reset_pose(avg_x_m, avg_y_m, start_base_yaw_deg);
-    path_follow_start_rotate_to_yaw(start_base_yaw_deg);
+    path_follow_reset_pose(avg_x_m, avg_y_m, eulerAngle.yaw);
     car_go_flag = 1U;
-    car_stop_flag = 0U;
-    g_localize_yaw_align_started = 1U;
+    car_stop_flag = 1U;
+    g_relocalize_force_fresh_pose = 0U;
+    mark_wait_new_map_frame();
+    set_control_phase_stage(CONTROL_PHASE_STEP_WAIT_CAMERA_DATA);
 }
 
 /**
@@ -2496,10 +2370,10 @@ static void handle_wait_camera_data(void)
             car_pose_updated = false;
             if (get_camera_position_meter(&cam_x_m, &cam_y_m))
             {
-                /* 等地图阶段若拿到新位置，顺带轻量同步一次里程计；方向仍使用发车基准。 */
+                /* 等地图阶段若拿到新位置，只轻量同步里程计位置，不改 yaw 目标。 */
                 path_follow_reset_pose(cam_x_m,
                                        cam_y_m,
-                                       map_dir_to_yaw_deg(CONTROL_MAP_DIR_RIGHT));
+                                       eulerAngle.yaw);
             }
         }
     }
@@ -2880,7 +2754,6 @@ static void finish_pushbox_flow_after_return(void)
 {
     car_go_flag = 1U;
     car_stop_flag = 1U;
-    g_return_heading_rotate_started = 0U;
     set_control_phase_stage(CONTROL_PHASE_STEP_FINISHED);
 }
 
@@ -2890,8 +2763,6 @@ static void finish_pushbox_flow_after_return(void)
 static void handle_pushbox_execute_path(void)
 {
     path_follow_status_t st = {0};
-    float return_yaw_deg = 0.0f;
-    float yaw_err_deg = 0.0f;
 
     path_follow_get_status(&st);
     if (st.active)
@@ -2899,21 +2770,6 @@ static void handle_pushbox_execute_path(void)
         return;
     }
 
-    return_yaw_deg = map_dir_to_yaw_deg(CONTROL_MAP_DIR_RIGHT);
-    yaw_err_deg = wrap_yaw_deg_local(return_yaw_deg - eulerAngle.yaw);
-    if (fabsf(yaw_err_deg) > CONTROL_RETURN_YAW_ALIGN_TOL_DEG)
-    {
-        car_go_flag = 1U;
-        car_stop_flag = 0U;
-        if (!g_return_heading_rotate_started)
-        {
-            path_follow_start_rotate_to_yaw(return_yaw_deg);
-            g_return_heading_rotate_started = 1U;
-        }
-        return;
-    }
-
-    path_follow_hold_current_yaw();
     finish_pushbox_flow_after_return();
 }
 

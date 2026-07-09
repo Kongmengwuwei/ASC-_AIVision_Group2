@@ -18,7 +18,7 @@ static bool state_show_switch = true;
 static uint8 preset_map_index = ALGORITHM_TEST_PRESET_INDEX;
 
 path_follow_status_t path_follow_status = {0};
-uint8 plan_mode = 0U;
+control_plan_mode_t plan_mode = CONTROL_PLAN_MODE_1;
 
 uint8 test1 = 0;
 
@@ -47,19 +47,6 @@ static void draw_exec_path_diamond(uint16 center_x, uint16 center_y)
 static uint8 display_object_id(uint8 id)
 {
     return (id == 0xFFU) ? 0U : id;
-}
-
-static uint8 get_display_plan_mode(void)
-{
-    control_stage_t stage = control_get_stage();
-
-    if (stage >= CONTROL_STAGE_PUSHBOX_LOCALIZE &&
-        stage <= CONTROL_STAGE_PUSHBOX_FINISHED)
-    {
-        return (control_get_plan_mode() == CONTROL_PLAN_MODE_2) ? 2U : 1U;
-    }
-
-    return 0U;
 }
 
 static uint8 clamp_preset_map_index(uint8 index)
@@ -807,7 +794,7 @@ void State_Show(void)
     ips200_show_float(96, 176, path_follow_status.target_y_m, 1, 3);
     ips200_show_float(160, 176, path_follow_status.target_yaw_deg, 3, 1);
 
-    plan_mode = get_display_plan_mode();
+    plan_mode = control_get_plan_mode();
     ips200_show_string(170, 200, "Mode:");
     ips200_show_uint(170 + FONT_W * 6, 200, plan_mode, 2);
 }

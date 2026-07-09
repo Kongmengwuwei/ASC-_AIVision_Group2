@@ -1017,9 +1017,9 @@ void Menu_Switch(void)
 {
     // 按键在此更改
     key_state_enum k1 = key_get_state(KEY_1);
-    key_state_enum k3 = key_get_state(KEY_2);
+    key_state_enum k2 = key_get_state(KEY_2);
     key_state_enum k4 = key_get_state(KEY_3);
-    key_state_enum k2 = key_get_state(KEY_4);
+    key_state_enum k3 = key_get_state(KEY_4);
 
     if (k1 == KEY_SHORT_PRESS)
     {

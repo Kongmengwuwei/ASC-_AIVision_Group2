@@ -65,7 +65,7 @@
 #define PATH_ROTATE_CENTER_OFFSET_X_CM 0.0f
 #define PATH_ROTATE_CENTER_OFFSET_Y_CM 0.0f
 #define PATH_ROTATE_CENTER_OFFSET_LIMIT_CM 50.0f
-#define PATH_ROTATE_SLOWDOWN_BAND_DEG 5.0f
+#define PATH_ROTATE_SLOWDOWN_BAND_DEG 3.0f
 #define PATH_ROTATE_SLOWDOWN_MIN_DEGPS 7.0f
 #define PATH_ROTATE_POSITION_HOLD_ENABLE 1U
 #define PATH_ROTATE_POSITION_HOLD_KP_CMPS_PER_CM 1.5f
@@ -92,7 +92,7 @@
 #define PATH_FOLLOW_ENABLE_CORNER_DUAL_AXIS_TRIM 1
 
 #ifndef PATH_CORNER_COMMIT_LATERAL_GATE_MIN_M
-#define PATH_CORNER_COMMIT_LATERAL_GATE_MIN_M 0.01f
+#define PATH_CORNER_COMMIT_LATERAL_GATE_MIN_M 0.02f
 #endif
 #ifndef PATH_CORNER_COMMIT_LATERAL_GATE_SCALE
 #define PATH_CORNER_COMMIT_LATERAL_GATE_SCALE 1.20f
@@ -110,7 +110,7 @@
  * @note 该值直接沿用现有实现中的数值语义，只做宏抽取，不改变当前控制框架�?
  */
 #define PATH_FOLLOW_MAX_ANGULAR_SPEED_LIMIT 120.0f
-#define PATH_PROFILE_DONE_MIN_SPEED_CMPS 10.0f
+#define PATH_PROFILE_DONE_MIN_SPEED_CMPS 5.0f
 #define PATH_TARGET_SETTLE_TIME_MS 100U
 #define PATH_TARGET_SETTLE_CYCLES ((uint32)(((uint32)PATH_TARGET_SETTLE_TIME_MS * (uint32)PID_RATE + 999U) / 1000U))
 #define PATH_TARGET_SETTLE_INVALID_IDX ((size_t)-1)
@@ -129,7 +129,7 @@
 /** @brief Near-target hold position PID Ki. */
 #define PATH_FOLLOW_PID_STAY_KI 0.0f
 /** @brief Near-target hold position PID Kd. */
-#define PATH_FOLLOW_PID_STAY_KD 1.1f
+#define PATH_FOLLOW_PID_STAY_KD 0.5f
 /** @brief Near-target hold position PID integral limit, unit cm/s. */
 #define PATH_FOLLOW_PID_STAY_MAX_IOUT_CMPS 200.0f
 /** @brief Near-target hold position PID output limit, unit cm/s. */

@@ -306,6 +306,7 @@ static float g_localize_sum_x_m = 0.0f;
  * @brief 初始定位阶段累计的视�?Y 坐标和（米）�?
  */
 static float g_localize_sum_y_m = 0.0f;
+static float g_localize_sum_yaw_deg = 0.0f;
 
 static uint8 g_map_request_waiting = 0U;
 static uint16 g_map_request_wait_loops = 0U;
@@ -347,6 +348,40 @@ static float wrap_yaw_deg_local(float yaw_deg)
         yaw_deg += 360.0f;
     }
     return yaw_deg;
+}
+
+static void control_enable_yaw_closed_loop(void)
+{
+    path_follow_set_stationary_yaw_hold_enabled(1U);
+}
+
+static void control_disable_yaw_closed_loop(void)
+{
+    path_follow_set_stationary_yaw_hold_enabled(0U);
+}
+
+static void control_hold_yaw_closed_loop(void)
+{
+    path_follow_hold_current_yaw();
+    control_enable_yaw_closed_loop();
+    car_go_flag = 1U;
+    car_stop_flag = 0U;
+}
+
+static void report_visual_localization_bluetooth(float cam_x_m,
+                                                 float cam_y_m,
+                                                 float cam_yaw_deg)
+{
+    path_follow_status_t odom = {0};
+
+    path_follow_get_status(&odom);
+    BlueSerial_Printf("VLOC cam=%.3f,%.3f odom=%.3f,%.3f vyaw=%.1f oyaw=%.1f\r\n",
+                      cam_x_m,
+                      cam_y_m,
+                      odom.x_m,
+                      odom.y_m,
+                      cam_yaw_deg,
+                      odom.yaw_deg);
 }
 
 /**
@@ -435,6 +470,7 @@ static void reset_localization_accumulator(void)
     g_localize_camera_settle_loops = 0U;
     g_localize_sum_x_m = 0.0f;
     g_localize_sum_y_m = 0.0f;
+    g_localize_sum_yaw_deg = 0.0f;
     g_localize_yaw_align_started = 0U;
 }
 
@@ -838,6 +874,7 @@ static void start_continuous_launch(void)
 
 static void reset_control_runtime_state(void)
 {
+    control_disable_yaw_closed_loop();
     g_control_start_enabled = 0U;
     g_control_stage = CONTROL_STAGE_IDLE;
     g_control_flow_phase = CONTROL_FLOW_IDENTIFY;
@@ -851,6 +888,7 @@ static void reset_control_runtime_state(void)
     g_start_yaw_deg = 0.0f;
     g_start_yaw_ready = 0U;
     reset_level_runtime_state_for_launch();
+    control_disable_yaw_closed_loop();
     g_control_stage = CONTROL_STAGE_IDLE;
     g_level_start_localization_required = 0U;
 }
@@ -1325,8 +1363,7 @@ static uint8 identify_action_stub(const control_identify_target_t *target)
     }
 
     /* ʶ�����ڼ䱣��ͣ��������ͼ�񶶶��� */
-    car_go_flag = 1U;
-    car_stop_flag = 1U;
+    control_hold_yaw_closed_loop();
 
 #if ALGORITHM_TEST_ENABLE
     if (Algorithm_Test_PresetInput_IsEnabled())
@@ -1947,7 +1984,7 @@ static uint8 begin_identify_segment_motion(size_t end_idx)
         }
 
         configure_bomb_pause_for_path(g_identify_segment_path, seg_steps);
-        path_follow_hold_current_yaw();
+        control_hold_yaw_closed_loop();
         if (use_half_grid_path)
         {
             path_follow_set_path_with_grid(g_identify_segment_path,
@@ -2008,10 +2045,9 @@ static uint8 start_identify_segment(size_t end_idx)
 static void finish_identify_flow_and_relocalize(void)
 {
     /* 识别路径刚结束时仍按行驶中停车处理，避免直接断 PWM 造成滑行。 */
-    car_go_flag = 1U;
-    car_stop_flag = 1U;
     path_follow_set_path(NULL, 0U);
     path_follow_set_pause_indices(NULL, 0U, 0U);
+    control_hold_yaw_closed_loop();
 
     finalize_identify_ids_for_pushbox();
     vision_clear_pending_data();
@@ -2193,6 +2229,8 @@ static uint8 settle_camera_before_localization_once(void)
  */
 static void begin_path_plan_pause(void)
 {
+    path_follow_set_path(NULL, 0U);
+    control_hold_yaw_closed_loop();
     g_path_plan_paused = 1U;
 }
 
@@ -2450,7 +2488,7 @@ static void handle_prestart_move(void)
 
         /* 发车只改变平移方向，不改变车头朝向。 */
         path_follow_reset_pose(st.x_m, st.y_m, hold_yaw_deg);
-        path_follow_hold_current_yaw();
+        control_hold_yaw_closed_loop();
         path_follow_start_pose_correction(target_x_m, target_y_m);
         g_prestart_move_started = 1U;
         return;
@@ -2465,16 +2503,14 @@ static void handle_prestart_move(void)
          * 让 main.c 中的 motor_control(car_stop_array) 继续做闭环零速刹停，
          * 等四轮编码器接近静止后再由底层清 PID 并断 PWM，避免小车滑动。
          */
-        car_go_flag = 1U;
-        car_stop_flag = 1U;
         if (g_prestart_nominal_pose_valid)
         {
             path_follow_reset_pose(g_prestart_nominal_target_x_m,
                                    g_prestart_nominal_target_y_m,
                                    map_dir_to_yaw_deg(CONTROL_MAP_DIR_RIGHT));
-            path_follow_hold_current_yaw();
             g_prestart_nominal_pose_valid = 0U;
         }
+        control_hold_yaw_closed_loop();
         reset_localization_accumulator();
         g_relocalize_force_fresh_pose = 0U;
         if (should_enter_vision_localization_stage())
@@ -2538,7 +2574,7 @@ static void handle_localization_stage(void)
         }
 
         g_localize_yaw_align_started = 0U;
-        path_follow_hold_current_yaw();
+        control_hold_yaw_closed_loop();
         g_level_start_localization_required = 0U;
         g_relocalize_force_fresh_pose = 0U;
         if (g_control_flow_phase == CONTROL_FLOW_IDENTIFY)
@@ -2586,6 +2622,7 @@ static void handle_localization_stage(void)
 
     g_localize_sum_x_m += cam_x_m;
     g_localize_sum_y_m += cam_y_m;
+    g_localize_sum_yaw_deg += car_pose.yaw;
     g_localize_sample_count++;
 
     if (g_localize_sample_count < min_samples)
@@ -2604,8 +2641,12 @@ static void handle_localization_stage(void)
      * - 航向目标强制采用发车时记录的方向基准；
      * - 下发原地转向，让 IMU yaw 闭环把车头实际纠正回发车方向。
      */
+    report_visual_localization_bluetooth(avg_x_m,
+                                         avg_y_m,
+                                         g_localize_sum_yaw_deg / (float)g_localize_sample_count);
     path_follow_reset_pose(avg_x_m, avg_y_m, start_base_yaw_deg);
     path_follow_start_rotate_to_yaw(start_base_yaw_deg);
+    control_enable_yaw_closed_loop();
     car_go_flag = 1U;
     car_stop_flag = 0U;
     g_localize_yaw_align_started = 1U;
@@ -2631,6 +2672,9 @@ static void handle_wait_camera_data(void)
             if (get_camera_position_meter(&cam_x_m, &cam_y_m))
             {
                 /* 等地图阶段若拿到新位置，顺带轻量同步一次里程计；方向仍使用发车基准。 */
+                report_visual_localization_bluetooth(cam_x_m,
+                                                     cam_y_m,
+                                                     car_pose.yaw);
                 path_follow_reset_pose(cam_x_m,
                                        cam_y_m,
                                        map_dir_to_yaw_deg(CONTROL_MAP_DIR_RIGHT));
@@ -2896,7 +2940,7 @@ static void handle_identify_execute_path(void)
              * 到半格点的轻量修正，处理未提前收集目标或多目标切换时的补充移动。
              * 识别串口请求必须等该位置修正结束后再发，避免车还在动时开始识别。
              */
-            path_follow_hold_current_yaw();
+            control_hold_yaw_closed_loop();
             path_follow_start_pose_correction(curr_target->near_half_step_x_m,
                                               curr_target->near_half_step_y_m);
             car_go_flag = 1U;
@@ -2911,9 +2955,7 @@ static void handle_identify_execute_path(void)
             return;
         }
 
-        path_follow_hold_current_yaw();
-        car_go_flag = 1U;
-        car_stop_flag = 1U;
+        control_hold_yaw_closed_loop();
         g_identify_near_half_step_started = 0U;
         g_identify_exec_state = CONTROL_IDENTIFY_EXEC_DO_RECOGNIZE;
         break;
@@ -2996,7 +3038,7 @@ static void handle_load_path_stage(void)
     }
 
     configure_bomb_pause_for_path(g_exec_path, g_exec_steps);
-    path_follow_hold_current_yaw();
+    control_hold_yaw_closed_loop();
     path_follow_set_path(g_exec_path, g_exec_steps);
 
     car_go_flag = 1U;
@@ -3006,8 +3048,7 @@ static void handle_load_path_stage(void)
 
 static void finish_pushbox_flow_after_return(void)
 {
-    car_go_flag = 1U;
-    car_stop_flag = 1U;
+    control_hold_yaw_closed_loop();
     g_return_heading_rotate_started = 0U;
     set_control_phase_stage(CONTROL_PHASE_STEP_FINISHED);
 }
@@ -3041,7 +3082,6 @@ static void handle_pushbox_execute_path(void)
         return;
     }
 
-    path_follow_hold_current_yaw();
     finish_pushbox_flow_after_return();
 }
 
@@ -3061,8 +3101,7 @@ static void handle_execute_path_stage(void)
 
 static void handle_pushbox_finished_stage(void)
 {
-    car_go_flag = 1U;
-    car_stop_flag = 1U;
+    control_hold_yaw_closed_loop();
 
     if (g_continuous_run_active && g_control_continuous_levels_enabled)
     {
@@ -3090,8 +3129,7 @@ static void handle_pushbox_finished_stage(void)
  */
 static void handle_error_stage(void)
 {
-    car_go_flag = 1U;
-    car_stop_flag = 1U;
+    control_hold_yaw_closed_loop();
 
     if (map_data_updated)
     {
@@ -3184,6 +3222,7 @@ void control_process(void)
 
     if (!g_control_start_enabled)
     {
+        control_disable_yaw_closed_loop();
         car_go_flag = 0U;
         car_stop_flag = 0U;
         g_control_stage = CONTROL_STAGE_IDLE;
@@ -3323,5 +3362,9 @@ control_plan_mode_t control_get_plan_mode(void)
 
 uint8 control_is_path_plan_paused(void)
 {
+    if (g_path_plan_paused && path_follow_get_stationary_yaw_hold_enabled())
+    {
+        return 0U;
+    }
     return g_path_plan_paused;
 }

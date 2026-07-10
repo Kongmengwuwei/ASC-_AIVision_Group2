@@ -3,7 +3,7 @@
 
 #define MENU_SHOW_PERIOD_LOOPS 3U
 
-Menu_Item Root;     // 根目录
+Menu_Item Root;     // 根目�?
 Menu_Item *pointer; // 指针
 
 uint8 car_go_flag = 0;   // 运行标志
@@ -108,7 +108,7 @@ void Menu_Create(void)
     Menu_Item *Setting = Create_Menu_Folder_dynamic(&Root, "Setting");
     Menu_Item *Data = Create_Menu_Folder_dynamic(&Root, "Data");
 
-    // 在此动态创建文件 //
+    // 在此动态创建文�?//
     Create_Menu_File_dynamic(Startup, "Start", &startup_start_switch, bool_Box);
     Create_Menu_File_dynamic(Startup, "Reset", &startup_reset_switch, bool_Box);
     Create_Menu_File_dynamic(Startup, "Start_Dir", &startup_depart_dir_value, uint8_Box);
@@ -238,7 +238,7 @@ static bool Menu_Handle_Control_Uint8(Menu_Item *item, int16 delta)
     return false;
 }
 
-// 菜单初始化
+// 菜单初始�?
 void Menu_Init(void)
 {
     // 显示配置
@@ -247,10 +247,10 @@ void Menu_Init(void)
     ips200_set_color(RGB565_WHITE, RGB565_BLACK);
     ips200_init(IPS200_TYPE_SPI);
 
-    // 按键初始化
+    // 按键初始�?
     key_init(20);
 
-    // 菜单节点初始化
+    // 菜单节点初始�?
     Root.name = "MENU";
     Root.kind = MENU_Folder;
     Root.rank = 0;
@@ -264,9 +264,9 @@ void Menu_Init(void)
     // 菜单创建
     Menu_Create();
 
-    // 菜单初始化处理
+    // 菜单初始化处�?
     if (Root.sons != 0)
-        pointer = Root.First_Son; // 指针默认指向第一个节点
+        pointer = Root.First_Son; // 指针默认指向第一个节�?
     All_Folder_Menu_Init(&Root);  // 初始化所有文件夹菜单
 
     ips200_draw_line(0, 129, 239, 129, RGB565_WHITE);
@@ -378,10 +378,10 @@ void Show_Map(void)
     const uint16 inner_row_offset = 1;
     const uint16 inner_col_offset = 1;
     const uint16 cell_size = 10;
-    // 地图起始坐标（左上角）
+    // 地图起始坐标（左上角�?
     const uint16 start_x = 0;
     const uint16 start_y = 199;
-    // 地图元素状态缓存
+    // 地图元素状态缓�?
     static uint8 inited = 0U;
     static uint8 last_cells[12][16] = {{0}};
     static uint32 last_path_sig = 0U;
@@ -390,7 +390,7 @@ void Show_Map(void)
     uint8 curr_cells[12][16] = {{0}};
     size_t exec_steps = 0U;
     const Position *exec_path = control_get_exec_path(&exec_steps);
-    // 地图元素类型位定义
+    // 地图元素类型位定�?
     enum
     {
         MAP_OBS = 0x01,
@@ -401,7 +401,7 @@ void Show_Map(void)
         MAP_PATH = 0x20
     };
 
-    // 固定绘制外圈一整圈障碍物（12x16 边框）
+    // 固定绘制外圈一整圈障碍物（12x16 边框�?
     for (uint16 r = 0; r < map_rows; r++)
     {
         curr_cells[r][0] |= MAP_OBS;
@@ -413,7 +413,7 @@ void Show_Map(void)
         curr_cells[map_rows - 1][c] |= MAP_OBS;
     }
 
-    // 内圈元素坐标：基于 10x14（row:0~9, col:0~13），显示时映射到 [1..10][1..14]
+    // 内圈元素坐标：基�?10x14（row:0~9, col:0~13），显示时映射到 [1..10][1..14]
     for (size_t i = 0; i < Obstacles_count; i++)
     {
         int r = obstacles[i].row;
@@ -586,7 +586,7 @@ void Show_Map(void)
             }
         }
     }
-    // 绘制网格线
+    // 绘制网格�?
     for (uint16 i = 0; i <= map_cols; i++)
     {
         uint16 x = start_x + i * cell_size;
@@ -646,7 +646,7 @@ void Show_Map(void)
     ips200_set_font(IPS200_8X16_FONT);
     ips200_set_color(RGB565_WHITE, RGB565_BLACK);
 
-    // 路径显示：绘制中心到中心的绿色直线，覆盖在其他元素之上
+    // 路径显示：绘制中心到中心的绿色直线，覆盖在其他元素之�?
     if (Car_path_count >= 2U)
     {
         for (size_t i = 1; i < Car_path_count; i++)
@@ -672,7 +672,7 @@ void Show_Map(void)
         }
     }
 
-    // 执行路径显示：执行路径来自 path_follow 坐标系，显示前先转回地图栅格坐标。
+    // 执行路径显示：执行路径来�?path_follow 坐标系，显示前先转回地图栅格坐标�?
     if (exec_path != NULL && exec_steps >= 1U)
     {
         if (exec_steps >= 2U)
@@ -725,7 +725,7 @@ void Show_Map(void)
         }
     }
 
-    // 记录当前地图状态
+    // 记录当前地图状�?
     for (uint16 r = 0; r < map_rows; r++)
     {
         for (uint16 c = 0; c < map_cols; c++)
@@ -759,8 +759,8 @@ void State_Show(void)
     ips200_show_string(168, 132, "State:");
     /*
      * 状态编号约定：
-     * 0/1 为全局状态；20~24 为识别阶段；30~35 为推箱子阶段；99 为错误重试。
-     * 这样现场调车时只看两位数字，就能先判断当前属于哪条流程。
+     * 0/1 为全局状态；20~24 为识别阶段；30~35 为推箱子阶段�?9 为错误重试�?
+     * 这样现场调车时只看两位数字，就能先判断当前属于哪条流程�?
      */
     switch (g_control_stage)
     {
@@ -828,6 +828,7 @@ void State_Show(void)
     plan_mode = get_display_plan_mode();
     ips200_show_string(170, 200, "Mode:");
     ips200_show_uint(170 + FONT_W * 6, 200, plan_mode, 2);
+
 }
 
 // 菜单显示
@@ -957,7 +958,7 @@ void Key_Sub(void) // 数据减小
         break;
     }
 }
-void Key_Enter(void) // 进入文件夹
+void Key_Enter(void) // 进入文件�?
 {
     Menu_Request_Redraw();
     if (pointer->kind == MENU_Folder)
@@ -1001,12 +1002,12 @@ void Key_Deselect(void) // 取消选中
     if (pointer->kind != MENU_Folder)
         pointer->selected = 0;
 }
-void Key_SetupCtrl_Plus(void) // 步进值增大
+void Key_SetupCtrl_Plus(void) // 步进值增�?
 {
     Menu_Request_Redraw();
     SetupIndex = (SetupIndex + 1) % SETUP_LEN;
 }
-void Key_SetupCtrl_Sub(void) // 步进值减小(可返回最大值)
+void Key_SetupCtrl_Sub(void) // 步进值减�?可返回最大�?
 {
     Menu_Request_Redraw();
     SetupIndex = (SetupIndex - 1 + SETUP_LEN) % SETUP_LEN;
@@ -1017,14 +1018,14 @@ void Menu_Switch(void)
 {
     // 按键在此更改
     key_state_enum k1 = key_get_state(KEY_1);
-    key_state_enum k2 = key_get_state(KEY_2);
-    key_state_enum k4 = key_get_state(KEY_3);
-    key_state_enum k3 = key_get_state(KEY_4);
+    key_state_enum k3 = key_get_state(KEY_2);
+    key_state_enum k2 = key_get_state(KEY_3);
+    key_state_enum k4 = key_get_state(KEY_4);
 
     if (k1 == KEY_SHORT_PRESS)
     {
 #if !ALGORITHM_TEST_MANUAL_SIM_ENABLE
-        // 常规模式下菜单操作：选中文件时增大数据，未选中时指针上移
+        // 常规模式下菜单操作：选中文件时增大数据，未选中时指针上�?
         if (pointer->selected == false)
             Key_Up();
         else
@@ -1034,7 +1035,7 @@ void Menu_Switch(void)
     else if (k2 == KEY_SHORT_PRESS)
     {
 #if !ALGORITHM_TEST_MANUAL_SIM_ENABLE
-        // 常规模式下菜单操作：选中文件时减小数据，未选中时指针下移
+        // 常规模式下菜单操作：选中文件时减小数据，未选中时指针下�?
         if (pointer->selected == false)
             Key_Down();
         else
@@ -1046,7 +1047,7 @@ void Menu_Switch(void)
         // control_set_start_enabled(1);
 
 #if ALGORITHM_TEST_MANUAL_SIM_ENABLE
-        // 算法测试自动一次性执行完整路径
+        // 算法测试自动一次性执行完整路�?
         if (Algo_Test_auto)
             move_ret = Test_Path_ALL();
 #else
@@ -1063,7 +1064,7 @@ void Menu_Switch(void)
     else if (k4 == KEY_SHORT_PRESS)
     {
 #if ALGORITHM_TEST_MANUAL_SIM_ENABLE
-        // 算法测试自动执行路径一步
+        // 算法测试自动执行路径一�?
         if (Algo_Test_auto)
             move_ret = Test_Path_Step(&move_cmd);
 #else

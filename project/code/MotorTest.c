@@ -54,22 +54,17 @@ static void motor_test_print_header(void)
     BlueSerial_Printf("\r\nMOTOR_TEST START pwm=%d stage_ms=%u\r\n",
                       MOTOR_TEST_PWM,
                       MOTOR_TEST_STAGE_MS);
-    BlueSerial_Printf("order: UL UR DL DR, speed fields are filtered encoder counts per 10ms sample\r\n");
 }
 
 static void motor_test_report(const char *step_name, uint32 elapsed_ms)
 {
-    BlueSerial_Printf("MT %-12s t=%lu pwm[%d,%d,%d,%d] enc[%d,%d,%d,%d]\r\n",
+    BlueSerial_Printf("MT %-12s t=%lu pwm[%d,%d,%d,%d]\r\n",
                       step_name,
                       (unsigned long)elapsed_ms,
                       speed_encoder[0],
                       speed_encoder[1],
                       speed_encoder[2],
-                      speed_encoder[3],
-                      up_L_all,
-                      up_R_all,
-                      down_L_all,
-                      down_R_all);
+                      speed_encoder[3]);
 }
 
 static void motor_test_apply_step(const motor_test_step_t *step)

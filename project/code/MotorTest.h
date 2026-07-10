@@ -6,7 +6,7 @@
  * This bypasses the normal camera/path/IMU/menu workflow in main().
  * Set back to 0 before running the normal competition program.
  */
-#define MOTOR_BOARD_TEST_ENABLE 1
+#define MOTOR_BOARD_TEST_ENABLE 0
 
 void motor_board_test_run(void);
 

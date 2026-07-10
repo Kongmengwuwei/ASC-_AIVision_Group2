@@ -22,9 +22,9 @@ PIDInitStruct ULPidInitStruct =
 
 PIDInitStruct URPidInitStruct = 
 {
-	.fKp       = 7.7,     //.fKp 8.6
-	.fKi       = 2.1,     //.fKi 2.0
-	.fKd       = 15,     //.fKd
+	.fKp       = 16.0,    //.fKp
+	.fKi       = 1.5,     //.fKi
+	.fKd       = 25.0,    //.fKd
 	.fMax_Iout = 4000,      //.fMax_Iout
 	.fMax_Out  = 6000,       //.fMax_Out
 	.alpha     = 0.9
@@ -32,9 +32,9 @@ PIDInitStruct URPidInitStruct =
 
 PIDInitStruct DLPidInitStruct = 
 {
-	.fKp       = 7.5,     //.fKp  9.7
-	.fKi       = 2,     //.fKi 2.05
-	.fKd       = 15,     //.fKd
+	.fKp       = 8.0,     //.fKp
+	.fKi       = 2.0,     //.fKi
+	.fKd       = 5.0,     //.fKd
 	.fMax_Iout = 4000,      //.fMax_Iout
 	.fMax_Out  = 6000,       //.fMax_Out
 	.alpha     = 0.9
@@ -42,9 +42,9 @@ PIDInitStruct DLPidInitStruct =
 
 PIDInitStruct DRPidInitStruct = 
 {
-	.fKp       = 9.8,     //.fKp 8.6
-	.fKi       = 2.1,     //.fKi 2.0
-	.fKd       = 15,     //.fKd
+	.fKp       = 26.0,    //.fKp
+	.fKi       = 2.1,     //.fKi
+	.fKd       = 15.0,    //.fKd
 	.fMax_Iout = 4000,      //.fMax_Iout
 	.fMax_Out  = 6000,       //.fMax_Out
 	.alpha     = 0.9

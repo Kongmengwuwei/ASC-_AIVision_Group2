@@ -18,6 +18,8 @@
 
 #include "zf_common_headfile.h"
 #include "zf_driver_uart.h"
+#include "data_handle.h"
+#include "path.h"
 #include "path_follow.h"
 #include "Motor.h"
 #include "PID_config.h"
@@ -53,6 +55,8 @@
 #define BLUESERIAL_RELATIVE_GRID_M              0.01f
 #define BLUESERIAL_RELATIVE_CENTER_CELL         127
 #define BLUESERIAL_RELATIVE_MAX_OFFSET_CELL     120
+#define BLUESERIAL_POSITION_RETRY_LOOPS         200U
+#define BLUESERIAL_POSITION_MAX_RETRY           3U
 
 typedef enum
 {
@@ -90,6 +94,10 @@ static uint8 g_turn_quarters_remaining = 0U;
 static float g_turn_step_deg = 90.0f;
 static volatile uint8 g_yaw_hold_enabled = 0U;
 static Position g_blueserial_relative_path[3];
+static uint8 g_position_request_pending = 0U;
+static uint8 g_position_request_start_frame = 0U;
+static uint8 g_position_request_retry_count = 0U;
+static uint16 g_position_request_wait_loops = 0U;
 
 static float BlueSerial_ClampFloat(float value, float min_value, float max_value)
 {
@@ -282,6 +290,128 @@ static void BlueSerial_SelectMoveDirection(blueserial_move_direction_t direction
                       BlueSerial_MoveDirectionName(direction),
                       g_target_speed_cmps,
                       g_target_position_cm);
+}
+
+static uint8 BlueSerial_ConvertVisionPoseToMeter(const CarPose *pose, float *x_m, float *y_m)
+{
+    float row_f;
+    float col_f;
+
+    if (pose == NULL || x_m == NULL || y_m == NULL)
+    {
+        return 0U;
+    }
+
+    /*
+     * 视觉端的车姿坐标和 path_follow 的执行坐标不是同一套轴定义。
+     * 这里复用 path.h 里的补偿开关，保持蓝牙上报值和控制状态机里的视觉定位值一致。
+     */
+#if PATH_COORD_TRANSPOSE_COMPENSATE
+    row_f = pose->x;
+    col_f = pose->y;
+#else
+    row_f = pose->y;
+    col_f = pose->x;
+#endif
+
+#if PATH_COORD_FLIP_VERTICAL
+    col_f = (float)(MAP_ROWS - 1) - col_f;
+#endif
+
+    *x_m = row_f * GRID_SIZE_M;
+    *y_m = col_f * GRID_SIZE_M;
+    return 1U;
+}
+
+static void BlueSerial_PrintPositionReport(uint8 vision_valid)
+{
+    uint32 primask;
+    path_follow_status_t odom = {0};
+    CarPose vision_pose = {0};
+    float vision_x_m = 0.0f;
+    float vision_y_m = 0.0f;
+
+    primask = interrupt_global_disable();
+    path_follow_get_status(&odom);
+    interrupt_global_enable(primask);
+
+    vision_pose = car_pose;
+    vision_valid = (vision_valid && car_pose_ready) ? 1U : 0U;
+    if (vision_valid)
+    {
+        vision_valid = BlueSerial_ConvertVisionPoseToMeter(&vision_pose, &vision_x_m, &vision_y_m);
+    }
+
+    if (vision_valid)
+    {
+        BlueSerial_Printf("POSITION vision_grid=%.2f,%.2f,%.2f vision_m=%.3f,%.3f "
+                          "odom_m=%.3f,%.3f,%.2f\r\n",
+                          vision_pose.x,
+                          vision_pose.y,
+                          vision_pose.yaw,
+                          vision_x_m,
+                          vision_y_m,
+                          odom.x_m,
+                          odom.y_m,
+                          odom.yaw_deg);
+    }
+    else
+    {
+        BlueSerial_Printf("POSITION vision=NA odom_m=%.3f,%.3f,%.2f\r\n",
+                          odom.x_m,
+                          odom.y_m,
+                          odom.yaw_deg);
+    }
+}
+
+static void BlueSerial_StartPositionRequest(void)
+{
+    /*
+     * 先消费 UART1 已到达的旧数据，再记录帧计数并发送新请求。
+     * 后续只认 car_frame_count 增量，避免把上一次缓存的视觉定位误当成新结果。
+     */
+    process_blob_data();
+    g_position_request_start_frame = car_frame_count;
+    g_position_request_retry_count = 0U;
+    g_position_request_wait_loops = 0U;
+    g_position_request_pending = 1U;
+    uart_send_car_request();
+    BlueSerial_Printf("OK position_request\r\n");
+}
+
+static void BlueSerial_ServicePositionRequest(void)
+{
+    if (!g_position_request_pending)
+    {
+        return;
+    }
+
+    process_blob_data();
+    if (car_pose_ready && car_frame_count != g_position_request_start_frame)
+    {
+        g_position_request_pending = 0U;
+        BlueSerial_PrintPositionReport(1U);
+        return;
+    }
+
+    if (g_position_request_wait_loops < BLUESERIAL_POSITION_RETRY_LOOPS)
+    {
+        g_position_request_wait_loops++;
+        return;
+    }
+
+    g_position_request_wait_loops = 0U;
+    if (g_position_request_retry_count < BLUESERIAL_POSITION_MAX_RETRY)
+    {
+        g_position_request_retry_count++;
+        g_position_request_start_frame = car_frame_count;
+        uart_send_car_request();
+        return;
+    }
+
+    g_position_request_pending = 0U;
+    BlueSerial_Printf("ERR position_timeout\r\n");
+    BlueSerial_PrintPositionReport(0U);
 }
 
 static void BlueSerial_StartCenteredRelativeMove(float delta_x_m, float delta_y_m, float yaw_deg)
@@ -1014,6 +1144,11 @@ static uint8 BlueSerial_RunButton(const char *command)
         BlueSerial_PrintStatus();
         return 1U;
     }
+    if (strcmp(command, "position") == 0)
+    {
+        BlueSerial_StartPositionRequest();
+        return 1U;
+    }
 
     return 0U;
 }
@@ -1160,6 +1295,7 @@ void BlueSerial_PathDebugReport(void)
     /* 即使关闭周期遥测，也必须持续服务命令队列和动作完成检测。 */
     BlueSerial_CommandTask();
     BlueSerial_ServiceMotionCompletion();
+    BlueSerial_ServicePositionRequest();
 
 #if BLUESERIAL_ENABLE_PERIODIC_TELEMETRY
     uint32 primask;

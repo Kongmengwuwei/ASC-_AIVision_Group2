@@ -39,6 +39,8 @@
 #define BLUESERIAL_IRQN                         LPUART8_IRQn
 /* UART8 优先级低于 PIT 控制中断，蓝牙突发数据不会抢占底盘闭环。 */
 #define BLUESERIAL_IRQ_PRIORITY                 8U
+/* 默认关闭 50ms 周期遥测，避免蓝牙持续刷屏；命令 ACK/ERR 回包仍然保留。 */
+#define BLUESERIAL_ENABLE_PERIODIC_TELEMETRY    0U
 #define BLUESERIAL_PATH_REPORT_PERIOD_TICKS     5U
 #define BLUESERIAL_RX_FRAME_LEN                 80U
 #define BLUESERIAL_RX_QUEUE_LEN                 16U
@@ -48,6 +50,9 @@
 #define BLUESERIAL_MAX_YAW_KI                   10.0f
 #define BLUESERIAL_MAX_YAW_KD                   50.0f
 #define BLUESERIAL_MAX_YAW_FF_DEGPS             120.0f
+#define BLUESERIAL_RELATIVE_GRID_M              0.01f
+#define BLUESERIAL_RELATIVE_CENTER_CELL         127
+#define BLUESERIAL_RELATIVE_MAX_OFFSET_CELL     120
 
 typedef enum
 {
@@ -84,6 +89,7 @@ static blueserial_move_direction_t g_next_move_direction = BLUESERIAL_MOVE_FORWA
 static uint8 g_turn_quarters_remaining = 0U;
 static float g_turn_step_deg = 90.0f;
 static volatile uint8 g_yaw_hold_enabled = 0U;
+static Position g_blueserial_relative_path[3];
 
 static float BlueSerial_ClampFloat(float value, float min_value, float max_value)
 {
@@ -278,6 +284,81 @@ static void BlueSerial_SelectMoveDirection(blueserial_move_direction_t direction
                       g_target_position_cm);
 }
 
+static void BlueSerial_StartCenteredRelativeMove(float delta_x_m, float delta_y_m, float yaw_deg)
+{
+    const float eps_m = 0.001f;
+    float grid_m = BLUESERIAL_RELATIVE_GRID_M;
+    float max_delta_m = fmaxf(fabsf(delta_x_m), fabsf(delta_y_m));
+    uint8 move_x_first = (fabsf(delta_x_m) >= fabsf(delta_y_m)) ? 1U : 0U;
+    int center_cell = BLUESERIAL_RELATIVE_CENTER_CELL;
+    int target_row;
+    int target_col;
+    size_t steps = 1U;
+
+    if (max_delta_m <= eps_m)
+    {
+        path_follow_set_path(NULL, 0U);
+        return;
+    }
+
+    /*
+     * Position.row/col 是 uint8，不能保存负格点。蓝牙相对移动使用虚拟中心格点
+     * 作为临时起点，避免 backward/right 从 0 附近出发时把 -1 写成 255。
+     */
+    if (max_delta_m > ((float)BLUESERIAL_RELATIVE_MAX_OFFSET_CELL * grid_m))
+    {
+        grid_m = max_delta_m / (float)BLUESERIAL_RELATIVE_MAX_OFFSET_CELL;
+    }
+
+    target_row = center_cell + BlueSerial_RoundToInt(delta_x_m / grid_m);
+    target_col = center_cell + BlueSerial_RoundToInt(delta_y_m / grid_m);
+    target_row = BlueSerial_ClampInt(target_row, 0, 255);
+    target_col = BlueSerial_ClampInt(target_col, 0, 255);
+
+    g_blueserial_relative_path[0].row = (uint8)center_cell;
+    g_blueserial_relative_path[0].col = (uint8)center_cell;
+    g_blueserial_relative_path[0].id = 0U;
+
+    if (move_x_first)
+    {
+        if (target_row != center_cell)
+        {
+            g_blueserial_relative_path[steps].row = (uint8)target_row;
+            g_blueserial_relative_path[steps].col = (uint8)center_cell;
+            g_blueserial_relative_path[steps].id = 0U;
+            steps++;
+        }
+        if (target_col != center_cell)
+        {
+            g_blueserial_relative_path[steps].row = (uint8)target_row;
+            g_blueserial_relative_path[steps].col = (uint8)target_col;
+            g_blueserial_relative_path[steps].id = 0U;
+            steps++;
+        }
+    }
+    else
+    {
+        if (target_col != center_cell)
+        {
+            g_blueserial_relative_path[steps].row = (uint8)center_cell;
+            g_blueserial_relative_path[steps].col = (uint8)target_col;
+            g_blueserial_relative_path[steps].id = 0U;
+            steps++;
+        }
+        if (target_row != center_cell)
+        {
+            g_blueserial_relative_path[steps].row = (uint8)target_row;
+            g_blueserial_relative_path[steps].col = (uint8)target_col;
+            g_blueserial_relative_path[steps].id = 0U;
+            steps++;
+        }
+    }
+
+    path_follow_reset_pose((float)center_cell * grid_m, (float)center_cell * grid_m, yaw_deg);
+    path_follow_set_target_yaw(yaw_deg);
+    path_follow_set_path_with_grid(g_blueserial_relative_path, steps, grid_m, 0U);
+}
+
 static uint8 BlueSerial_StartConfiguredMove(void)
 {
     uint32 primask;
@@ -333,8 +414,7 @@ static uint8 BlueSerial_StartConfiguredMove(void)
     g_turn_quarters_remaining = 0U;
     BlueSerial_ApplyConfiguredPathSpeedLocked();
     BlueSerial_EnterPathMode();
-    path_follow_set_target_yaw(status.yaw_deg);
-    path_follow_start_offset_move(delta_x_m, delta_y_m);
+    BlueSerial_StartCenteredRelativeMove(delta_x_m, delta_y_m, status.yaw_deg);
     interrupt_global_enable(primask);
     return 1U;
 }
@@ -1029,6 +1109,7 @@ void BlueSerial_ControlTick10ms(void)
 
 void BlueSerial_PathDebugTick10ms(void)
 {
+#if BLUESERIAL_ENABLE_PERIODIC_TELEMETRY
     static uint8 tick_div = 0U;
 
     if (++tick_div >= BLUESERIAL_PATH_REPORT_PERIOD_TICKS)
@@ -1036,8 +1117,10 @@ void BlueSerial_PathDebugTick10ms(void)
         tick_div = 0U;
         g_blueserial_path_report_pending = 1U;
     }
+#endif
 }
 
+#if BLUESERIAL_ENABLE_PERIODIC_TELEMETRY
 static void BlueSerial_GetActualBodySpeed(float *vx_cmps, float *vy_cmps, float *omega_radps)
 {
     float count_to_mps;
@@ -1070,9 +1153,15 @@ static void BlueSerial_GetActualBodySpeed(float *vx_cmps, float *vy_cmps, float 
     *vy_cmps = 0.25f * (-w_ul + w_ur + w_dl - w_dr) * 100.0f;
     *omega_radps = (-w_ul + w_ur - w_dl + w_dr) / (2.0f * D_X + 2.0f * D_Y);
 }
+#endif
 
 void BlueSerial_PathDebugReport(void)
 {
+    /* 即使关闭周期遥测，也必须持续服务命令队列和动作完成检测。 */
+    BlueSerial_CommandTask();
+    BlueSerial_ServiceMotionCompletion();
+
+#if BLUESERIAL_ENABLE_PERIODIC_TELEMETRY
     uint32 primask;
     path_follow_status_t status = {0};
     int encoder_speed[4];
@@ -1083,10 +1172,6 @@ void BlueSerial_PathDebugReport(void)
     float actual_vy_cmps = 0.0f;
     float actual_omega_radps = 0.0f;
     float actual_speed_cmps;
-
-    /* 主循环已有 PathDebugReport() 调用，因此这里顺手服务蓝牙命令队列。 */
-    BlueSerial_CommandTask();
-    BlueSerial_ServiceMotionCompletion();
 
     primask = interrupt_global_disable();
     if (g_blueserial_path_report_pending == 0U)
@@ -1138,4 +1223,5 @@ void BlueSerial_PathDebugReport(void)
                       encoder_speed[1],
                       encoder_speed[2],
                       encoder_speed[3]);
+#endif
 }

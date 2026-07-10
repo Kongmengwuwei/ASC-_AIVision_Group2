@@ -24,7 +24,7 @@ uint8 BlueSerial_IsControlActive(void);
  */
 void BlueSerial_ControlTick10ms(void);
 
-/* 路径调试上报接口：Tick10ms 置位，Report 在主循环发送，同时服务蓝牙命令。 */
+/* 路径调试接口：主循环调用 Report 服务蓝牙命令；周期遥测由 BlueSerial.c 宏控制。 */
 void BlueSerial_PathDebugTick10ms(void);
 void BlueSerial_PathDebugReport(void);
 

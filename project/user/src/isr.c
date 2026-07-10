@@ -113,6 +113,17 @@ void LPUART3_IRQHandler(void)
     LPUART_ClearStatusFlags(LPUART3, kLPUART_RxOverrunFlag);
 }
 
+void LPUART4_IRQHandler(void)
+{
+    if(kLPUART_RxDataRegFullFlag & LPUART_GetStatusFlags(LPUART4))
+    {
+        extern void BlueSerial_RxIrqHandler(void);
+        BlueSerial_RxIrqHandler();
+    }
+
+    LPUART_ClearStatusFlags(LPUART4, kLPUART_RxOverrunFlag);
+}
+
 void LPUART5_IRQHandler(void)
 {
     if(kLPUART_RxDataRegFullFlag & LPUART_GetStatusFlags(LPUART5))

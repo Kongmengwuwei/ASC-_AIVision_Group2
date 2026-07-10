@@ -1,0 +1,74 @@
+/*
+ * Bluetooth tuning-only main.c template for RT1064.
+ *
+ * Usage:
+ *   1. Keep this file as .txt while using the full vehicle program.
+ *   2. For isolated Bluetooth tuning, replace project/user/src/main.c with the
+ *      content below (or create a new main.c and select it in the Keil target).
+ *   3. Do not compile two files that both define main/pit_*_handler.
+ *
+ * This template intentionally does not initialize the menu, camera, map,
+ * recognition, or full control state machine. It only receives Bluetooth
+ * commands, updates IMU/odometry, and drives the requested tuning action.
+ */
+
+#include "zf_common_headfile.h"
+
+#define PIT_PRIORITY_1 (PIT_IRQn)
+#define PIT_PRIORITY_2 (PIT_IRQn)
+
+int main(void)
+{
+    clock_init(SYSTEM_CLOCK_600M);
+    debug_init();
+    system_delay_ms(300);
+
+    motor_init();
+    encoder_init();
+    imu963ra_init();
+    Attitude_Init();
+    Kinematics_Init();
+    path_follow_init(GRID_SIZE_M, (float)pulse_per_meter);
+
+    PID_Init(&ULpid, &ULPidInitStruct);
+    PID_Init(&URpid, &URPidInitStruct);
+    PID_Init(&DLpid, &DLPidInitStruct);
+    PID_Init(&DRpid, &DRPidInitStruct);
+
+    Blue_Serial_Init();
+
+    pit_ms_init(PIT_CH1, 10);
+    interrupt_set_priority(PIT_PRIORITY_1, 1);
+    pit_ms_init(PIT_CH2, 2);
+    interrupt_set_priority(PIT_PRIORITY_2, 0);
+    interrupt_set_priority(LPUART4_IRQn, 3);
+    interrupt_global_enable(0);
+
+    BlueSerial_Printf("BT_TUNING_READY\r\n");
+
+    while (1)
+    {
+        /* Processes commands and sends one telemetry frame when 50 ms is due. */
+        BlueSerial_PathDebugReport();
+    }
+}
+
+/* Kept for the shared PIT_IRQHandler link, although PIT_CH0 is not started. */
+void pit_0_handler(void)
+{
+}
+
+/* Called by the shared PIT_IRQHandler in project/user/src/isr.c. */
+void pit_1_handler(void)
+{
+    encoder_get();
+    BlueSerial_ControlTick10ms();
+    /* Five 10 ms ticks request one telemetry frame. */
+    BlueSerial_PathDebugTick10ms();
+}
+
+/* 2 ms attitude update; yaw buttons and yaw hold depend on this value. */
+void pit_2_handler(void)
+{
+    Attitude_Calculate();
+}

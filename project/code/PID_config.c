@@ -12,8 +12,8 @@ tagPID_T Gyro_rotate_pid;
 
 PIDInitStruct ULPidInitStruct = 
 {
-	.fKp       = 9.7,     //.fKp  9.7
-	.fKi       = 2.2,     //.fKi 2.05
+	.fKp       = 7.7,     //.fKp  9.7
+	.fKi       = 2.1,     //.fKi 2.05
 	.fKd       = 15,     //.fKd
 	.fMax_Iout = 4000,      //.fMax_Iout
 	.fMax_Out  = 6000,       //.fMax_Out
@@ -22,7 +22,7 @@ PIDInitStruct ULPidInitStruct =
 
 PIDInitStruct URPidInitStruct = 
 {
-	.fKp       = 7.7,     //.fKp 8.6
+	.fKp       = 8.7,     //.fKp 8.6
 	.fKi       = 2.1,     //.fKi 2.0
 	.fKd       = 15,     //.fKd
 	.fMax_Iout = 4000,      //.fMax_Iout

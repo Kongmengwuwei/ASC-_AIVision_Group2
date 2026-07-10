@@ -148,12 +148,12 @@ void motor_pwm(int up_left_speed,int up_right_speed,int down_left_speed,int down
 	 if (up_right_speed > 0)
 	 {
 		 gpio_set_level(MOTOR2_DIR, GPIO_HIGH);                       // DIR输出高电平
-         pwm_set_duty(MOTOR2_PWM, up_right_speed);                   // 计算占空比
+         pwm_set_duty(MOTOR2_PWM, up_right_speed+400);                   // 计算占空比
 	 }
 	 else if (up_right_speed < 0)
 	 {
 		 gpio_set_level(MOTOR2_DIR, GPIO_LOW);                     // DIR输出低电平
-         pwm_set_duty(MOTOR2_PWM, -up_right_speed);                // 计算占空比
+         pwm_set_duty(MOTOR2_PWM, -up_right_speed+400);                // 计算占空比
 	 }
 	 else if (up_right_speed == 0)
 	 {

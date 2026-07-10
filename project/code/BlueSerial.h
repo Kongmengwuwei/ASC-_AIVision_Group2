@@ -1,11 +1,11 @@
 #ifndef __BLUESERIAL_H
 #define __BLUESERIAL_H
 
-/* UART4 Bluetooth module initialization and transmit helpers. */
+/* UART8 Bluetooth module initialization and transmit helpers. */
 void Blue_Serial_Init(void);
 void BlueSerial_Printf(char *format, ...);
 
-/* Called by LPUART4_IRQHandler. Only receives and queues bytes. */
+/* Called by LPUART8_IRQHandler. Only receives and queues bytes. */
 void BlueSerial_RxIrqHandler(void);
 
 /* Called in the main loop. Parses queued [command] frames. */

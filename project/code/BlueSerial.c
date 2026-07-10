@@ -1,5 +1,5 @@
 /*
- * UART4 Bluetooth tuning module.
+ * UART8 Bluetooth tuning module.
  *
  * Compatible frame format (same style as the old car project):
  *   [slider,name,value]
@@ -27,8 +27,11 @@
 #define M_PI 3.1415926f
 #endif
 
-#define BLUESERIAL_UART                         UART_4
+#define BLUESERIAL_UART                         UART_8
 #define BLUESERIAL_BAUDRATE                     115200U
+#define BLUESERIAL_TX_PIN                       UART8_TX_D16
+#define BLUESERIAL_RX_PIN                       UART8_RX_D17
+#define BLUESERIAL_IRQN                         LPUART8_IRQn
 #define BLUESERIAL_PATH_REPORT_PERIOD_TICKS     5U
 #define BLUESERIAL_RX_FRAME_LEN                 80U
 #define BLUESERIAL_RX_QUEUE_LEN                 4U
@@ -348,8 +351,8 @@ void Blue_Serial_Init(void)
     g_rx_queue_write = 0U;
     g_rx_queue_read = 0U;
     g_rx_drop_count = 0U;
-    uart_init(BLUESERIAL_UART, BLUESERIAL_BAUDRATE, UART4_TX_C16, UART4_RX_C17);
-    interrupt_set_priority(LPUART4_IRQn, 3);
+    uart_init(BLUESERIAL_UART, BLUESERIAL_BAUDRATE, BLUESERIAL_TX_PIN, BLUESERIAL_RX_PIN);
+    interrupt_set_priority(BLUESERIAL_IRQN, 3);
     uart_rx_interrupt(BLUESERIAL_UART, ZF_ENABLE);
 }
 

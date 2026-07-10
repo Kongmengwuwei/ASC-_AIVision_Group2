@@ -57,10 +57,29 @@ int16 encoder_data_quaddec4 = 0;
 void encoder_get(void)
 {
 	static int16 encoder_L_up[5],encoder_R_up[5],encoder_L_down[5],encoder_R_down[5];
-	encoder_data_quaddec1 = -encoder_get_count(ENCODER_1);                  // 获取编码器计数 左上
-	encoder_data_quaddec2 = -encoder_get_count(ENCODER_2);                  // 获取编码器计数 右上
-	encoder_data_quaddec3 = -encoder_get_count(ENCODER_3);                  // 获取编码器计数 左下
-	encoder_data_quaddec4 = -encoder_get_count(ENCODER_4);                  // 获取编码器计数 右下
+	int16 encoder_raw_quaddec1 = encoder_get_count(ENCODER_1);
+	int16 encoder_raw_quaddec2 = encoder_get_count(ENCODER_2);
+	int16 encoder_raw_quaddec3 = encoder_get_count(ENCODER_3);
+	int16 encoder_raw_quaddec4 = encoder_get_count(ENCODER_4);
+
+#if MOTOR_BOARD_USE_NEW
+	encoder_data_quaddec1 = -encoder_raw_quaddec4;                  // 获取编码器计数 左上
+	encoder_data_quaddec2 = -encoder_raw_quaddec3;                  // 获取编码器计数 右上
+	encoder_data_quaddec3 = -encoder_raw_quaddec1;                  // 获取编码器计数 左下
+	encoder_data_quaddec4 = -encoder_raw_quaddec2;                  // 获取编码器计数 右下
+#else
+	encoder_data_quaddec1 = -encoder_raw_quaddec1;                  // 获取编码器计数 左上
+	encoder_data_quaddec2 = -encoder_raw_quaddec4;                  // 获取编码器计数 右上
+	encoder_data_quaddec3 = -encoder_raw_quaddec3;                  // 获取编码器计数 左下
+	encoder_data_quaddec4 = -encoder_raw_quaddec2;                  // 获取编码器计数 右下
+#endif
+
+#if MOTOR_BOARD_REVERSE_ENCODER_ALL_DIR
+	encoder_data_quaddec1 = -encoder_data_quaddec1;
+	encoder_data_quaddec2 = -encoder_data_quaddec2;
+	encoder_data_quaddec3 = -encoder_data_quaddec3;
+	encoder_data_quaddec4 = -encoder_data_quaddec4;
+#endif
 	
 	
 	encoder_L_up[4]=encoder_L_up[3];//左上编码器
@@ -128,6 +147,38 @@ int16 Lowpass(int16 X_last,int16 X_new)
 
 void motor_pwm(int up_left_speed,int up_right_speed,int down_left_speed,int down_right_speed)
 {
+#if MOTOR_BOARD_REMAP_ORDER_2341
+	int logical_ul = up_left_speed;
+	int logical_ur = up_right_speed;
+	int logical_dl = down_left_speed;
+	int logical_dr = down_right_speed;
+
+#if MOTOR_BOARD_REVERSE_UL_DIR
+	logical_ul = -logical_ul;
+#endif
+#if MOTOR_BOARD_REVERSE_UR_DIR
+	logical_ur = -logical_ur;
+#endif
+#if MOTOR_BOARD_REVERSE_DL_DIR
+	logical_dl = -logical_dl;
+#endif
+#if MOTOR_BOARD_REVERSE_DR_DIR
+	logical_dr = -logical_dr;
+#endif
+
+	up_left_speed = logical_dr;
+	up_right_speed = logical_ur;
+	down_left_speed = logical_dl;
+	down_right_speed = logical_ul;
+#endif
+
+#if MOTOR_BOARD_REVERSE_ALL_DIR
+	up_left_speed = -up_left_speed;
+	up_right_speed = -up_right_speed;
+	down_left_speed = -down_left_speed;
+	down_right_speed = -down_right_speed;
+#endif
+
 	if(up_left_speed > 0)                                                           // 正转
     {
 		gpio_set_level(MOTOR1_DIR, GPIO_LOW);                     // DIR输出高电平

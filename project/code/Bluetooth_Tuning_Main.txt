@@ -41,7 +41,7 @@ int main(void)
     interrupt_set_priority(PIT_PRIORITY_1, 1);
     pit_ms_init(PIT_CH2, 2);
     interrupt_set_priority(PIT_PRIORITY_2, 0);
-    interrupt_set_priority(LPUART4_IRQn, 3);
+    interrupt_set_priority(LPUART8_IRQn, 3);
     interrupt_global_enable(0);
 
     BlueSerial_Printf("BT_TUNING_READY\r\n");

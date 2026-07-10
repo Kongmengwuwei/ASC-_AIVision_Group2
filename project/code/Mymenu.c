@@ -1,5 +1,7 @@
 #include "Mymenu.h"
 #include "path.h"
+#include "BlueSerial.h"
+#include <string.h>
 
 #define MENU_SHOW_PERIOD_LOOPS 3U
 
@@ -23,6 +25,7 @@ static uint8 preset_map_index = ALGORITHM_TEST_PRESET_INDEX;
 path_follow_status_t path_follow_status = {0};
 uint8 plan_mode = 0U;
 static uint8 menu_show_divider = MENU_SHOW_PERIOD_LOOPS;
+static uint8 state_bt_force_redraw = 1U;
 
 uint8 test1 = 0;
 
@@ -34,6 +37,7 @@ uint8 move_ret = 0;  // 移动结果缓存
 static void Menu_Request_Redraw(void)
 {
     menu_show_divider = MENU_SHOW_PERIOD_LOOPS;
+    state_bt_force_redraw = 1U;
 }
 
 static void draw_exec_path_diamond(uint16 center_x, uint16 center_y)
@@ -756,7 +760,10 @@ void Show_Map(void)
 
 void State_Show(void)
 {
-    ips200_show_string(168, 132, "State:");
+    char bt_info[27];
+    static char last_bt_info[27] = {0};
+
+    ips200_show_string(170, 216, "State:");
     /*
      * 状态编号约定：
      * 0/1 为全局状态；20~24 为识别阶段；30~35 为推箱子阶段�?9 为错误重试�?
@@ -765,53 +772,61 @@ void State_Show(void)
     switch (g_control_stage)
     {
     case CONTROL_STAGE_IDLE:
-        ips200_show_uint(216, 132, 0, 2);
+        ips200_show_uint(170 + FONT_W * 6, 216, 0, 2);
         break;
     case CONTROL_STAGE_PRESTART_MOVE:
-        ips200_show_uint(216, 132, 1, 2);
+        ips200_show_uint(170 + FONT_W * 6, 216, 1, 2);
         break;
     case CONTROL_STAGE_IDENTIFY_LOCALIZE:
-        ips200_show_uint(216, 132, 20, 2);
+        ips200_show_uint(170 + FONT_W * 6, 216, 20, 2);
         break;
     case CONTROL_STAGE_IDENTIFY_WAIT_CAMERA_DATA:
-        ips200_show_uint(216, 132, 21, 2);
+        ips200_show_uint(170 + FONT_W * 6, 216, 21, 2);
         break;
     case CONTROL_STAGE_IDENTIFY_PLAN_PATH:
-        ips200_show_uint(216, 132, 22, 2);
+        ips200_show_uint(170 + FONT_W * 6, 216, 22, 2);
         break;
     case CONTROL_STAGE_IDENTIFY_LOAD_PATH:
-        ips200_show_uint(216, 132, 23, 2);
+        ips200_show_uint(170 + FONT_W * 6, 216, 23, 2);
         break;
     case CONTROL_STAGE_IDENTIFY_EXECUTE_PATH:
-        ips200_show_uint(216, 132, 24, 2);
+        ips200_show_uint(170 + FONT_W * 6, 216, 24, 2);
         break;
     case CONTROL_STAGE_PUSHBOX_LOCALIZE:
-        ips200_show_uint(216, 132, 30, 2);
+        ips200_show_uint(170 + FONT_W * 6, 216, 30, 2);
         break;
     case CONTROL_STAGE_PUSHBOX_WAIT_CAMERA_DATA:
-        ips200_show_uint(216, 132, 31, 2);
+        ips200_show_uint(170 + FONT_W * 6, 216, 31, 2);
         break;
     case CONTROL_STAGE_PUSHBOX_PLAN_PATH:
-        ips200_show_uint(216, 132, 32, 2);
+        ips200_show_uint(170 + FONT_W * 6, 216, 32, 2);
         break;
     case CONTROL_STAGE_PUSHBOX_LOAD_PATH:
-        ips200_show_uint(216, 132, 33, 2);
+        ips200_show_uint(170 + FONT_W * 6, 216, 33, 2);
         break;
     case CONTROL_STAGE_PUSHBOX_EXECUTE_PATH:
-        ips200_show_uint(216, 132, 34, 2);
+        ips200_show_uint(170 + FONT_W * 6, 216, 34, 2);
         break;
     case CONTROL_STAGE_PUSHBOX_FINISHED:
-        ips200_show_uint(216, 132, 35, 2);
+        ips200_show_uint(170 + FONT_W * 6, 216, 35, 2);
         break;
     case CONTROL_STAGE_ERROR:
-        ips200_show_uint(216, 132, 99, 2);
+        ips200_show_uint(170 + FONT_W * 6, 216, 99, 2);
         break;
     }
 
     path_follow_get_status(&path_follow_status);
 
-    ips200_show_string(0, 144, "Speed:");
-    ips200_show_float(56, 144, path_follow_status.speed_ref_cmps, 1, 2);
+    BlueSerial_GetLastRxFrame(bt_info, sizeof(bt_info));
+    if (state_bt_force_redraw || strcmp(bt_info, last_bt_info) != 0)
+    {
+        ips200_show_string(0, 144, "                              ");
+        ips200_show_string(0, 144, "BT:");
+        ips200_show_string(24, 144, bt_info);
+        strncpy(last_bt_info, bt_info, sizeof(last_bt_info));
+        last_bt_info[sizeof(last_bt_info) - 1U] = '\0';
+        state_bt_force_redraw = 0U;
+    }
 
     ips200_show_string(0, 160, "Cur:");
     ips200_show_float(40, 160, path_follow_status.x_m, 1, 3);

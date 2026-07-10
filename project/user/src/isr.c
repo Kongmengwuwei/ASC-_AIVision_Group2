@@ -36,6 +36,7 @@
 #include "zf_common_headfile.h"
 #include "zf_common_debug.h"
 #include "isr.h"
+#include "BlueSerial.h"
 
 
 
@@ -151,7 +152,8 @@ void LPUART8_IRQHandler(void)
 {
     if(kLPUART_RxDataRegFullFlag & LPUART_GetStatusFlags(LPUART8))
     {
-        wireless_module_uart_handler();
+        /* UART8 is dedicated to the stand-alone Bluetooth tuning firmware. */
+        BlueSerial_RxIrqHandler();
     }
 
     LPUART_ClearStatusFlags(LPUART8, kLPUART_RxOverrunFlag);

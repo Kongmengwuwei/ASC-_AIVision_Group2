@@ -1,151 +1,1141 @@
 /*
-蓝牙串口调试模块，配合江协的小程序可以比较方便的调试，但是蓝牙程序可能会对主程序造成比较大的延迟
-*/
+ * UART8 蓝牙串口调参和遥控模块。
+ *
+ * 兼容的蓝牙帧格式：
+ *   [slider,name,value]  滑条调参，例如 [slider,speed,40]
+ *   [button_name]        按钮命令，例如 [forward]、[start]、[stop]
+ *   [button,name]        兼容部分小程序发送的 button 前缀格式
+ *
+ * 直线遥控的使用顺序：
+ *   [forward] / [backward] / [left] / [right] 选择下一次运动方向；
+ *   [slider,speed,value] 和 [slider,position,value] 设置速度和距离；
+ *   [start]（也兼容 run/apply/move）提交这次相对位移动作。
+ *
+ * 中断适配原则：
+ *   UART8 ISR 只负责收字节、拼帧、入队；字符串解析、printf、路径控制、电机状态切换
+ *   都在主循环或 10ms 控制任务里完成，避免串口中断阻塞 PIT 控制中断。
+ */
 
 #include "zf_common_headfile.h"
 #include "zf_driver_uart.h"
 #include "path_follow.h"
 #include "Motor.h"
+#include "PID_config.h"
+#include "Mymenu.h"
 #include "Attitude.h"
+#include <math.h>
 #include <stdarg.h>
 #include <stdio.h>
+#include <string.h>
 
-#define BLUESERIAL_PATH_REPORT_PERIOD_TICKS 5U
+#ifndef M_PI
+#define M_PI 3.1415926f
+#endif
+
+#define BLUESERIAL_UART                         UART_8
+#define BLUESERIAL_BAUDRATE                     115200U
+#define BLUESERIAL_TX_PIN                       UART8_TX_D16
+#define BLUESERIAL_RX_PIN                       UART8_RX_D17
+#define BLUESERIAL_IRQN                         LPUART8_IRQn
+/* UART8 优先级低于 PIT 控制中断，蓝牙突发数据不会抢占底盘闭环。 */
+#define BLUESERIAL_IRQ_PRIORITY                 8U
+#define BLUESERIAL_PATH_REPORT_PERIOD_TICKS     5U
+#define BLUESERIAL_RX_FRAME_LEN                 80U
+#define BLUESERIAL_RX_QUEUE_LEN                 16U
+#define BLUESERIAL_MAX_TARGET_SPEED_CMPS        150.0f
+#define BLUESERIAL_MAX_TARGET_POSITION_CM       500.0f
+#define BLUESERIAL_MAX_YAW_KP                   20.0f
+#define BLUESERIAL_MAX_YAW_KI                   10.0f
+#define BLUESERIAL_MAX_YAW_KD                   50.0f
+#define BLUESERIAL_MAX_YAW_FF_DEGPS             120.0f
+
+typedef enum
+{
+    BLUESERIAL_MODE_STOP = 0,      /* 蓝牙未接管底盘输出。 */
+    BLUESERIAL_MODE_RAW_PWM,       /* 蓝牙直接下发四轮 PWM，用于电机方向/接线检查。 */
+    BLUESERIAL_MODE_PATH_MOTION    /* 蓝牙通过 path_follow 生成速度闭环运动。 */
+} blueserial_control_mode_t;
+
+typedef enum
+{
+    BLUESERIAL_MOVE_FORWARD = 0,
+    BLUESERIAL_MOVE_BACKWARD,
+    BLUESERIAL_MOVE_LEFT,
+    BLUESERIAL_MOVE_RIGHT
+} blueserial_move_direction_t;
+
+static volatile uint8 g_rx_collecting = 0U;
+static volatile uint8 g_rx_work_len = 0U;
+static char g_rx_work[BLUESERIAL_RX_FRAME_LEN];
+static char g_rx_queue[BLUESERIAL_RX_QUEUE_LEN][BLUESERIAL_RX_FRAME_LEN];
+static volatile uint8 g_rx_queue_write = 0U;
+static volatile uint8 g_rx_queue_read = 0U;
+static volatile uint32 g_rx_drop_count = 0U;
+static char g_last_rx_frame[BLUESERIAL_RX_FRAME_LEN] = "";
+static volatile uint8 g_last_rx_frame_len = 0U;
 
 static volatile uint8 g_blueserial_path_report_pending = 0U;
+static volatile blueserial_control_mode_t g_control_mode = BLUESERIAL_MODE_STOP;
+/* 逻辑轮序与 Motor.c 的 motor_pwm() 参数一致：UL, UR, DL, DR。 */
+static volatile int g_raw_pwm[4] = {0, 0, 0, 0};
+static float g_target_speed_cmps = 40.0f;
+static float g_target_position_cm = 50.0f;
+static blueserial_move_direction_t g_next_move_direction = BLUESERIAL_MOVE_FORWARD;
+static uint8 g_turn_quarters_remaining = 0U;
+static float g_turn_step_deg = 90.0f;
+static volatile uint8 g_yaw_hold_enabled = 0U;
 
+static float BlueSerial_ClampFloat(float value, float min_value, float max_value)
+{
+    if (value < min_value)
+    {
+        return min_value;
+    }
+    if (value > max_value)
+    {
+        return max_value;
+    }
+    return value;
+}
 
-// BlueSerial uses UART8.
+static int BlueSerial_ClampInt(int value, int min_value, int max_value)
+{
+    if (value < min_value)
+    {
+        return min_value;
+    }
+    if (value > max_value)
+    {
+        return max_value;
+    }
+    return value;
+}
+
+static int BlueSerial_RoundToInt(float value)
+{
+    return (int)(value + ((value >= 0.0f) ? 0.5f : -0.5f));
+}
+
+static void BlueSerial_ClearWheelPid(void)
+{
+    PID_Clear(&ULpid);
+    PID_Clear(&URpid);
+    PID_Clear(&DLpid);
+    PID_Clear(&DRpid);
+}
+
+static void BlueSerial_ZeroSpeedCommand(void)
+{
+    speed_three_array[0] = 0.0f;
+    speed_three_array[1] = 0.0f;
+    speed_three_array[2] = 0.0f;
+    speed_encoder[0] = 0;
+    speed_encoder[1] = 0;
+    speed_encoder[2] = 0;
+    speed_encoder[3] = 0;
+}
+
+/*
+ * 蓝牙侧保持“逻辑轮序”不变。新旧电机板的物理通道重映射、方向反向和编码器修正
+ * 全部集中在 Motor.c 内部处理，避免蓝牙模块再维护一套容易跑偏的映射关系。
+ */
+static void BlueSerial_ApplyRawPwm(void)
+{
+    motor_pwm(g_raw_pwm[0], g_raw_pwm[1], g_raw_pwm[2], g_raw_pwm[3]);
+}
+
+/* 调用者需要在关中断状态下进入，避免 10ms 控制中断读到半更新状态。 */
+static void BlueSerial_StopControlLocked(void)
+{
+    g_control_mode = BLUESERIAL_MODE_STOP;
+    g_turn_quarters_remaining = 0U;
+    g_yaw_hold_enabled = 0U;
+    path_follow_set_path(NULL, 0U);
+    path_follow_set_stationary_yaw_hold_enabled(0U);
+    car_go_flag = 0U;
+    car_stop_flag = 0U;
+    BlueSerial_ZeroSpeedCommand();
+    BlueSerial_ClearWheelPid();
+    PID_Clear(&pid_yaw);
+    g_raw_pwm[0] = 0;
+    g_raw_pwm[1] = 0;
+    g_raw_pwm[2] = 0;
+    g_raw_pwm[3] = 0;
+    motor_pwm(0, 0, 0, 0);
+}
+
+static void BlueSerial_StopControl(void)
+{
+    uint32 primask = interrupt_global_disable();
+
+    BlueSerial_StopControlLocked();
+    interrupt_global_enable(primask);
+}
+
+uint8 BlueSerial_IsControlActive(void)
+{
+    uint32 primask;
+    uint8 active;
+
+    primask = interrupt_global_disable();
+    active = (g_control_mode != BLUESERIAL_MODE_STOP || g_yaw_hold_enabled) ? 1U : 0U;
+    interrupt_global_enable(primask);
+    return active;
+}
+
+static void BlueSerial_ToggleYawHold(void)
+{
+    uint32 primask;
+    uint8 enabled;
+    float hold_yaw_deg = 0.0f;
+
+    primask = interrupt_global_disable();
+    if (g_yaw_hold_enabled)
+    {
+        BlueSerial_StopControlLocked();
+        enabled = 0U;
+    }
+    else
+    {
+        /* 原地航向保持：记录当前 yaw，让 path_follow 只输出角速度，不生成平移速度。 */
+        hold_yaw_deg = eulerAngle.yaw;
+        path_follow_set_path(NULL, 0U);
+        g_control_mode = BLUESERIAL_MODE_STOP;
+        g_turn_quarters_remaining = 0U;
+        BlueSerial_ZeroSpeedCommand();
+        BlueSerial_ClearWheelPid();
+        PID_Clear(&pid_yaw);
+        path_follow_set_target_yaw(hold_yaw_deg);
+        path_follow_set_stationary_yaw_hold_enabled(1U);
+        g_yaw_hold_enabled = 1U;
+        car_go_flag = 1U;
+        car_stop_flag = 0U;
+        enabled = 1U;
+    }
+    interrupt_global_enable(primask);
+
+    if (enabled)
+    {
+        BlueSerial_Printf("OK yawhold=on target=%.2fdeg\r\n", hold_yaw_deg);
+    }
+    else
+    {
+        BlueSerial_Printf("OK yawhold=off\r\n");
+    }
+}
+
+static void BlueSerial_ApplyConfiguredPathSpeedLocked(void)
+{
+    uint8 i;
+    float speed_mps = g_target_speed_cmps * 0.01f;
+
+    if (speed_mps <= 0.0f)
+    {
+        return;
+    }
+
+    for (i = 0U; i < PATH_FOLLOW_SCURVE_BAND_COUNT; ++i)
+    {
+        g_path_follow_scurve_band_cfg[i].vmax_mps = speed_mps;
+    }
+}
+
+static void BlueSerial_EnterPathMode(void)
+{
+    g_control_mode = BLUESERIAL_MODE_PATH_MOTION;
+    car_go_flag = 1U;
+    car_stop_flag = 0U;
+    BlueSerial_ZeroSpeedCommand();
+    BlueSerial_ClearWheelPid();
+}
+
+static const char *BlueSerial_MoveDirectionName(blueserial_move_direction_t direction)
+{
+    switch (direction)
+    {
+        case BLUESERIAL_MOVE_FORWARD:
+            return "forward";
+        case BLUESERIAL_MOVE_BACKWARD:
+            return "backward";
+        case BLUESERIAL_MOVE_LEFT:
+            return "left";
+        case BLUESERIAL_MOVE_RIGHT:
+            return "right";
+        default:
+            return "unknown";
+    }
+}
+
+static void BlueSerial_SelectMoveDirection(blueserial_move_direction_t direction)
+{
+    uint32 primask = interrupt_global_disable();
+
+    g_next_move_direction = direction;
+    interrupt_global_enable(primask);
+    BlueSerial_Printf("OK direction=%s next_speed=%.1fcmps next_position=%.1fcm\r\n",
+                      BlueSerial_MoveDirectionName(direction),
+                      g_target_speed_cmps,
+                      g_target_position_cm);
+}
+
+static uint8 BlueSerial_StartConfiguredMove(void)
+{
+    uint32 primask;
+    blueserial_move_direction_t direction;
+    path_follow_status_t status = {0};
+    float yaw_rad;
+    float position_m;
+    float delta_x_m = 0.0f;
+    float delta_y_m = 0.0f;
+
+    if (g_target_speed_cmps <= 0.0f || g_target_position_cm <= 0.0f)
+    {
+        return 0U;
+    }
+
+    primask = interrupt_global_disable();
+    direction = g_next_move_direction;
+    path_follow_get_status(&status);
+    yaw_rad = status.yaw_deg * ((float)M_PI / 180.0f);
+    position_m = g_target_position_cm * 0.01f;
+
+    /*
+     * 手机端的前后左右按“当前车头朝向”解释：
+     * forward/backward 沿车头方向，left/right 沿车体横向方向。
+     */
+    switch (direction)
+    {
+        case BLUESERIAL_MOVE_FORWARD:
+            delta_x_m = cosf(yaw_rad) * position_m;
+            delta_y_m = sinf(yaw_rad) * position_m;
+            break;
+
+        case BLUESERIAL_MOVE_BACKWARD:
+            delta_x_m = -cosf(yaw_rad) * position_m;
+            delta_y_m = -sinf(yaw_rad) * position_m;
+            break;
+
+        case BLUESERIAL_MOVE_LEFT:
+            delta_x_m = -sinf(yaw_rad) * position_m;
+            delta_y_m = cosf(yaw_rad) * position_m;
+            break;
+
+        case BLUESERIAL_MOVE_RIGHT:
+            delta_x_m = sinf(yaw_rad) * position_m;
+            delta_y_m = -cosf(yaw_rad) * position_m;
+            break;
+
+        default:
+            interrupt_global_enable(primask);
+            return 0U;
+    }
+
+    g_turn_quarters_remaining = 0U;
+    BlueSerial_ApplyConfiguredPathSpeedLocked();
+    BlueSerial_EnterPathMode();
+    path_follow_set_target_yaw(status.yaw_deg);
+    path_follow_start_offset_move(delta_x_m, delta_y_m);
+    interrupt_global_enable(primask);
+    return 1U;
+}
+
+static void BlueSerial_StartNextQuarterTurn(void)
+{
+    path_follow_status_t status = {0};
+
+    path_follow_get_status(&status);
+    path_follow_start_rotate_to_yaw(status.yaw_deg + g_turn_step_deg);
+}
+
+static uint8 BlueSerial_StartTurn(uint8 quarter_count, float step_deg)
+{
+    uint32 primask;
+
+    if (quarter_count == 0U)
+    {
+        return 0U;
+    }
+
+    primask = interrupt_global_disable();
+    g_turn_quarters_remaining = quarter_count;
+    g_turn_step_deg = step_deg;
+    BlueSerial_EnterPathMode();
+    BlueSerial_StartNextQuarterTurn();
+    interrupt_global_enable(primask);
+    return 1U;
+}
+
+static void BlueSerial_ServiceMotionCompletion(void)
+{
+    uint32 primask;
+    uint8 completed = 0U;
+    path_follow_status_t status = {0};
+
+    primask = interrupt_global_disable();
+    if (g_control_mode != BLUESERIAL_MODE_PATH_MOTION)
+    {
+        interrupt_global_enable(primask);
+        return;
+    }
+
+    path_follow_get_status(&status);
+    if (status.active)
+    {
+        interrupt_global_enable(primask);
+        return;
+    }
+
+    if (g_turn_quarters_remaining > 0U)
+    {
+        g_turn_quarters_remaining--;
+        if (g_turn_quarters_remaining > 0U)
+        {
+            BlueSerial_StartNextQuarterTurn();
+            interrupt_global_enable(primask);
+            return;
+        }
+    }
+
+    /*
+     * 一次路径动作完成后释放蓝牙路径接管；如果之前打开过 yawhold，
+     * 则继续保持航向，否则停止电机输出。
+     */
+    g_control_mode = BLUESERIAL_MODE_STOP;
+    car_go_flag = g_yaw_hold_enabled ? 1U : 0U;
+    car_stop_flag = 0U;
+    BlueSerial_ZeroSpeedCommand();
+    BlueSerial_ClearWheelPid();
+    motor_pwm(0, 0, 0, 0);
+    completed = 1U;
+    interrupt_global_enable(primask);
+
+    if (completed)
+    {
+        BlueSerial_Printf("DONE\r\n");
+    }
+}
+
+static void BlueSerial_EnterRawPwmMode(void)
+{
+    g_turn_quarters_remaining = 0U;
+    g_yaw_hold_enabled = 0U;
+    path_follow_set_path(NULL, 0U);
+    path_follow_set_stationary_yaw_hold_enabled(0U);
+    g_control_mode = BLUESERIAL_MODE_RAW_PWM;
+    car_go_flag = 0U;
+    car_stop_flag = 0U;
+    BlueSerial_ZeroSpeedCommand();
+    BlueSerial_ClearWheelPid();
+    BlueSerial_ApplyRawPwm();
+}
+
 void Blue_Serial_Init(void)
 {
-	uart_init(UART_8, 115200, UART8_TX_D16, UART8_RX_D17);
+    g_rx_collecting = 0U;
+    g_rx_work_len = 0U;
+    g_rx_queue_write = 0U;
+    g_rx_queue_read = 0U;
+    g_rx_drop_count = 0U;
+    g_last_rx_frame[0] = '\0';
+    g_last_rx_frame_len = 0U;
+    g_blueserial_path_report_pending = 0U;
+    uart_init(BLUESERIAL_UART, BLUESERIAL_BAUDRATE, BLUESERIAL_TX_PIN, BLUESERIAL_RX_PIN);
+    interrupt_set_priority(BLUESERIAL_IRQN, BLUESERIAL_IRQ_PRIORITY);
+    uart_rx_interrupt(BLUESERIAL_UART, ZF_ENABLE);
 }
 
-
-
-void BlueSerial_SendByte(uint8_t Byte)
+void BlueSerial_SendByte(uint8 Byte)
 {
-	uart_write_byte(UART_8, Byte);
+    uart_write_byte(BLUESERIAL_UART, Byte);
 }
 
-void BlueSerial_SendArray(uint8_t *Array, uint16_t Length)
+void BlueSerial_SendArray(uint8 *Array, uint16 Length)
 {
-	uint16_t i;
-	for (i = 0; i < Length; i ++)
-	{
-		BlueSerial_SendByte(Array[i]);
-	}
+    uint16 i;
+
+    for (i = 0U; i < Length; ++i)
+    {
+        BlueSerial_SendByte(Array[i]);
+    }
 }
 
 void BlueSerial_SendString(char *String)
 {
-	uint8_t i;
-	for (i = 0; String[i] != '\0'; i ++)
-	{
-		BlueSerial_SendByte(String[i]);
-	}
+    uint16 i;
+
+    for (i = 0U; String[i] != '\0'; ++i)
+    {
+        BlueSerial_SendByte((uint8)String[i]);
+    }
 }
 
-uint32_t BlueSerial_Pow(uint32_t X, uint32_t Y)
+uint32 BlueSerial_Pow(uint32 X, uint32 Y)
 {
-	uint32_t Result = 1;
-	while (Y --)
-	{
-		Result *= X;
-	}
-	return Result;
+    uint32 Result = 1U;
+
+    while (Y--)
+    {
+        Result *= X;
+    }
+    return Result;
 }
 
-void BlueSerial_SendNumber(uint32_t Number, uint8_t Length)
+void BlueSerial_SendNumber(uint32 Number, uint8 Length)
 {
-	uint8_t i;
-	for (i = 0; i < Length; i ++)
-	{
-		BlueSerial_SendByte(Number / BlueSerial_Pow(10, Length - i - 1) % 10 + '0');
-	}
+    uint8 i;
+
+    for (i = 0U; i < Length; ++i)
+    {
+        BlueSerial_SendByte((uint8)(Number / BlueSerial_Pow(10U, Length - i - 1U) % 10U + '0'));
+    }
 }
 
-
-//和printf一样用就好�?
 void BlueSerial_Printf(char *format, ...)
 {
-	char String[220];
-	va_list arg;
-	va_start(arg, format);
-	vsprintf(String, format, arg);
-	va_end(arg);
-	BlueSerial_SendString(String);
+    char String[220];
+    va_list arg;
+
+    va_start(arg, format);
+    (void)vsnprintf(String, sizeof(String), format, arg);
+    va_end(arg);
+    String[sizeof(String) - 1U] = '\0';
+    BlueSerial_SendString(String);
+}
+
+void BlueSerial_GetLastRxFrame(char *buffer, uint16 length)
+{
+    uint32 primask;
+
+    if (buffer == NULL || length == 0U)
+    {
+        return;
+    }
+
+    primask = interrupt_global_disable();
+    if (g_last_rx_frame_len == 0U)
+    {
+        (void)strncpy(buffer, "NONE", length - 1U);
+    }
+    else
+    {
+        (void)strncpy(buffer, g_last_rx_frame, length - 1U);
+    }
+    buffer[length - 1U] = '\0';
+    interrupt_global_enable(primask);
+}
+
+static void BlueSerial_RecordRxByteForDisplay(uint8 ch)
+{
+    if (ch == '[')
+    {
+        g_last_rx_frame_len = 0U;
+        g_last_rx_frame[0] = '\0';
+        return;
+    }
+
+    if (ch == ']' || ch == '\r' || ch == '\n')
+    {
+        return;
+    }
+
+    if (ch < 32U || ch > 126U)
+    {
+        return;
+    }
+
+    if (g_last_rx_frame_len >= (BLUESERIAL_RX_FRAME_LEN - 1U))
+    {
+        return;
+    }
+
+    g_last_rx_frame[g_last_rx_frame_len++] = (char)ch;
+    g_last_rx_frame[g_last_rx_frame_len] = '\0';
+}
+
+static void BlueSerial_ProcessRxByte(uint8 ch)
+{
+    uint8 next_write;
+    uint8 i;
+
+    BlueSerial_RecordRxByteForDisplay(ch);
+
+    if (ch == '[')
+    {
+        g_rx_collecting = 1U;
+        g_rx_work_len = 0U;
+        return;
+    }
+
+    if (!g_rx_collecting)
+    {
+        return;
+    }
+
+    if (ch == ']')
+    {
+        if (g_rx_work_len > 0U)
+        {
+            for (i = 0U; i < g_rx_work_len; ++i)
+            {
+                g_last_rx_frame[i] = g_rx_work[i];
+            }
+            g_last_rx_frame[g_rx_work_len] = '\0';
+            g_last_rx_frame_len = g_rx_work_len;
+
+            next_write = (uint8)((g_rx_queue_write + 1U) % BLUESERIAL_RX_QUEUE_LEN);
+            if (next_write != g_rx_queue_read)
+            {
+                for (i = 0U; i < g_rx_work_len; ++i)
+                {
+                    g_rx_queue[g_rx_queue_write][i] = g_rx_work[i];
+                }
+                g_rx_queue[g_rx_queue_write][g_rx_work_len] = '\0';
+                g_rx_queue_write = next_write;
+            }
+            else
+            {
+                g_rx_drop_count++;
+            }
+        }
+        g_rx_collecting = 0U;
+        g_rx_work_len = 0U;
+        return;
+    }
+
+    if (g_rx_work_len < (BLUESERIAL_RX_FRAME_LEN - 1U))
+    {
+        g_rx_work[g_rx_work_len++] = (char)ch;
+    }
+    else
+    {
+        g_rx_collecting = 0U;
+        g_rx_work_len = 0U;
+        g_rx_drop_count++;
+    }
+}
+
+void BlueSerial_RxIrqHandler(void)
+{
+    uint8 ch = 0U;
+
+    /*
+     * LPUART 可能一次中断里已经积累多个字节，这里尽量读空 RX FIFO。
+     * 注意：仍然只做轻量收帧状态机，不在 ISR 里 sscanf/printf/控制电机。
+     */
+    while (uart_query_byte(BLUESERIAL_UART, &ch))
+    {
+        BlueSerial_ProcessRxByte(ch);
+    }
+}
+
+static char *BlueSerial_TrimCommand(char *command)
+{
+    char *end;
+
+    while (*command == ' ' || *command == '\t' || *command == '\r' || *command == '\n')
+    {
+        command++;
+    }
+
+    end = command + strlen(command);
+    while (end > command)
+    {
+        char ch = end[-1];
+        if (ch != ' ' && ch != '\t' && ch != '\r' && ch != '\n')
+        {
+            break;
+        }
+        *--end = '\0';
+    }
+    return command;
+}
+
+static const char *BlueSerial_LogicalWheelName(uint8 wheel_index)
+{
+    static const char *const names[4] = {"ul", "ur", "dl", "dr"};
+
+    return (wheel_index < 4U) ? names[wheel_index] : "unknown";
+}
+
+static const char *BlueSerial_PhysicalMotorName(uint8 logical_wheel_index)
+{
+#if MOTOR_BOARD_REMAP_ORDER_2341
+    static const char *const names[4] = {"m4", "m2", "m3", "m1"};
+#else
+    static const char *const names[4] = {"m1", "m2", "m3", "m4"};
+#endif
+
+    return (logical_wheel_index < 4U) ? names[logical_wheel_index] : "unknown";
+}
+
+static int BlueSerial_GetLogicalWheelIndex(const char *name)
+{
+    if (strcmp(name, "pwm.ul") == 0)
+    {
+        return 0;
+    }
+    if (strcmp(name, "pwm.ur") == 0)
+    {
+        return 1;
+    }
+    if (strcmp(name, "pwm.dl") == 0)
+    {
+        return 2;
+    }
+    if (strcmp(name, "pwm.dr") == 0)
+    {
+        return 3;
+    }
+
+#if MOTOR_BOARD_REMAP_ORDER_2341
+    if (strcmp(name, "pwm.m1") == 0)
+    {
+        return 3;
+    }
+    if (strcmp(name, "pwm.m2") == 0)
+    {
+        return 1;
+    }
+    if (strcmp(name, "pwm.m3") == 0)
+    {
+        return 2;
+    }
+    if (strcmp(name, "pwm.m4") == 0)
+    {
+        return 0;
+    }
+#else
+    if (strcmp(name, "pwm.m1") == 0)
+    {
+        return 0;
+    }
+    if (strcmp(name, "pwm.m2") == 0)
+    {
+        return 1;
+    }
+    if (strcmp(name, "pwm.m3") == 0)
+    {
+        return 2;
+    }
+    if (strcmp(name, "pwm.m4") == 0)
+    {
+        return 3;
+    }
+#endif
+
+    return -1;
+}
+
+static uint8 BlueSerial_SetSlider(const char *name, float value)
+{
+    uint32 primask;
+    int wheel_index;
+    int pwm_value;
+    float applied_value;
+
+    wheel_index = BlueSerial_GetLogicalWheelIndex(name);
+    if (wheel_index >= 0)
+    {
+        pwm_value = BlueSerial_ClampInt(BlueSerial_RoundToInt(value), LIMIT_PWM_MIN, LIMIT_PWM_MAX);
+        primask = interrupt_global_disable();
+        g_raw_pwm[wheel_index] = pwm_value;
+        BlueSerial_EnterRawPwmMode();
+        interrupt_global_enable(primask);
+        BlueSerial_Printf("OK pwm.%s=%d physical=%s\r\n",
+                          BlueSerial_LogicalWheelName((uint8)wheel_index),
+                          pwm_value,
+                          BlueSerial_PhysicalMotorName((uint8)wheel_index));
+        return 1U;
+    }
+    if (strcmp(name, "speed") == 0)
+    {
+        applied_value = BlueSerial_ClampFloat(value, 0.0f, BLUESERIAL_MAX_TARGET_SPEED_CMPS);
+        primask = interrupt_global_disable();
+        g_target_speed_cmps = applied_value;
+        if (applied_value > 0.0f)
+        {
+            BlueSerial_ApplyConfiguredPathSpeedLocked();
+        }
+        interrupt_global_enable(primask);
+        BlueSerial_Printf("OK next_speed=%.1fcmps\r\n", applied_value);
+        return 1U;
+    }
+    if (strcmp(name, "position") == 0 || strcmp(name, "distance") == 0)
+    {
+        applied_value = BlueSerial_ClampFloat(value, 0.0f, BLUESERIAL_MAX_TARGET_POSITION_CM);
+        primask = interrupt_global_disable();
+        g_target_position_cm = applied_value;
+        interrupt_global_enable(primask);
+        BlueSerial_Printf("OK next_position=%.1fcm\r\n", applied_value);
+        return 1U;
+    }
+    if (strcmp(name, "yaw.kp") == 0)
+    {
+        applied_value = BlueSerial_ClampFloat(value, 0.0f, BLUESERIAL_MAX_YAW_KP);
+        primask = interrupt_global_disable();
+        pid_yaw.fKp = applied_value;
+        PID_Clear(&pid_yaw);
+        interrupt_global_enable(primask);
+        BlueSerial_Printf("OK yaw.kp=%.4f\r\n", applied_value);
+        return 1U;
+    }
+    if (strcmp(name, "yaw.ki") == 0)
+    {
+        applied_value = BlueSerial_ClampFloat(value, 0.0f, BLUESERIAL_MAX_YAW_KI);
+        primask = interrupt_global_disable();
+        pid_yaw.fKi = applied_value;
+        PID_Clear(&pid_yaw);
+        interrupt_global_enable(primask);
+        BlueSerial_Printf("OK yaw.ki=%.4f\r\n", applied_value);
+        return 1U;
+    }
+    if (strcmp(name, "yaw.kd") == 0)
+    {
+        applied_value = BlueSerial_ClampFloat(value, 0.0f, BLUESERIAL_MAX_YAW_KD);
+        primask = interrupt_global_disable();
+        pid_yaw.fKd = applied_value;
+        PID_Clear(&pid_yaw);
+        interrupt_global_enable(primask);
+        BlueSerial_Printf("OK yaw.kd=%.4f\r\n", applied_value);
+        return 1U;
+    }
+    if (strcmp(name, "yaw.ff") == 0)
+    {
+        applied_value = BlueSerial_ClampFloat(value, 0.0f, BLUESERIAL_MAX_YAW_FF_DEGPS);
+        primask = interrupt_global_disable();
+        path_yaw_feedforward_min_degps = applied_value;
+        interrupt_global_enable(primask);
+        BlueSerial_Printf("OK yaw.ff=%.2fdegps\r\n", applied_value);
+        return 1U;
+    }
+
+    return 0U;
+}
+
+static void BlueSerial_PrintStatus(void)
+{
+    uint32 primask;
+    uint32 drop_count;
+    blueserial_move_direction_t direction;
+    unsigned int mode;
+    unsigned int yaw_hold;
+    int pwm[4];
+    float speed_cmps;
+    float position_cm;
+    float yaw_kp;
+    float yaw_ki;
+    float yaw_kd;
+    float yaw_ff;
+
+    primask = interrupt_global_disable();
+    mode = (unsigned int)g_control_mode;
+    yaw_hold = (unsigned int)g_yaw_hold_enabled;
+    direction = g_next_move_direction;
+    speed_cmps = g_target_speed_cmps;
+    position_cm = g_target_position_cm;
+    pwm[0] = g_raw_pwm[0];
+    pwm[1] = g_raw_pwm[1];
+    pwm[2] = g_raw_pwm[2];
+    pwm[3] = g_raw_pwm[3];
+    yaw_kp = pid_yaw.fKp;
+    yaw_ki = pid_yaw.fKi;
+    yaw_kd = pid_yaw.fKd;
+    yaw_ff = path_yaw_feedforward_min_degps;
+    drop_count = g_rx_drop_count;
+    interrupt_global_enable(primask);
+
+    BlueSerial_Printf("STATUS mode=%u yawhold=%u direction=%s next_speed=%.1fcmps next_position=%.1fcm "
+                      "pwm.ulurdlr=%d,%d,%d,%d "
+                      "yawpid=%.4f,%.4f,%.4f ff=%.2f drop=%lu\r\n",
+                      mode,
+                      yaw_hold,
+                      BlueSerial_MoveDirectionName(direction),
+                      speed_cmps,
+                      position_cm,
+                      pwm[0], pwm[1], pwm[2], pwm[3],
+                      yaw_kp, yaw_ki, yaw_kd,
+                      yaw_ff,
+                      (unsigned long)drop_count);
+}
+
+static uint8 BlueSerial_RunButton(const char *command)
+{
+    if (strcmp(command, "forward") == 0 || strcmp(command, "go ahead") == 0)
+    {
+        BlueSerial_SelectMoveDirection(BLUESERIAL_MOVE_FORWARD);
+        return 1U;
+    }
+    if (strcmp(command, "backward") == 0 || strcmp(command, "go back") == 0)
+    {
+        BlueSerial_SelectMoveDirection(BLUESERIAL_MOVE_BACKWARD);
+        return 1U;
+    }
+    if (strcmp(command, "left") == 0)
+    {
+        BlueSerial_SelectMoveDirection(BLUESERIAL_MOVE_LEFT);
+        return 1U;
+    }
+    if (strcmp(command, "right") == 0)
+    {
+        BlueSerial_SelectMoveDirection(BLUESERIAL_MOVE_RIGHT);
+        return 1U;
+    }
+    if (strcmp(command, "start") == 0 || strcmp(command, "run") == 0 ||
+        strcmp(command, "apply") == 0 || strcmp(command, "move") == 0)
+    {
+        if (!BlueSerial_StartConfiguredMove())
+        {
+            BlueSerial_Printf("ERR set_next_speed_and_position_first\r\n");
+            return 1U;
+        }
+        BlueSerial_Printf("OK start direction=%s speed=%.1fcmps position=%.1fcm\r\n",
+                          BlueSerial_MoveDirectionName(g_next_move_direction),
+                          g_target_speed_cmps,
+                          g_target_position_cm);
+        return 1U;
+    }
+    if (strcmp(command, "turn90") == 0)
+    {
+        BlueSerial_StartTurn(1U, 90.0f);
+        BlueSerial_Printf("OK turn90 ccw\r\n");
+        return 1U;
+    }
+    if (strcmp(command, "turn360") == 0)
+    {
+        BlueSerial_StartTurn(4U, 90.0f);
+        BlueSerial_Printf("OK turn360 ccw\r\n");
+        return 1U;
+    }
+    if (strcmp(command, "turn90r") == 0)
+    {
+        BlueSerial_StartTurn(1U, -90.0f);
+        BlueSerial_Printf("OK turn90 cw\r\n");
+        return 1U;
+    }
+    if (strcmp(command, "turn360r") == 0)
+    {
+        BlueSerial_StartTurn(4U, -90.0f);
+        BlueSerial_Printf("OK turn360 cw\r\n");
+        return 1U;
+    }
+    if (strcmp(command, "stop") == 0)
+    {
+        BlueSerial_StopControl();
+        BlueSerial_Printf("OK stop\r\n");
+        return 1U;
+    }
+    if (strcmp(command, "yawhold") == 0 || strcmp(command, "yaw.hold") == 0)
+    {
+        BlueSerial_ToggleYawHold();
+        return 1U;
+    }
+    if (strcmp(command, "status") == 0)
+    {
+        BlueSerial_PrintStatus();
+        return 1U;
+    }
+
+    return 0U;
+}
+
+static void BlueSerial_ParseCommand(char *raw_command)
+{
+    char type[16];
+    char name[32];
+    char *trimmed_type;
+    char *trimmed_name;
+    float value;
+    char *command = BlueSerial_TrimCommand(raw_command);
+
+    if (sscanf(command, "%15[^,],%31[^,],%f", type, name, &value) == 3)
+    {
+        trimmed_type = BlueSerial_TrimCommand(type);
+        trimmed_name = BlueSerial_TrimCommand(name);
+        if (strcmp(trimmed_type, "slider") != 0)
+        {
+            BlueSerial_Printf("ERR unknown_frame_type %s\r\n", trimmed_type);
+            return;
+        }
+        if (!isfinite(value))
+        {
+            BlueSerial_Printf("ERR invalid_value %s\r\n", trimmed_name);
+            return;
+        }
+        if (BlueSerial_SetSlider(trimmed_name, value))
+        {
+            return;
+        }
+        BlueSerial_Printf("ERR unknown_slider %s\r\n", trimmed_name);
+        return;
+    }
+
+    if (strncmp(command, "button,", 7U) == 0)
+    {
+        command = BlueSerial_TrimCommand(command + 7U);
+    }
+
+    if (!BlueSerial_RunButton(command))
+    {
+        BlueSerial_Printf("ERR unknown_command %s\r\n", command);
+    }
+}
+
+void BlueSerial_CommandTask(void)
+{
+    char command[BLUESERIAL_RX_FRAME_LEN];
+    uint8 read_index;
+
+    while (g_rx_queue_read != g_rx_queue_write)
+    {
+        read_index = g_rx_queue_read;
+        (void)strncpy(command, g_rx_queue[read_index], sizeof(command) - 1U);
+        command[sizeof(command) - 1U] = '\0';
+        g_rx_queue_read = (uint8)((read_index + 1U) % BLUESERIAL_RX_QUEUE_LEN);
+        BlueSerial_ParseCommand(command);
+    }
+}
+
+void BlueSerial_ControlTick10ms(void)
+{
+    if (g_control_mode == BLUESERIAL_MODE_RAW_PWM)
+    {
+        path_follow_output_t unused_output = {0};
+
+        /*
+         * 原始 PWM 调试时也更新一次里程计。这样退出 PWM 后再用路径遥控，
+         * path_follow 内部位姿不会长时间停留在旧值。
+         */
+        path_follow_update(eulerAngle.yaw, &unused_output);
+        BlueSerial_ApplyRawPwm();
+        return;
+    }
+
+    if (g_control_mode == BLUESERIAL_MODE_PATH_MOTION)
+    {
+        distance_speed_strategy();
+        motor_control(speed_encoder);
+        return;
+    }
+
+    if (g_yaw_hold_enabled)
+    {
+        distance_speed_strategy();
+        motor_control(speed_encoder);
+        return;
+    }
+
+    motor_pwm(0, 0, 0, 0);
 }
 
 void BlueSerial_PathDebugTick10ms(void)
 {
-	static uint8 tick_div = 0U;
+    static uint8 tick_div = 0U;
 
-	if (++tick_div >= BLUESERIAL_PATH_REPORT_PERIOD_TICKS)
-	{
-		tick_div = 0U;
-		g_blueserial_path_report_pending = 1U;
-	}
+    if (++tick_div >= BLUESERIAL_PATH_REPORT_PERIOD_TICKS)
+    {
+        tick_div = 0U;
+        g_blueserial_path_report_pending = 1U;
+    }
 }
+
 static void BlueSerial_GetActualBodySpeed(float *vx_cmps, float *vy_cmps, float *omega_radps)
 {
-	float count_to_mps;
-	float w_ul;
-	float w_ur;
-	float w_dl;
-	float w_dr;
+    float count_to_mps;
+    float w_ul;
+    float w_ur;
+    float w_dl;
+    float w_dr;
 
-	if (vx_cmps == NULL || vy_cmps == NULL || omega_radps == NULL)
-	{
-		return;
-	}
+    if (vx_cmps == NULL || vy_cmps == NULL || omega_radps == NULL)
+    {
+        return;
+    }
 
-	*vx_cmps = 0.0f;
-	*vy_cmps = 0.0f;
-	*omega_radps = 0.0f;
+    *vx_cmps = 0.0f;
+    *vy_cmps = 0.0f;
+    *omega_radps = 0.0f;
 
-	if (pulse_per_meter <= 0.0)
-	{
-		return;
-	}
+    if (pulse_per_meter <= 0.0)
+    {
+        return;
+    }
 
-	count_to_mps = ((float)PID_RATE) / (float)pulse_per_meter;
-	w_ul = (float)up_L_all * count_to_mps;
-	w_ur = (float)up_R_all * count_to_mps;
-	w_dl = (float)down_L_all * count_to_mps;
-	w_dr = (float)down_R_all * count_to_mps;
+    count_to_mps = ((float)PID_RATE) / (float)pulse_per_meter;
+    w_ul = (float)up_L_all * count_to_mps;
+    w_ur = (float)up_R_all * count_to_mps;
+    w_dl = (float)down_L_all * count_to_mps;
+    w_dr = (float)down_R_all * count_to_mps;
 
-	*vx_cmps = 0.25f * (w_ul + w_ur + w_dl + w_dr) * 100.0f;
-	*vy_cmps = 0.25f * (-w_ul + w_ur + w_dl - w_dr) * 100.0f;
-	*omega_radps = (-w_ul + w_ur - w_dl + w_dr) / (2.0f * D_X + 2.0f * D_Y);
+    *vx_cmps = 0.25f * (w_ul + w_ur + w_dl + w_dr) * 100.0f;
+    *vy_cmps = 0.25f * (-w_ul + w_ur + w_dl - w_dr) * 100.0f;
+    *omega_radps = (-w_ul + w_ur - w_dl + w_dr) / (2.0f * D_X + 2.0f * D_Y);
 }
 
 void BlueSerial_PathDebugReport(void)
 {
-	path_follow_status_t st = {0};
-	float actual_vx_cmps = 0.0f;
-	float actual_vy_cmps = 0.0f;
-	float actual_omega_radps = 0.0f;
+    uint32 primask;
+    path_follow_status_t status = {0};
+    int encoder_speed[4];
+    float target_vx_cmps;
+    float target_vy_cmps;
+    float target_omega_radps;
+    float actual_vx_cmps = 0.0f;
+    float actual_vy_cmps = 0.0f;
+    float actual_omega_radps = 0.0f;
+    float actual_speed_cmps;
 
-	if (g_blueserial_path_report_pending == 0U)
-	{
-		return;
-	}
-	g_blueserial_path_report_pending = 0U;
+    /* 主循环已有 PathDebugReport() 调用，因此这里顺手服务蓝牙命令队列。 */
+    BlueSerial_CommandTask();
+    BlueSerial_ServiceMotionCompletion();
 
-	path_follow_get_status(&st);
-	BlueSerial_GetActualBodySpeed(&actual_vx_cmps, &actual_vy_cmps, &actual_omega_radps);
+    primask = interrupt_global_disable();
+    if (g_blueserial_path_report_pending == 0U)
+    {
+        interrupt_global_enable(primask);
+        return;
+    }
+    g_blueserial_path_report_pending = 0U;
 
-	BlueSerial_Printf("TPOS %.3f %.3f APOS %.3f %.3f TVEL %.1f %.1f %.2f AVEL %.1f %.1f %.2f TYAW %.2f\r\n",
-					  st.target_x_m,
-					  st.target_y_m,
-					  st.x_m,
-					  st.y_m,
-					  speed_three_array[0],
-					  speed_three_array[1],
-					  speed_three_array[2],
-					  actual_vx_cmps,
-					  actual_vy_cmps,
-					  actual_omega_radps,
-					  st.target_yaw_deg);
+    path_follow_get_status(&status);
+    target_vx_cmps = speed_three_array[0];
+    target_vy_cmps = speed_three_array[1];
+    target_omega_radps = speed_three_array[2];
+    encoder_speed[0] = up_L_all;
+    encoder_speed[1] = up_R_all;
+    encoder_speed[2] = down_L_all;
+    encoder_speed[3] = down_R_all;
+    BlueSerial_GetActualBodySpeed(&actual_vx_cmps, &actual_vy_cmps, &actual_omega_radps);
+    interrupt_global_enable(primask);
+    actual_speed_cmps = sqrtf(actual_vx_cmps * actual_vx_cmps +
+                              actual_vy_cmps * actual_vy_cmps);
+
+    /*
+     * 50ms 遥测帧：
+     * TSPD/ASPD 为目标/实际标量速度，单位 cm/s；
+     * TVEL/AVEL 为目标/实际车体三轴速度，线速度 cm/s，角速度 rad/s；
+     * TPOS/APOS 为目标/实际位置，单位 m；
+     * TYAW/AYAW 为目标/实际航向，单位 deg；
+     * ENC_ULURDLDR 为最近 10ms 的四轮编码器计数。
+     */
+    BlueSerial_Printf("TSPD %.1f ASPD %.1f TVEL %.1f %.1f %.3f AVEL %.1f %.1f %.3f "
+                      "TPOS %.3f %.3f APOS %.3f %.3f TYAW %.2f AYAW %.2f "
+                      "ENC_ULURDLDR %d %d %d %d\r\n",
+                      status.speed_ref_cmps,
+                      actual_speed_cmps,
+                      target_vx_cmps,
+                      target_vy_cmps,
+                      target_omega_radps,
+                      actual_vx_cmps,
+                      actual_vy_cmps,
+                      actual_omega_radps,
+                      status.target_x_m,
+                      status.target_y_m,
+                      status.x_m,
+                      status.y_m,
+                      status.target_yaw_deg,
+                      status.yaw_deg,
+                      encoder_speed[0],
+                      encoder_speed[1],
+                      encoder_speed[2],
+                      encoder_speed[3]);
 }

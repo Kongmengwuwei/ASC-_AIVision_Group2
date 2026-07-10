@@ -54,13 +54,13 @@ int main(void)
     BlueSerial_Printf("\r\nMOTOR\r\n");
   }
 #else
-  Menu_Init();                                   // 菜单系统初始化(包含按键，显示屏等相关初始化)
-  uart_blob_init();                              // 摄像头串口接收与解析模块初始化
-  flash_init();                                  // Flash模块初始化
-  motor_init();                                  // 电机控制模块初始化
-  encoder_init();                                // 电机编码器模块初始化
-  imu963ra_init();                               // IMU模块初始化
-  Attitude_Init();                               // 姿态解算模块初始化
+  Menu_Init();
+  uart_blob_init();
+  flash_init();
+  motor_init();
+  encoder_init();
+  imu963ra_init();
+  Attitude_Init();
   Blue_Serial_Init();
   PID_Init(&ULpid, &ULPidInitStruct);
   PID_Init(&URpid, &URPidInitStruct);
@@ -73,7 +73,7 @@ int main(void)
   Kinematics_Init();
   path_follow_init(GRID_SIZE_M, (float)pulse_per_meter);
 
-  // 中断初始化
+  // Interrupt initialization.
   pit_ms_init(PIT_CH0, 20);                  // PIT0 periodic interrupt: 20 ms.
   interrupt_set_priority(PIT_PRIORITY_0, 2); // PIT0 interrupt priority.
   pit_ms_init(PIT_CH1, 10);                  // PIT1 periodic interrupt: 10 ms.
@@ -92,13 +92,14 @@ int main(void)
 #endif
 #endif
 
-  // 主循环
+  // Main loop.
   while (1)
   {
-    // 控制主流程：初始定位 -> 摄像头数据到齐 -> 路径规划 -> 路径执行 -> 执行中动态校正
-    control_process();
+    if (!BlueSerial_IsControlActive())
+    {
+      control_process();
+    }
 
-    // 菜单系统主循环调用：响应按键事件，更新显示等。
     Menu_Switch();
     Menu_Show();
     BlueSerial_PathDebugReport();
@@ -113,9 +114,16 @@ void pit_0_handler(void)
 
 void pit_1_handler(void)
 {
-  // 采样编码器
+  // Sample encoders before either autonomous or Bluetooth motor control.
   encoder_get();
-  // BlueSerial_PathDebugTick10ms();
+  BlueSerial_PathDebugTick10ms();
+
+  // Bluetooth takeover: when active, let BlueSerial own this 10ms motor-control tick.
+  if (BlueSerial_IsControlActive())
+  {
+    BlueSerial_ControlTick10ms();
+    return;
+  }
   if (control_is_path_plan_paused())
   {
     // 规划保护期内，清零速度目标，避免执行层继续输出旧命令
@@ -166,8 +174,6 @@ void pit_1_handler(void)
   {
     motor_pwm(0, 0, 0, 0);
   }
-
-  // BlueSerial_PathDebugTick10ms();
 }
 
 /* PIT2 周期中断（2ms）：姿态解算 */

@@ -58,6 +58,9 @@
 #define BLUESERIAL_RELATIVE_MAX_OFFSET_CELL     120
 #define BLUESERIAL_POSITION_RETRY_LOOPS         200U
 #define BLUESERIAL_POSITION_MAX_RETRY           3U
+#define BLUESERIAL_POINT_TARGET_GRID_M          0.01f
+#define BLUESERIAL_POINT_TARGET_MAX_CELL        250
+#define BLUESERIAL_POINT_TARGET_MAX_M           20.0f
 
 typedef enum
 {
@@ -101,6 +104,10 @@ static uint8 g_position_request_pending = 0U;
 static uint8 g_position_request_start_frame = 0U;
 static uint8 g_position_request_retry_count = 0U;
 static uint16 g_position_request_wait_loops = 0U;
+static uint8 g_point_target_valid = 0U;
+static float g_point_target_x_m = 0.0f;
+static float g_point_target_y_m = 0.0f;
+static Position g_blueserial_point_target_path[3];
 
 static float BlueSerial_ClampFloat(float value, float min_value, float max_value)
 {
@@ -326,6 +333,7 @@ static void BlueSerial_SelectMoveDirection(blueserial_move_direction_t direction
     uint32 primask = interrupt_global_disable();
 
     g_next_move_direction = direction;
+    g_point_target_valid = 0U;
     interrupt_global_enable(primask);
     BlueSerial_Printf("OK direction=%s next_speed=%.1fcmps next_position=%.1fcm\r\n",
                       BlueSerial_MoveDirectionName(direction),
@@ -453,6 +461,173 @@ static void BlueSerial_ServicePositionRequest(void)
     g_position_request_pending = 0U;
     BlueSerial_Printf("ERR position_timeout\r\n");
     BlueSerial_PrintPositionReport(0U);
+}
+
+static uint8 BlueSerial_HasPointTarget(void)
+{
+    uint32 primask;
+    uint8 valid;
+
+    primask = interrupt_global_disable();
+    valid = g_point_target_valid;
+    interrupt_global_enable(primask);
+    return valid;
+}
+
+static uint8 BlueSerial_SetPointTarget(float x_m, float y_m)
+{
+    uint32 primask;
+
+    if (!isfinite(x_m) || !isfinite(y_m))
+    {
+        BlueSerial_Printf("ERR invalid_target\r\n");
+        return 0U;
+    }
+    if (x_m < 0.0f || y_m < 0.0f ||
+        x_m > BLUESERIAL_POINT_TARGET_MAX_M ||
+        y_m > BLUESERIAL_POINT_TARGET_MAX_M)
+    {
+        BlueSerial_Printf("ERR target_range x=0..%.1fm y=0..%.1fm\r\n",
+                          BLUESERIAL_POINT_TARGET_MAX_M,
+                          BLUESERIAL_POINT_TARGET_MAX_M);
+        return 0U;
+    }
+
+    primask = interrupt_global_disable();
+    g_point_target_x_m = x_m;
+    g_point_target_y_m = y_m;
+    g_point_target_valid = 1U;
+    interrupt_global_enable(primask);
+
+    BlueSerial_Printf("OK target_m=%.3f,%.3f send_start_to_go\r\n", x_m, y_m);
+    return 1U;
+}
+
+static uint8 BlueSerial_BuildPointTargetPath(float start_x_m,
+                                             float start_y_m,
+                                             float target_x_m,
+                                             float target_y_m)
+{
+    const float eps_m = 0.001f;
+    float grid_m = BLUESERIAL_POINT_TARGET_GRID_M;
+    float max_coord_m;
+    float delta_x_m = target_x_m - start_x_m;
+    float delta_y_m = target_y_m - start_y_m;
+    uint8 move_x_first = (fabsf(delta_x_m) >= fabsf(delta_y_m)) ? 1U : 0U;
+    int start_row;
+    int start_col;
+    int target_row;
+    int target_col;
+    size_t steps = 1U;
+
+    if (start_x_m < 0.0f || start_y_m < 0.0f ||
+        target_x_m < 0.0f || target_y_m < 0.0f)
+    {
+        return 0U;
+    }
+
+    max_coord_m = fmaxf(fmaxf(start_x_m, start_y_m),
+                        fmaxf(target_x_m, target_y_m));
+    if (max_coord_m > ((float)BLUESERIAL_POINT_TARGET_MAX_CELL * grid_m))
+    {
+        grid_m = max_coord_m / (float)BLUESERIAL_POINT_TARGET_MAX_CELL;
+    }
+
+    start_row = BlueSerial_ClampInt(BlueSerial_RoundToInt(start_x_m / grid_m), 0, 255);
+    start_col = BlueSerial_ClampInt(BlueSerial_RoundToInt(start_y_m / grid_m), 0, 255);
+    target_row = BlueSerial_ClampInt(BlueSerial_RoundToInt(target_x_m / grid_m), 0, 255);
+    target_col = BlueSerial_ClampInt(BlueSerial_RoundToInt(target_y_m / grid_m), 0, 255);
+
+    if (fabsf(delta_x_m) <= eps_m && fabsf(delta_y_m) <= eps_m)
+    {
+        path_follow_set_path(NULL, 0U);
+        return 1U;
+    }
+
+    g_blueserial_point_target_path[0].row = (uint8)start_row;
+    g_blueserial_point_target_path[0].col = (uint8)start_col;
+    g_blueserial_point_target_path[0].id = 0U;
+
+    if (move_x_first)
+    {
+        if (target_row != start_row)
+        {
+            g_blueserial_point_target_path[steps].row = (uint8)target_row;
+            g_blueserial_point_target_path[steps].col = (uint8)start_col;
+            g_blueserial_point_target_path[steps].id = 0U;
+            steps++;
+        }
+        if (target_col != start_col)
+        {
+            g_blueserial_point_target_path[steps].row = (uint8)target_row;
+            g_blueserial_point_target_path[steps].col = (uint8)target_col;
+            g_blueserial_point_target_path[steps].id = 0U;
+            steps++;
+        }
+    }
+    else
+    {
+        if (target_col != start_col)
+        {
+            g_blueserial_point_target_path[steps].row = (uint8)start_row;
+            g_blueserial_point_target_path[steps].col = (uint8)target_col;
+            g_blueserial_point_target_path[steps].id = 0U;
+            steps++;
+        }
+        if (target_row != start_row)
+        {
+            g_blueserial_point_target_path[steps].row = (uint8)target_row;
+            g_blueserial_point_target_path[steps].col = (uint8)target_col;
+            g_blueserial_point_target_path[steps].id = 0U;
+            steps++;
+        }
+    }
+
+    path_follow_set_path_with_grid(g_blueserial_point_target_path, steps, grid_m, 0U);
+    return 1U;
+}
+
+static uint8 BlueSerial_StartPointTargetMove(void)
+{
+    uint32 primask;
+    path_follow_status_t status = {0};
+    float target_x_m;
+    float target_y_m;
+    uint8 started;
+
+    primask = interrupt_global_disable();
+    if (!g_point_target_valid)
+    {
+        interrupt_global_enable(primask);
+        return 0U;
+    }
+
+    target_x_m = g_point_target_x_m;
+    target_y_m = g_point_target_y_m;
+    path_follow_get_status(&status);
+    started = BlueSerial_BuildPointTargetPath(status.x_m,
+                                             status.y_m,
+                                             target_x_m,
+                                             target_y_m);
+    if (started)
+    {
+        g_point_target_valid = 0U;
+        g_turn_quarters_remaining = 0U;
+        BlueSerial_ApplyConfiguredPathSpeedLocked();
+        BlueSerial_EnterPathMode();
+        path_follow_set_target_yaw(status.yaw_deg);
+    }
+    interrupt_global_enable(primask);
+
+    if (started)
+    {
+        BlueSerial_Printf("OK start target_m=%.3f,%.3f from=%.3f,%.3f\r\n",
+                          target_x_m,
+                          target_y_m,
+                          status.x_m,
+                          status.y_m);
+    }
+    return started;
 }
 
 static void BlueSerial_StartCenteredRelativeMove(float delta_x_m, float delta_y_m, float yaw_deg)
@@ -1073,6 +1248,9 @@ static void BlueSerial_PrintStatus(void)
     float yaw_ki;
     float yaw_kd;
     float yaw_ff;
+    uint8 point_target_valid;
+    float point_target_x_m;
+    float point_target_y_m;
 
     primask = interrupt_global_disable();
     mode = (unsigned int)g_control_mode;
@@ -1088,6 +1266,9 @@ static void BlueSerial_PrintStatus(void)
     yaw_ki = pid_yaw.fKi;
     yaw_kd = pid_yaw.fKd;
     yaw_ff = path_yaw_feedforward_min_degps;
+    point_target_valid = g_point_target_valid;
+    point_target_x_m = g_point_target_x_m;
+    point_target_y_m = g_point_target_y_m;
     drop_count = g_rx_drop_count;
     interrupt_global_enable(primask);
 
@@ -1103,6 +1284,12 @@ static void BlueSerial_PrintStatus(void)
                       yaw_kp, yaw_ki, yaw_kd,
                       yaw_ff,
                       (unsigned long)drop_count);
+    if (point_target_valid)
+    {
+        BlueSerial_Printf("TARGET pending=1 target_m=%.3f,%.3f\r\n",
+                          point_target_x_m,
+                          point_target_y_m);
+    }
 }
 
 static uint8 BlueSerial_RunButton(const char *command)
@@ -1130,6 +1317,14 @@ static uint8 BlueSerial_RunButton(const char *command)
     if (strcmp(command, "start") == 0 || strcmp(command, "run") == 0 ||
         strcmp(command, "apply") == 0 || strcmp(command, "move") == 0)
     {
+        if (BlueSerial_HasPointTarget())
+        {
+            if (!BlueSerial_StartPointTargetMove())
+            {
+                BlueSerial_Printf("ERR target_start_failed\r\n");
+            }
+            return 1U;
+        }
         if (!BlueSerial_StartConfiguredMove())
         {
             BlueSerial_Printf("ERR set_next_speed_and_position_first\r\n");
@@ -1210,12 +1405,26 @@ static void BlueSerial_ParseCommand(char *raw_command)
     char *trimmed_type;
     char *trimmed_name;
     float value;
+    float target_x_m;
+    char extra;
     char *command = BlueSerial_TrimCommand(raw_command);
 
     if (sscanf(command, "%15[^,],%31[^,],%f", type, name, &value) == 3)
     {
         trimmed_type = BlueSerial_TrimCommand(type);
         trimmed_name = BlueSerial_TrimCommand(name);
+        if (strcmp(trimmed_type, "target") == 0 ||
+            strcmp(trimmed_type, "goto") == 0 ||
+            strcmp(trimmed_type, "point") == 0)
+        {
+            if (sscanf(trimmed_name, "%f %c", &target_x_m, &extra) != 1)
+            {
+                BlueSerial_Printf("ERR invalid_target_x\r\n");
+                return;
+            }
+            (void)BlueSerial_SetPointTarget(target_x_m, value);
+            return;
+        }
         if (strcmp(trimmed_type, "slider") != 0)
         {
             BlueSerial_Printf("ERR unknown_frame_type %s\r\n", trimmed_type);

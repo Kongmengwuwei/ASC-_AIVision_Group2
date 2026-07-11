@@ -9,7 +9,8 @@
  * 直线遥控的使用顺序：
  *   [forward] / [backward] / [left] / [right] 选择下一次运动方向；
  *   [slider,speed,value] 和 [slider,position,value] 设置速度和距离；
- *   [start]（也兼容 run/apply/move）提交这次相对位移动作。
+ *   [start]（也兼容 run/apply/move）提交一次按目标位置停止的 S 曲线相对位移动作；
+ *   [speed]（也兼容 cruise/speed.start）按所选方向和目标速度持续匀速行驶，直到 stop。
  *
  * 中断适配原则：
  *   UART8 ISR 只负责收字节、拼帧、入队；字符串解析、printf、路径控制、电机状态切换
@@ -62,7 +63,8 @@ typedef enum
 {
     BLUESERIAL_MODE_STOP = 0,      /* 蓝牙未接管底盘输出。 */
     BLUESERIAL_MODE_RAW_PWM,       /* 蓝牙直接下发四轮 PWM，用于电机方向/接线检查。 */
-    BLUESERIAL_MODE_PATH_MOTION    /* 蓝牙通过 path_follow 生成速度闭环运动。 */
+    BLUESERIAL_MODE_PATH_MOTION,   /* 目标位置模式：由 path_follow 完成 S 曲线启停。 */
+    BLUESERIAL_MODE_SPEED_CRUISE   /* 目标速度模式：按所选方向持续输出速度，不创建位置目标。 */
 } blueserial_control_mode_t;
 
 typedef enum
@@ -90,6 +92,7 @@ static volatile int g_raw_pwm[4] = {0, 0, 0, 0};
 static float g_target_speed_cmps = 40.0f;
 static float g_target_position_cm = 50.0f;
 static blueserial_move_direction_t g_next_move_direction = BLUESERIAL_MOVE_FORWARD;
+static blueserial_move_direction_t g_cruise_move_direction = BLUESERIAL_MOVE_FORWARD;
 static uint8 g_turn_quarters_remaining = 0U;
 static float g_turn_step_deg = 90.0f;
 static volatile uint8 g_yaw_hold_enabled = 0U;
@@ -256,11 +259,49 @@ static void BlueSerial_ApplyConfiguredPathSpeedLocked(void)
 
 static void BlueSerial_EnterPathMode(void)
 {
+    if (!g_yaw_hold_enabled)
+    {
+        path_follow_set_stationary_yaw_hold_enabled(0U);
+    }
     g_control_mode = BLUESERIAL_MODE_PATH_MOTION;
     car_go_flag = 1U;
     car_stop_flag = 0U;
     BlueSerial_ZeroSpeedCommand();
     BlueSerial_ClearWheelPid();
+}
+
+/*
+ * 目标速度模式不创建路径，也不调用 S 曲线规划。
+ * 四轮速度 PID 会把实际车速拉到 g_target_speed_cmps；启动时锁定此前选择的方向，path_follow 在这里
+ * 仅提供航向保持角速度，避免直行过程中逐渐偏航。
+ */
+static uint8 BlueSerial_StartSpeedCruise(void)
+{
+    uint32 primask;
+    float hold_yaw_deg;
+
+    if (g_target_speed_cmps <= 0.0f)
+    {
+        return 0U;
+    }
+
+    primask = interrupt_global_disable();
+    hold_yaw_deg = eulerAngle.yaw;
+    g_cruise_move_direction = g_next_move_direction;
+    g_turn_quarters_remaining = 0U;
+    g_yaw_hold_enabled = 0U;
+    path_follow_set_path(NULL, 0U);
+    path_follow_set_stationary_yaw_hold_enabled(0U);
+    BlueSerial_ZeroSpeedCommand();
+    BlueSerial_ClearWheelPid();
+    PID_Clear(&pid_yaw);
+    path_follow_set_target_yaw(hold_yaw_deg);
+    path_follow_set_stationary_yaw_hold_enabled(1U);
+    g_control_mode = BLUESERIAL_MODE_SPEED_CRUISE;
+    car_go_flag = 1U;
+    car_stop_flag = 0U;
+    interrupt_global_enable(primask);
+    return 1U;
 }
 
 static const char *BlueSerial_MoveDirectionName(blueserial_move_direction_t direction)
@@ -962,10 +1003,6 @@ static uint8 BlueSerial_SetSlider(const char *name, float value)
         applied_value = BlueSerial_ClampFloat(value, 0.0f, BLUESERIAL_MAX_TARGET_SPEED_CMPS);
         primask = interrupt_global_disable();
         g_target_speed_cmps = applied_value;
-        if (applied_value > 0.0f)
-        {
-            BlueSerial_ApplyConfiguredPathSpeedLocked();
-        }
         interrupt_global_enable(primask);
         BlueSerial_Printf("OK next_speed=%.1fcmps\r\n", applied_value);
         return 1U;
@@ -1104,6 +1141,19 @@ static uint8 BlueSerial_RunButton(const char *command)
                           g_target_position_cm);
         return 1U;
     }
+    if (strcmp(command, "speed") == 0 || strcmp(command, "cruise") == 0 ||
+        strcmp(command, "speed.start") == 0)
+    {
+        if (!BlueSerial_StartSpeedCruise())
+        {
+            BlueSerial_Printf("ERR set_target_speed_first\r\n");
+            return 1U;
+        }
+        BlueSerial_Printf("OK speed_cruise direction=%s speed=%.1fcmps\r\n",
+                          BlueSerial_MoveDirectionName(g_cruise_move_direction),
+                          g_target_speed_cmps);
+        return 1U;
+    }
     if (strcmp(command, "turn90") == 0)
     {
         BlueSerial_StartTurn(1U, 90.0f);
@@ -1228,6 +1278,40 @@ void BlueSerial_ControlTick10ms(void)
     if (g_control_mode == BLUESERIAL_MODE_PATH_MOTION)
     {
         distance_speed_strategy();
+        motor_control(speed_encoder);
+        return;
+    }
+
+    if (g_control_mode == BLUESERIAL_MODE_SPEED_CRUISE)
+    {
+        path_follow_output_t yaw_hold = {0};
+
+        path_follow_update_yaw_hold(eulerAngle.yaw, &yaw_hold);
+        switch (g_cruise_move_direction)
+        {
+            case BLUESERIAL_MOVE_FORWARD:
+                speed_three_array[0] = g_target_speed_cmps;
+                speed_three_array[1] = 0.0f;
+                break;
+            case BLUESERIAL_MOVE_BACKWARD:
+                speed_three_array[0] = -g_target_speed_cmps;
+                speed_three_array[1] = 0.0f;
+                break;
+            case BLUESERIAL_MOVE_LEFT:
+                speed_three_array[0] = 0.0f;
+                speed_three_array[1] = g_target_speed_cmps;
+                break;
+            case BLUESERIAL_MOVE_RIGHT:
+                speed_three_array[0] = 0.0f;
+                speed_three_array[1] = -g_target_speed_cmps;
+                break;
+            default:
+                speed_three_array[0] = 0.0f;
+                speed_three_array[1] = 0.0f;
+                break;
+        }
+        speed_three_array[2] = yaw_hold.omega_cmd;
+        Kinematics_Inverse(speed_three_array, speed_encoder);
         motor_control(speed_encoder);
         return;
     }

@@ -68,6 +68,17 @@
 #define LIMIT_PWM_MIN              -6000
 #define LIMIT_PWM_MAX               6000
 
+/* Measured no-load start thresholds, using 85% as conservative feedforward. */
+#define MOTOR_DEADZONE_TARGET_MIN_COUNTS  2
+#define MOTOR_UL_DEADZONE_FWD             410
+#define MOTOR_UL_DEADZONE_REV             410
+#define MOTOR_UR_DEADZONE_FWD             490
+#define MOTOR_UR_DEADZONE_REV             510
+#define MOTOR_DL_DEADZONE_FWD             340
+#define MOTOR_DL_DEADZONE_REV             340
+#define MOTOR_DR_DEADZONE_FWD             600
+#define MOTOR_DR_DEADZONE_REV             680
+
 #define LIMIT_ENCODER_MIN          -500
 #define LIMIT_ENCODER_MAX           500
 #define ENCODER_FILTER_ALPHA       0.35f

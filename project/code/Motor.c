@@ -267,6 +267,23 @@ int Limit_int(int left_limit, int target_num, int right_limit)
 	}
 }
 //在这里修改
+static int motor_apply_deadzone_compensation(int pid_output,
+                                             int target_speed,
+                                             int deadzone_fwd,
+                                             int deadzone_rev)
+{
+    if (target_speed >= MOTOR_DEADZONE_TARGET_MIN_COUNTS)
+    {
+        pid_output += deadzone_fwd;
+    }
+    else if (target_speed <= -MOTOR_DEADZONE_TARGET_MIN_COUNTS)
+    {
+        pid_output -= deadzone_rev;
+    }
+
+    return Limit_int(LIMIT_PWM_MIN, pid_output, LIMIT_PWM_MAX);
+}
+
 void motor_control(int* input_speed_encoder)
 {
 	int motorUL_pwm_value = 0;
@@ -277,6 +294,10 @@ void motor_control(int* input_speed_encoder)
 	motorUR_pwm_value = Limit_int(LIMIT_PWM_MIN, PID_Add_Calculate(&URpid, up_R_all, input_speed_encoder[1]), LIMIT_PWM_MAX);   //上右
 	motorDL_pwm_value = Limit_int(LIMIT_PWM_MIN, PID_Add_Calculate(&DLpid, down_L_all, input_speed_encoder[2]), LIMIT_PWM_MAX);   //下左
 	motorDR_pwm_value = Limit_int(LIMIT_PWM_MIN, PID_Add_Calculate(&DRpid, down_R_all, input_speed_encoder[3]), LIMIT_PWM_MAX);   //下右
+	motorUL_pwm_value = motor_apply_deadzone_compensation(motorUL_pwm_value, input_speed_encoder[0], MOTOR_UL_DEADZONE_FWD, MOTOR_UL_DEADZONE_REV);
+	motorUR_pwm_value = motor_apply_deadzone_compensation(motorUR_pwm_value, input_speed_encoder[1], MOTOR_UR_DEADZONE_FWD, MOTOR_UR_DEADZONE_REV);
+	motorDL_pwm_value = motor_apply_deadzone_compensation(motorDL_pwm_value, input_speed_encoder[2], MOTOR_DL_DEADZONE_FWD, MOTOR_DL_DEADZONE_REV);
+	motorDR_pwm_value = motor_apply_deadzone_compensation(motorDR_pwm_value, input_speed_encoder[3], MOTOR_DR_DEADZONE_FWD, MOTOR_DR_DEADZONE_REV);
 	motor_pwm(motorUL_pwm_value, motorUR_pwm_value,motorDL_pwm_value,motorDR_pwm_value);
 }
 

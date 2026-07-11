@@ -58,7 +58,7 @@
 #define PATH_FOLLOW_ENABLE_LINE_GUIDE 0
 
 /* Yaw tuning, default values keep the old behavior. */
-#define PATH_YAW_FEEDFORWARD_MIN_DEGPS 0.0f
+#define PATH_YAW_FEEDFORWARD_MIN_DEGPS 8.0f
 #define PATH_YAW_FEEDFORWARD_DEADBAND_DEG PATH_FOLLOW_YAW_TOLERANCE_DEG
 #define PATH_YAW_TARGET_BASE_COMP_DEG 0.0f
 #define PATH_YAW_TARGET_ERROR_COMP_K 0.0f
@@ -109,7 +109,7 @@
  *
  * @note 该值直接沿用现有实现中的数值语义，只做宏抽取，不改变当前控制框架�?
  */
-#define PATH_FOLLOW_MAX_ANGULAR_SPEED_LIMIT 120.0f
+#define PATH_FOLLOW_MAX_ANGULAR_SPEED_LIMIT 300.0f
 #define PATH_PROFILE_DONE_MIN_SPEED_CMPS 0.0f//最小速度
 #define PATH_TARGET_SETTLE_TIME_MS 100U
 #define PATH_TARGET_SETTLE_CYCLES ((uint32)(((uint32)PATH_TARGET_SETTLE_TIME_MS * (uint32)PID_RATE + 999U) / 1000U))
@@ -138,11 +138,11 @@
 #define PATH_FOLLOW_PID_STAY_ALPHA 0.9f
 
 /** @brief 航向￿PID 比例系数￿*/
-#define PATH_FOLLOW_PID_YAW_KP 3.0f
+#define PATH_FOLLOW_PID_YAW_KP 6.0f
 /** @brief 航向￿PID 积分系数￿*/
 #define PATH_FOLLOW_PID_YAW_KI 0.0f
 /** @brief 航向￿PID 微分系数￿*/
-#define PATH_FOLLOW_PID_YAW_KD 5.8f
+#define PATH_FOLLOW_PID_YAW_KD 8.5f
 /** @brief 航向￿D 项滤波系数�?*/
 #define PATH_FOLLOW_PID_YAW_ALPHA 0.9f
 

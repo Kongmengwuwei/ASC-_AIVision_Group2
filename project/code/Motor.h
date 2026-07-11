@@ -58,8 +58,8 @@
 #define ENCODER_4_B                 (QTIMER1_ENCODER1_CH2_C1)
 
 //参数宏定义
-#define ENCODER_RESOLUTION      2300.0   //编码器分辨率, 轮子转一圈，编码器产生的脉冲数
-#define WHEEL_DIAMETER          0.058    //轮子直径,单位：米@
+#define ENCODER_RESOLUTION      2390.0   //编码器分辨率, 轮子转一圈，编码器产生的脉冲数
+#define WHEEL_DIAMETER          0.06239  //轮子直径,单位：米@
 #define D_X                     0.176     //底盘Y轴上两轮中心的间距
 #define D_Y                     0.20     //底盘X轴上两轮中心的间距
 #define PID_RATE                100       //PID调节PWM值的频率

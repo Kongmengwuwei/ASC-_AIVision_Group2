@@ -2237,7 +2237,7 @@ static void update_odometry(float yaw_deg)
     float w_dr = (float)down_R_all * count_to_mps;
 
     float vx_body = 0.25f * (w_ul + w_ur + w_dl + w_dr);
-    float vy_body = 0.25f * (-w_ul + w_ur + w_dl - w_dr);
+    float vy_body = 0.25f * (-w_ul + w_ur + w_dl - w_dr) * LATERAL_CORRECTION_FACTOR;
     float omega_body = (-w_ul + w_ur - w_dl + w_dr) / (2*D_X + 2*D_Y);
     // if (rx_plus_ry_cali != 0.0f)
     // {

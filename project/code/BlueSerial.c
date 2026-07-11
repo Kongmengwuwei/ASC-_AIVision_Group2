@@ -1369,7 +1369,8 @@ static void BlueSerial_GetActualBodySpeed(float *vx_cmps, float *vy_cmps, float 
     w_dr = (float)down_R_all * count_to_mps;
 
     *vx_cmps = 0.25f * (w_ul + w_ur + w_dl + w_dr) * 100.0f;
-    *vy_cmps = 0.25f * (-w_ul + w_ur + w_dl - w_dr) * 100.0f;
+    *vy_cmps = 0.25f * (-w_ul + w_ur + w_dl - w_dr) *
+               100.0f * LATERAL_CORRECTION_FACTOR;
     *omega_radps = (-w_ul + w_ur - w_dl + w_dr) / (2.0f * D_X + 2.0f * D_Y);
 }
 #endif

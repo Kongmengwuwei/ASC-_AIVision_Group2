@@ -312,7 +312,7 @@ void Kinematics_Init(void)
 void Kinematics_Inverse(float* input, int* output)
 {
 	float v_tx   = input[0]*0.01f;         //放大输入参数，输入为cm/s，转化为m/s
-	float v_ty   = input[1]*0.01f;         //放大输入参数，输入为cm/s，转化为m/s
+	float v_ty   = input[1]*0.01f / LATERAL_CORRECTION_FACTOR; //横移侧滑补偿后转为m/s
 	float omega = input[2];                //rad/s（弧度/秒）
 	static float v_w[4] = {0};
 	

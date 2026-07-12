@@ -155,6 +155,8 @@ void Algorithm_Test_PresetInput_Init(size_t preset_index)
     if (Map_preset_count == 0U)
     {
         s_preset_input_enabled = 0U;
+        uart_data_processing_enabled = true;
+        vision_data_processing_enabled = true;
         return;
     }
 
@@ -165,6 +167,8 @@ void Algorithm_Test_PresetInput_Init(size_t preset_index)
     if (!Map_Preset_BuildConfig(preset_index, &s_active_preset))
     {
         s_preset_input_enabled = 0U;
+        uart_data_processing_enabled = true;
+        vision_data_processing_enabled = true;
         return;
     }
     s_preset_input_enabled = 1U;
@@ -181,6 +185,19 @@ void Algorithm_Test_PresetInput_Init(size_t preset_index)
                            preset->car_yaw_deg);
     path_follow_hold_current_yaw();
     (void)Algorithm_Test_PresetInput_ProvideCarPoseFrame();
+}
+
+void Algorithm_Test_PresetInput_SetEnabled(uint8 enabled, size_t preset_index)
+{
+    if (enabled)
+    {
+        Algorithm_Test_PresetInput_Init(preset_index);
+        return;
+    }
+
+    s_preset_input_enabled = 0U;
+    uart_data_processing_enabled = true;
+    vision_data_processing_enabled = true;
 }
 
 uint8 Algorithm_Test_PresetInput_IsEnabled(void)

@@ -54,9 +54,9 @@ int main(void)
     BlueSerial_Printf("\r\nMOTOR\r\n");
   }
 #else
+  flash_init();
   Menu_Init();
   uart_blob_init();
-  flash_init();
   motor_init();
   encoder_init();
   imu963ra_init();
@@ -86,10 +86,6 @@ int main(void)
   interrupt_global_enable(0);
 
   control_init();
-
-#if ALGORITHM_TEST_ENABLE
-  Algorithm_Test_PresetInput_Init(Menu_Get_Preset_Map_Index());
-#endif
 #endif
 
   // Main loop.

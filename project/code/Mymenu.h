@@ -37,5 +37,6 @@ void Menu_Show(void);
 //菜单切换
 void Menu_Switch(void);
 uint8 Menu_Get_Preset_Map_Index(void);
+uint8 Menu_Get_Preset_Input_Enabled(void);
 
 #endif

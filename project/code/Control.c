@@ -238,9 +238,7 @@ static uint8 g_continuous_run_active = 0U;
 static uint8 g_continuous_level_index = 0U;
 static uint8 g_continuous_stop_stable_count = 0U;
 static uint8 g_level_start_localization_required = 0U;
-#if ALGORITHM_TEST_ENABLE
 static uint8 g_continuous_preset_base_index = 0U;
-#endif
 static uint8 g_return_heading_rotate_started = 0U;
 static float g_start_yaw_deg = 0.0f;
 static uint8 g_start_yaw_ready = 0U;
@@ -488,7 +486,6 @@ static void clear_car_request_wait(void)
 
 static void send_map_request_once(void)
 {
-#if ALGORITHM_TEST_ENABLE
     if (Algorithm_Test_PresetInput_IsEnabled())
     {
         (void)Algorithm_Test_PresetInput_ProvideMapFrame();
@@ -496,7 +493,6 @@ static void send_map_request_once(void)
         g_map_request_wait_loops = 0U;
         return;
     }
-#endif
     uart_send_map_request();
     g_map_request_waiting = 1U;
     g_map_request_wait_loops = 0U;
@@ -504,7 +500,6 @@ static void send_map_request_once(void)
 
 static void send_car_request_once(void)
 {
-#if ALGORITHM_TEST_ENABLE
     if (Algorithm_Test_PresetInput_IsEnabled())
     {
         (void)Algorithm_Test_PresetInput_ProvideCarPoseFrame();
@@ -512,7 +507,6 @@ static void send_car_request_once(void)
         g_car_request_wait_loops = 0U;
         return;
     }
-#endif
     uart_send_car_request();
     g_car_request_waiting = 1U;
     g_car_request_wait_loops = 0U;
@@ -774,7 +768,6 @@ static uint8 continuous_stop_ready(void)
     return (g_continuous_stop_stable_count >= CONTROL_CONTINUOUS_STOP_STABLE_LOOPS) ? 1U : 0U;
 }
 
-#if ALGORITHM_TEST_ENABLE
 static size_t continuous_preset_index_for_level(uint8 level_index)
 {
     size_t preset_index = (size_t)g_continuous_preset_base_index + (size_t)level_index;
@@ -785,7 +778,6 @@ static size_t continuous_preset_index_for_level(uint8 level_index)
     }
     return preset_index % Map_preset_count;
 }
-#endif
 
 static void reset_level_runtime_state_for_launch(void)
 {
@@ -841,12 +833,10 @@ static void start_current_level_launch(void)
     configure_flow_for_level(g_continuous_level_index);
     g_level_start_localization_required = 1U;
 
-#if ALGORITHM_TEST_ENABLE
     if (Algorithm_Test_PresetInput_IsEnabled())
     {
         Algorithm_Test_PresetInput_Init(continuous_preset_index_for_level(g_continuous_level_index));
     }
-#endif
 
     g_control_stage = CONTROL_STAGE_PRESTART_MOVE;
 }
@@ -866,9 +856,7 @@ static void start_continuous_launch(void)
 {
     g_continuous_run_active = 1U;
     g_continuous_level_index = 0U;
-#if ALGORITHM_TEST_ENABLE
     g_continuous_preset_base_index = Menu_Get_Preset_Map_Index();
-#endif
     start_current_level_launch();
 }
 
@@ -882,9 +870,7 @@ static void reset_control_runtime_state(void)
     g_continuous_run_active = 0U;
     g_continuous_level_index = 0U;
     g_level_start_localization_required = 0U;
-#if ALGORITHM_TEST_ENABLE
     g_continuous_preset_base_index = 0U;
-#endif
     g_start_yaw_deg = 0.0f;
     g_start_yaw_ready = 0U;
     reset_level_runtime_state_for_launch();
@@ -1365,7 +1351,6 @@ static uint8 identify_action_stub(const control_identify_target_t *target)
     /* ʶ�����ڼ䱣��ͣ��������ͼ�񶶶��� */
     control_hold_yaw_closed_loop();
 
-#if ALGORITHM_TEST_ENABLE
     if (Algorithm_Test_PresetInput_IsEnabled())
     {
         map_preset_plan_mode_t preset_mode = Algorithm_Test_PresetInput_GetPlanMode();
@@ -1409,7 +1394,6 @@ static uint8 identify_action_stub(const control_identify_target_t *target)
         reset_identify_recognition_wait();
         return 1U;
     }
-#endif
 
     if (!g_identify_recog_waiting)
     {
@@ -2200,14 +2184,12 @@ static uint8 settle_camera_before_localization_once(void)
         return 1U;
     }
 
-#if ALGORITHM_TEST_ENABLE
     if (Algorithm_Test_PresetInput_IsEnabled())
     {
         (void)Algorithm_Test_PresetInput_ProvideCarPoseFrame();
         g_localize_camera_settled = 1U;
         return 1U;
     }
-#endif
 
     /*
      * Let the camera FIFO drain over several control-loop passes instead of
@@ -3149,14 +3131,17 @@ static void handle_error_stage(void)
 void control_init(void)
 {
     reset_control_runtime_state();
+    Algorithm_Test_PresetInput_SetEnabled(Menu_Get_Preset_Input_Enabled(),
+                                          Menu_Get_Preset_Map_Index());
 }
 
 void control_restart(void)
 {
     reset_control_runtime_state();
-#if ALGORITHM_TEST_ENABLE
-    Algorithm_Test_PresetInput_Init(Menu_Get_Preset_Map_Index());
-#endif
+    if (Algorithm_Test_PresetInput_IsEnabled())
+    {
+        Algorithm_Test_PresetInput_Init(Menu_Get_Preset_Map_Index());
+    }
 }
 
 void control_set_start_enabled(uint8 enabled)
@@ -3209,16 +3194,11 @@ void control_process(void)
      *
      * 这样主状态机保留“流程骨架”，阶段细节放在命名函数里，后续调车时更容易定位问题。
      */
-#if ALGORITHM_TEST_ENABLE
     if (!Algorithm_Test_PresetInput_IsEnabled())
     {
         process_blob_data();
         process_vision_data();
     }
-#else
-    process_blob_data();
-    process_vision_data();
-#endif
 
     if (!g_control_start_enabled)
     {

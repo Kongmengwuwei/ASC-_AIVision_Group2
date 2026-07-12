@@ -1,6 +1,7 @@
 #include "Mymenu.h"
 #include "path.h"
 #include "BlueSerial.h"
+#include "Flash.h"
 
 #define MENU_SHOW_PERIOD_LOOPS 3U
 
@@ -17,15 +18,19 @@ static bool diagonal_path_switch = true;
 static bool followup_vision_switch = true;
 static bool identify_prerotate_switch = true;
 static bool continuous_levels_switch = false;
+static bool preset_input_switch = false;
 static bool show_map_switch = true;
-static bool state_show_switch = true;
+static bool show_data_switch = true;
 static uint8 preset_map_index = ALGORITHM_TEST_PRESET_INDEX;
 
 path_follow_status_t path_follow_status = {0};
 uint8 plan_mode = 0U;
 static uint8 menu_show_divider = MENU_SHOW_PERIOD_LOOPS;
-
-uint8 test1 = 0;
+static uint8 map_display_force_redraw = 1U;
+static bool last_show_map_switch = true;
+static bool last_show_data_switch = true;
+static bool menu_config_dirty = false;
+static bool menu_config_save_attempted = false;
 
 #if ALGORITHM_TEST_MANUAL_SIM_ENABLE
 char move_cmd = 'X'; // 移动命令缓存
@@ -35,6 +40,32 @@ uint8 move_ret = 0;  // 移动结果缓存
 static void Menu_Request_Redraw(void)
 {
     menu_show_divider = MENU_SHOW_PERIOD_LOOPS;
+}
+
+static void Menu_Mark_Config_Dirty(void)
+{
+    menu_config_dirty = true;
+    menu_config_save_attempted = false;
+}
+
+static void clear_display_rect(uint16 x0, uint16 y0, uint16 x1, uint16 y1)
+{
+    for (uint16 y = y0; y <= y1; y++)
+    {
+        ips200_draw_line(x0, y, x1, y, RGB565_BLACK);
+    }
+}
+
+static void clear_map_display(void)
+{
+    clear_display_rect(0U, 199U, 160U, 319U);
+    clear_display_rect(168U, 279U, 239U, 319U);
+}
+
+static void clear_data_display(void)
+{
+    clear_display_rect(0U, 144U, 239U, 191U);
+    clear_display_rect(168U, 199U, 239U, 231U);
 }
 
 static void draw_exec_path_diamond(uint16 center_x, uint16 center_y)
@@ -93,12 +124,83 @@ uint8 Menu_Get_Preset_Map_Index(void)
 
 static void Menu_Apply_Preset_Map_Index(void)
 {
-#if ALGORITHM_TEST_ENABLE
-    if (control_get_stage() == CONTROL_STAGE_IDLE)
+    if (control_get_stage() == CONTROL_STAGE_IDLE &&
+        Algorithm_Test_PresetInput_IsEnabled())
     {
         Algorithm_Test_PresetInput_Init(Menu_Get_Preset_Map_Index());
     }
-#endif
+}
+
+uint8 Menu_Get_Preset_Input_Enabled(void)
+{
+    return preset_input_switch ? 1U : 0U;
+}
+
+static void Menu_Fill_Flash_Config(menu_flash_config_t *config)
+{
+    if (config == NULL)
+    {
+        return;
+    }
+
+    config->start_dir = startup_depart_dir_value;
+    config->continuous_levels = continuous_levels_switch ? 1U : 0U;
+    config->diagonal_path = diagonal_path_switch ? 1U : 0U;
+    config->followup_vision = followup_vision_switch ? 1U : 0U;
+    config->identify_prerotate = identify_prerotate_switch ? 1U : 0U;
+    config->preset_input = preset_input_switch ? 1U : 0U;
+    config->preset_map_index = Menu_Get_Preset_Map_Index();
+    config->show_map = show_map_switch ? 1U : 0U;
+    config->show_data = show_data_switch ? 1U : 0U;
+}
+
+static void Menu_Load_Flash_Config(void)
+{
+    menu_flash_config_t config = {0};
+
+    if (!Data_load_from_flash(&config))
+    {
+        return;
+    }
+
+    startup_depart_dir_value = config.start_dir;
+    if (startup_depart_dir_value > CONTROL_PRESTART_DEPART_DIR_MAX)
+    {
+        startup_depart_dir_value = CONTROL_PRESTART_DEPART_DIR_MAX;
+    }
+    continuous_levels_switch = (config.continuous_levels != 0U);
+    diagonal_path_switch = (config.diagonal_path != 0U);
+    followup_vision_switch = (config.followup_vision != 0U);
+    identify_prerotate_switch = (config.identify_prerotate != 0U);
+    preset_input_switch = (config.preset_input != 0U);
+    preset_map_index = clamp_preset_map_index(config.preset_map_index);
+    show_map_switch = (config.show_map != 0U);
+    show_data_switch = (config.show_data != 0U);
+
+    control_set_prestart_depart_dir(startup_depart_dir_value);
+    control_set_continuous_levels_enabled(continuous_levels_switch ? 1U : 0U);
+    control_set_diagonal_path_enabled(diagonal_path_switch ? 1U : 0U);
+    control_set_followup_vision_localization_enabled(followup_vision_switch ? 1U : 0U);
+    control_set_identify_prerotate_enabled(identify_prerotate_switch ? 1U : 0U);
+}
+
+static void Menu_Save_Flash_Config_If_Ready(void)
+{
+    menu_flash_config_t config;
+
+    if (!menu_config_dirty || menu_config_save_attempted ||
+        pointer == NULL || pointer->selected ||
+        control_get_start_enabled())
+    {
+        return;
+    }
+
+    Menu_Fill_Flash_Config(&config);
+    menu_config_save_attempted = true;
+    if (Data_save_to_flash(&config))
+    {
+        menu_config_dirty = false;
+    }
 }
 
 // 创建菜单
@@ -114,15 +216,15 @@ void Menu_Create(void)
     Create_Menu_File_dynamic(Startup, "Reset", &startup_reset_switch, bool_Box);
     Create_Menu_File_dynamic(Startup, "Start_Dir", &startup_depart_dir_value, uint8_Box);
 
-    Create_Menu_File_dynamic(Data, "test", &test1, uint8_Box);
+    Create_Menu_File_dynamic(Data, "Preset", &preset_input_switch, bool_Box);
     Create_Menu_File_dynamic(Data, "Map", &preset_map_index, uint8_Box);
     Create_Menu_File_dynamic(Data, "ShowMap", &show_map_switch, bool_Box);
-    Create_Menu_File_dynamic(Data, "StateShow", &state_show_switch, bool_Box);
+    Create_Menu_File_dynamic(Data, "ShowData", &show_data_switch, bool_Box);
 
+    Create_Menu_File_dynamic(Setting, "ContRun", &continuous_levels_switch, bool_Box);
     Create_Menu_File_dynamic(Setting, "DiagPath", &diagonal_path_switch, bool_Box);
     Create_Menu_File_dynamic(Setting, "FolVision", &followup_vision_switch, bool_Box);
     Create_Menu_File_dynamic(Setting, "PreRotate", &identify_prerotate_switch, bool_Box);
-    Create_Menu_File_dynamic(Setting, "ContRun", &continuous_levels_switch, bool_Box);
 }
 
 static void Menu_Sync_Control_State(void)
@@ -134,6 +236,7 @@ static void Menu_Sync_Control_State(void)
     followup_vision_switch = (control_get_followup_vision_localization_enabled() != 0U);
     identify_prerotate_switch = (control_get_identify_prerotate_enabled() != 0U);
     continuous_levels_switch = (control_get_continuous_levels_enabled() != 0U);
+    preset_input_switch = (Algorithm_Test_PresetInput_IsEnabled() != 0U);
 }
 
 
@@ -166,6 +269,7 @@ static bool Menu_Handle_Control_Bool(Menu_Item *item, bool value)
     {
         diagonal_path_switch = value;
         control_set_diagonal_path_enabled(value ? 1U : 0U);
+        Menu_Mark_Config_Dirty();
         return true;
     }
 
@@ -173,6 +277,7 @@ static bool Menu_Handle_Control_Bool(Menu_Item *item, bool value)
     {
         followup_vision_switch = value;
         control_set_followup_vision_localization_enabled(value ? 1U : 0U);
+        Menu_Mark_Config_Dirty();
         return true;
     }
 
@@ -180,6 +285,7 @@ static bool Menu_Handle_Control_Bool(Menu_Item *item, bool value)
     {
         identify_prerotate_switch = value;
         control_set_identify_prerotate_enabled(value ? 1U : 0U);
+        Menu_Mark_Config_Dirty();
         return true;
     }
 
@@ -187,6 +293,35 @@ static bool Menu_Handle_Control_Bool(Menu_Item *item, bool value)
     {
         continuous_levels_switch = value;
         control_set_continuous_levels_enabled(value ? 1U : 0U);
+        Menu_Mark_Config_Dirty();
+        return true;
+    }
+
+    if (item->data == &preset_input_switch)
+    {
+        if (control_get_stage() != CONTROL_STAGE_IDLE)
+        {
+            control_set_start_enabled(0U);
+            startup_start_switch = false;
+        }
+        Algorithm_Test_PresetInput_SetEnabled(value ? 1U : 0U,
+                                              Menu_Get_Preset_Map_Index());
+        preset_input_switch = (Algorithm_Test_PresetInput_IsEnabled() != 0U);
+        Menu_Mark_Config_Dirty();
+        return true;
+    }
+
+    if (item->data == &show_map_switch)
+    {
+        show_map_switch = value;
+        Menu_Mark_Config_Dirty();
+        return true;
+    }
+
+    if (item->data == &show_data_switch)
+    {
+        show_data_switch = value;
+        Menu_Mark_Config_Dirty();
         return true;
     }
 
@@ -216,6 +351,7 @@ static bool Menu_Handle_Control_Uint8(Menu_Item *item, int16 delta)
 
         startup_depart_dir_value = (uint8)value;
         control_set_prestart_depart_dir(startup_depart_dir_value);
+        Menu_Mark_Config_Dirty();
         return true;
     }
 
@@ -233,6 +369,7 @@ static bool Menu_Handle_Control_Uint8(Menu_Item *item, int16 delta)
 
         preset_map_index = clamp_preset_map_index((uint8)value);
         Menu_Apply_Preset_Map_Index();
+        Menu_Mark_Config_Dirty();
         return true;
     }
 
@@ -269,6 +406,8 @@ void Menu_Init(void)
     if (Root.sons != 0)
         pointer = Root.First_Son; // 指针默认指向第一个节�?
     All_Folder_Menu_Init(&Root);  // 初始化所有文件夹菜单
+
+    Menu_Load_Flash_Config();
 
     ips200_draw_line(0, 129, 239, 129, RGB565_WHITE);
 }
@@ -502,7 +641,8 @@ void Show_Map(void)
         id_sig = (id_sig ^ (uint32)(uint16)display_object_id(targets[i].id)) * 16777619u;
     }
 
-    uint8 force_redraw = (inited == 0U ||
+    uint8 force_redraw = (map_display_force_redraw != 0U ||
+                          inited == 0U ||
                           path_sig != last_path_sig ||
                           exec_path_sig != last_exec_path_sig ||
                           id_sig != last_id_sig) ? 1U : 0U;
@@ -738,6 +878,7 @@ void Show_Map(void)
     last_path_sig = path_sig;
     last_exec_path_sig = exec_path_sig;
     last_id_sig = id_sig;
+    map_display_force_redraw = 0U;
     // 显示地图数据
     // ips200_show_string(start_x + (map_cols + 1) * cell_size, start_y, "BOX:");
     // ips200_show_uint(start_x + (map_cols + 1) * cell_size + FONT_W * 5, start_y, Boxes_count, 2);
@@ -844,6 +985,7 @@ void Menu_Show(void)
     Menu_Item *s = r->First_Son;
 
     Menu_Sync_Control_State();
+    Menu_Save_Flash_Config_If_Ready();
 
     if (menu_show_divider < MENU_SHOW_PERIOD_LOOPS)
     {
@@ -862,11 +1004,28 @@ void Menu_Show(void)
     Show_Setup();
     Show_Number();
 
+    if (!show_map_switch && last_show_map_switch)
+    {
+        clear_map_display();
+    }
+    else if (show_map_switch && !last_show_map_switch)
+    {
+        map_display_force_redraw = 1U;
+    }
+
+    if (!show_data_switch && last_show_data_switch)
+    {
+        clear_data_display();
+    }
+
+    last_show_map_switch = show_map_switch;
+    last_show_data_switch = show_data_switch;
+
     if (show_map_switch)
     {
         Show_Map();
     }
-    if (state_show_switch)
+    if (show_data_switch)
     {
         State_Show();
     }
@@ -1006,6 +1165,7 @@ void Key_Deselect(void) // 取消选中
     Menu_Request_Redraw();
     if (pointer->kind != MENU_Folder)
         pointer->selected = 0;
+    Menu_Save_Flash_Config_If_Ready();
 }
 void Key_SetupCtrl_Plus(void) // 步进值增�?
 {

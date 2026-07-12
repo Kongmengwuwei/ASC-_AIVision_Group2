@@ -3,10 +3,6 @@
 
 #include "Map_Path_Data.h"
 
-#ifndef ALGORITHM_TEST_ENABLE
-#define ALGORITHM_TEST_ENABLE 0
-#endif
-
 #ifndef ALGORITHM_TEST_PRESET_INDEX 
 #define ALGORITHM_TEST_PRESET_INDEX 0U
 #endif
@@ -71,6 +67,7 @@ int Test_Path_Step(char *out_cmd);
 int Test_Path_ALL(void);
 
 void Algorithm_Test_PresetInput_Init(size_t preset_index);
+void Algorithm_Test_PresetInput_SetEnabled(uint8 enabled, size_t preset_index);
 uint8 Algorithm_Test_PresetInput_IsEnabled(void);
 const MapPresetConfig *Algorithm_Test_PresetInput_GetActive(void);
 map_preset_plan_mode_t Algorithm_Test_PresetInput_GetPlanMode(void);

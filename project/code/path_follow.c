@@ -31,11 +31,14 @@
 #define PF_POSITION_MAX_IOUT_CMPS        200.0f
 #define PF_POSITION_MAX_OUT_CMPS         200.0f
 #define PF_POSITION_FILTER_ALPHA         0.9f
+#define PF_LINE_GUIDE_MAX_CMPS           12.0f
+#define PF_LINE_GUIDE_DEADBAND_M         0.0025f
 
 #define PF_YAW_KP                        6.0f
 #define PF_YAW_KI                        0.0f
 #define PF_YAW_KD                        8.5f
 #define PF_YAW_FILTER_ALPHA              0.9f
+#define PF_YAW_FEEDFORWARD_MIN_DEGPS     8.0f
 
 typedef struct
 {
@@ -170,11 +173,13 @@ float prestart_move_backward_m = 0.00f;
 float path_corner_commit_lateral_gate_min_m = PF_POSITION_TOLERANCE_M;
 float path_hold_trim_release_distance = PF_POSITION_LOOP_RELEASE_M;
 
-/* Other legacy compensation variables remain link-compatible but unused. */
-float path_line_guide_kp = 0.0f;
+/* Runtime-tunable line guidance and yaw low-speed feedforward. */
+float path_line_guide_kp = 4.0f;
 float path_line_guide_min_cmps = 0.0f;
-float path_yaw_feedforward_min_degps = 0.0f;
-float path_yaw_feedforward_deadband_deg = 0.0f;
+float path_yaw_feedforward_min_degps = PF_YAW_FEEDFORWARD_MIN_DEGPS;
+float path_yaw_feedforward_deadband_deg = PF_YAW_TOLERANCE_DEG;
+
+/* Other legacy compensation variables remain link-compatible but unused. */
 float path_yaw_target_base_comp_deg = 0.0f;
 float path_yaw_target_error_comp_k = 0.0f;
 float path_rotate_center_offset_x_cm = 0.0f;
@@ -927,6 +932,84 @@ static void pf_apply_position_loop(const pf_geometry_t *geometry,
                                       geometry->target_y_m * 100.0f);
 }
 
+static uint8 pf_apply_line_guidance(const pf_geometry_t *geometry,
+                                    float ref_speed_cmps,
+                                    float *vx_world_cmps,
+                                    float *vy_world_cmps)
+{
+    float start_x_m;
+    float start_y_m;
+    float segment_dx_m;
+    float segment_dy_m;
+    float segment_length_m;
+    float tangent_x;
+    float tangent_y;
+    float normal_x;
+    float normal_y;
+    float relative_x_m;
+    float relative_y_m;
+    float normal_error_m;
+    float effective_error_m;
+    float trim_cmps;
+
+    if (geometry == NULL || vx_world_cmps == NULL || vy_world_cmps == NULL ||
+        g_pf.path == NULL || g_pf.target_idx == 0U ||
+        g_pf.target_idx >= g_pf.steps ||
+        (path_line_guide_kp <= 0.0f && path_line_guide_min_cmps <= 0.0f))
+    {
+        return 0U;
+    }
+
+    pf_point_to_world(g_pf.path[g_pf.target_idx - 1U],
+                      g_pf.path_grid_m,
+                      &start_x_m,
+                      &start_y_m);
+    segment_dx_m = geometry->target_x_m - start_x_m;
+    segment_dy_m = geometry->target_y_m - start_y_m;
+    segment_length_m = sqrtf(segment_dx_m * segment_dx_m +
+                             segment_dy_m * segment_dy_m);
+    if (segment_length_m <= 1.0e-6f)
+    {
+        return 0U;
+    }
+
+    tangent_x = segment_dx_m / segment_length_m;
+    tangent_y = segment_dy_m / segment_length_m;
+    normal_x = -tangent_y;
+    normal_y = tangent_x;
+    relative_x_m = g_pf.pose.x_m - start_x_m;
+    relative_y_m = g_pf.pose.y_m - start_y_m;
+    normal_error_m = relative_x_m * normal_x + relative_y_m * normal_y;
+
+    if (fabsf(normal_error_m) <= PF_LINE_GUIDE_DEADBAND_M)
+    {
+        effective_error_m = 0.0f;
+    }
+    else if (normal_error_m > 0.0f)
+    {
+        effective_error_m = normal_error_m - PF_LINE_GUIDE_DEADBAND_M;
+    }
+    else
+    {
+        effective_error_m = normal_error_m + PF_LINE_GUIDE_DEADBAND_M;
+    }
+
+    trim_cmps = path_line_guide_kp * fabsf(effective_error_m * 100.0f);
+    if (trim_cmps > 0.0f)
+    {
+        trim_cmps += fmaxf(path_line_guide_min_cmps, 0.0f);
+    }
+    trim_cmps = fminf(trim_cmps, PF_LINE_GUIDE_MAX_CMPS);
+    if (effective_error_m > 0.0f)
+    {
+        trim_cmps = -trim_cmps;
+    }
+
+    *vx_world_cmps = ref_speed_cmps * tangent_x + trim_cmps * normal_x;
+    *vy_world_cmps = ref_speed_cmps * tangent_y + trim_cmps * normal_y;
+    return 1U;
+}
+
 static void pf_limit_world_speed(float *vx_world_cmps, float *vy_world_cmps)
 {
     float max_speed_cmps;
@@ -961,6 +1044,7 @@ static float pf_yaw_command_radps(float yaw_deg)
 {
     float error_deg = pf_yaw_error_deg(yaw_deg, g_pf.target_yaw_deg);
     float output_degps;
+    float feedforward_deadband_deg;
 
     if (fabsf(error_deg) <= g_pf.yaw_tolerance_deg)
     {
@@ -968,6 +1052,16 @@ static float pf_yaw_command_radps(float yaw_deg)
     }
 
     output_degps = (float)PID_Location_Calculate(&pid_yaw, 0.0f, error_deg);
+    feedforward_deadband_deg = fmaxf(path_yaw_feedforward_deadband_deg,
+                                    g_pf.yaw_tolerance_deg);
+    if (path_yaw_feedforward_min_degps > 0.0f &&
+        fabsf(error_deg) > feedforward_deadband_deg &&
+        fabsf(output_degps) < path_yaw_feedforward_min_degps)
+    {
+        output_degps = (error_deg > 0.0f) ?
+                       path_yaw_feedforward_min_degps :
+                       -path_yaw_feedforward_min_degps;
+    }
     output_degps = pf_clamp(output_degps,
                             -g_pf.max_angular_speed_degps,
                             g_pf.max_angular_speed_degps);
@@ -1553,6 +1647,13 @@ void path_follow_update(float yaw_deg, path_follow_output_t *out)
     pf_plan_scurve_speed(&geometry, &speed_plan);
     vx_world_cmps = speed_plan.ref_speed_cmps * geometry.dir_x;
     vy_world_cmps = speed_plan.ref_speed_cmps * geometry.dir_y;
+    if (pf_position_loop_blend(geometry.distance_m) <= 0.0f)
+    {
+        (void)pf_apply_line_guidance(&geometry,
+                                     speed_plan.ref_speed_cmps,
+                                     &vx_world_cmps,
+                                     &vy_world_cmps);
+    }
     pf_apply_position_loop(&geometry, &vx_world_cmps, &vy_world_cmps);
     pf_limit_world_speed(&vx_world_cmps, &vy_world_cmps);
 

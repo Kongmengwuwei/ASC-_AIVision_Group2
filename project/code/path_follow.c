@@ -1098,6 +1098,7 @@ static void pf_update_odometry(float yaw_deg)
     vy_body_mps = 0.25f * (-wheel_ul_mps + wheel_ur_mps +
                            wheel_dl_mps - wheel_dr_mps) *
                   LATERAL_CORRECTION_FACTOR;
+    vx_body_mps += LATERAL_TO_LONGITUDINAL_COUPLING_FACTOR * vy_body_mps;
 
     yaw_rad = yaw_deg * ((float)M_PI / 180.0f);
     cos_yaw = cosf(yaw_rad);

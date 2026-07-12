@@ -176,8 +176,6 @@ float path_hold_trim_release_distance = PF_POSITION_LOOP_RELEASE_M;
 /* Runtime-tunable line guidance and yaw low-speed feedforward. */
 float path_line_guide_kp = 0.0f;
 float path_line_guide_min_cmps = 0.0f;
-float path_line_guide_max_cmps = PF_LINE_GUIDE_MAX_CMPS;
-float path_line_guide_deadband_m = PF_LINE_GUIDE_DEADBAND_M;
 float path_yaw_feedforward_min_degps = PF_YAW_FEEDFORWARD_MIN_DEGPS;
 float path_yaw_feedforward_deadband_deg = PF_YAW_TOLERANCE_DEG;
 
@@ -991,17 +989,17 @@ static uint8 pf_apply_line_guidance(const pf_geometry_t *geometry,
     relative_y_m = g_pf.pose.y_m - start_y_m;
     normal_error_m = relative_x_m * normal_x + relative_y_m * normal_y;
 
-    if (fabsf(normal_error_m) <= path_line_guide_deadband_m)
+    if (fabsf(normal_error_m) <= PF_LINE_GUIDE_DEADBAND_M)
     {
         effective_error_m = 0.0f;
     }
     else if (normal_error_m > 0.0f)
     {
-        effective_error_m = normal_error_m - path_line_guide_deadband_m;
+        effective_error_m = normal_error_m - PF_LINE_GUIDE_DEADBAND_M;
     }
     else
     {
-        effective_error_m = normal_error_m + path_line_guide_deadband_m;
+        effective_error_m = normal_error_m + PF_LINE_GUIDE_DEADBAND_M;
     }
 
     trim_cmps = path_line_guide_kp * fabsf(effective_error_m * 100.0f);
@@ -1009,7 +1007,7 @@ static uint8 pf_apply_line_guidance(const pf_geometry_t *geometry,
     {
         trim_cmps += fmaxf(path_line_guide_min_cmps, 0.0f);
     }
-    trim_cmps = fminf(trim_cmps, fmaxf(path_line_guide_max_cmps, 0.0f));
+    trim_cmps = fminf(trim_cmps, PF_LINE_GUIDE_MAX_CMPS);
     if (effective_error_m > 0.0f)
     {
         trim_cmps = -trim_cmps;
@@ -1107,8 +1105,8 @@ static void pf_update_odometry(float yaw_deg)
                            wheel_dl_mps + wheel_dr_mps);
     vy_body_mps = 0.25f * (-wheel_ul_mps + wheel_ur_mps +
                            wheel_dl_mps - wheel_dr_mps) *
-                  lateral_correction_factor_runtime;
-    vx_body_mps += lateral_to_longitudinal_coupling_runtime * vy_body_mps;
+                  LATERAL_CORRECTION_FACTOR;
+    vx_body_mps += LATERAL_TO_LONGITUDINAL_COUPLING_FACTOR * vy_body_mps;
 
     yaw_rad = yaw_deg * ((float)M_PI / 180.0f);
     cos_yaw = cosf(yaw_rad);
@@ -1496,14 +1494,6 @@ void path_follow_set_external_position(float x_m, float y_m, uint8 valid)
     (void)x_m;
     (void)y_m;
     (void)valid;
-}
-
-void path_follow_set_pulses_per_meter(float pulses_per_meter)
-{
-    if (pulses_per_meter > 0.0f && isfinite(pulses_per_meter))
-    {
-        g_pf.pulses_per_meter = pulses_per_meter;
-    }
 }
 
 void path_follow_set_path(const Position *path, size_t steps)

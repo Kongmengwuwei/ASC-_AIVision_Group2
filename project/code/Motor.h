@@ -99,10 +99,6 @@ extern int16 encoder_data_quaddec3;
 extern int16 encoder_data_quaddec4;
 extern double pulse_per_meter;
 extern float rx_plus_ry_cali;
-extern double angular_correction_factor;
-extern double linear_correction_factor;
-extern float lateral_correction_factor_runtime;
-extern float lateral_to_longitudinal_coupling_runtime;
 
 extern float speed_three_array[3];
 extern int speed_encoder[4];
@@ -117,7 +113,6 @@ void motor_control(int* input_speed_encoder);
 //void encoder_read_filtered(int *enc1, int *enc2, int *enc3, int *enc4);
 int16 Lowpass(int16 X_last,int16 X_new);
 void Kinematics_Init(void);
-void Kinematics_UpdateCalibration(void);
 void Kinematics_Inverse(float* input, int* output);
 
 #endif

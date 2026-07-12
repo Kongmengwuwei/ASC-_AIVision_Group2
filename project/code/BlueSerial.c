@@ -1,20 +1,20 @@
 /*
- * UART8 蓝牙串口调参和遥控模块�?
+ * UART8 蓝牙串口调参和遥控模块。
  *
- * 兼容的蓝牙帧格式�?
- *   [slider,name,value]  滑条调参，例�?[slider,speed,40]
- *   [button_name]        按钮命令，例�?[forward]、[start]、[stop]
+ * 兼容的蓝牙帧格式：
+ *   [slider,name,value]  滑条调参，例如 [slider,speed,40]
+ *   [button_name]        按钮命令，例如 [forward]、[start]、[stop]
  *   [button,name]        兼容部分小程序发送的 button 前缀格式
  *
  * 直线遥控的使用顺序：
  *   [forward] / [backward] / [left] / [right] 选择下一次运动方向；
- *   [slider,speed,value] �?[slider,position,value] 设置速度和距离；
- *   [start]（也兼容 run/apply/move）提交一次按目标位置停止�?S 曲线相对位移动作�?
- *   [speed]（也兼容 cruise/speed.start）按所选方向和目标速度持续匀速行驶，直到 stop�?
+ *   [slider,speed,value] 和 [slider,position,value] 设置速度和距离；
+ *   [start]（也兼容 run/apply/move）提交一次按目标位置停止的 S 曲线相对位移动作；
+ *   [speed]（也兼容 cruise/speed.start）按所选方向和目标速度持续匀速行驶，直到 stop。
  *
- * 中断适配原则�?
- *   UART8 ISR 只负责收字节、拼帧、入队；字符串解析、printf、路径控制、电机状态切�?
- *   都在主循环或 10ms 控制任务里完成，避免串口中断阻塞 PIT 控制中断�?
+ * 中断适配原则：
+ *   UART8 ISR 只负责收字节、拼帧、入队；字符串解析、printf、路径控制、电机状态切换
+ *   都在主循环或 10ms 控制任务里完成，避免串口中断阻塞 PIT 控制中断。
  */
 
 #include "zf_common_headfile.h"
@@ -40,9 +40,9 @@
 #define BLUESERIAL_TX_PIN                       UART8_TX_D16
 #define BLUESERIAL_RX_PIN                       UART8_RX_D17
 #define BLUESERIAL_IRQN                         LPUART8_IRQn
-/* UART8 优先级低�?PIT 控制中断，蓝牙突发数据不会抢占底盘闭环�?*/
+/* UART8 优先级低于 PIT 控制中断，蓝牙突发数据不会抢占底盘闭环。 */
 #define BLUESERIAL_IRQ_PRIORITY                 8U
-/* 默认关闭 50ms 周期遥测，避免蓝牙持续刷屏；命令 ACK/ERR 回包仍然保留�?*/
+/* 默认关闭 50ms 周期遥测，避免蓝牙持续刷屏；命令 ACK/ERR 回包仍然保留。 */
 #define BLUESERIAL_ENABLE_PERIODIC_TELEMETRY    0U
 #define BLUESERIAL_PATH_REPORT_PERIOD_TICKS     5U
 #define BLUESERIAL_RX_FRAME_LEN                 80U
@@ -53,18 +53,6 @@
 #define BLUESERIAL_MAX_YAW_KI                   10.0f
 #define BLUESERIAL_MAX_YAW_KD                   50.0f
 #define BLUESERIAL_MAX_YAW_FF_DEGPS             120.0f
-#define BLUESERIAL_MIN_KINEMATIC_SCALE           0.50f
-#define BLUESERIAL_MAX_KINEMATIC_SCALE           1.50f
-#define BLUESERIAL_MAX_COUPLING_ABS              0.20f
-#define BLUESERIAL_MAX_POSITION_KP               20.0f
-#define BLUESERIAL_MAX_POSITION_KI               10.0f
-#define BLUESERIAL_MAX_POSITION_KD               50.0f
-#define BLUESERIAL_MAX_GUIDE_KP                  20.0f
-#define BLUESERIAL_MAX_GUIDE_SPEED_CMPS          50.0f
-#define BLUESERIAL_MAX_GUIDE_DEADBAND_CM         10.0f
-#define BLUESERIAL_MAX_SCURVE_ACCEL_MPS2         5.0f
-#define BLUESERIAL_MAX_SCURVE_JERK_MPS3          30.0f
-#define BLUESERIAL_MAX_START_DELAY_S               8.0f
 #define BLUESERIAL_RELATIVE_GRID_M              0.01f
 #define BLUESERIAL_RELATIVE_CENTER_CELL         127
 #define BLUESERIAL_RELATIVE_MAX_OFFSET_CELL     120
@@ -76,10 +64,10 @@
 
 typedef enum
 {
-    BLUESERIAL_MODE_STOP = 0,      /* 蓝牙未接管底盘输出�?*/
-    BLUESERIAL_MODE_RAW_PWM,       /* 蓝牙直接下发四轮 PWM，用于电机方�?接线检查�?*/
-    BLUESERIAL_MODE_PATH_MOTION,   /* 目标位置模式：由 path_follow 完成 S 曲线启停�?*/
-    BLUESERIAL_MODE_SPEED_CRUISE   /* 目标速度模式：按所选方向持续输出速度，不创建位置目标�?*/
+    BLUESERIAL_MODE_STOP = 0,      /* 蓝牙未接管底盘输出。 */
+    BLUESERIAL_MODE_RAW_PWM,       /* 蓝牙直接下发四轮 PWM，用于电机方向/接线检查。 */
+    BLUESERIAL_MODE_PATH_MOTION,   /* 目标位置模式：由 path_follow 完成 S 曲线启停。 */
+    BLUESERIAL_MODE_SPEED_CRUISE   /* 目标速度模式：按所选方向持续输出速度，不创建位置目标。 */
 } blueserial_control_mode_t;
 
 typedef enum
@@ -102,7 +90,7 @@ static volatile uint8 g_last_rx_frame_len = 0U;
 
 static volatile uint8 g_blueserial_path_report_pending = 0U;
 static volatile blueserial_control_mode_t g_control_mode = BLUESERIAL_MODE_STOP;
-/* 逻辑轮序�?Motor.c �?motor_pwm() 参数一致：UL, UR, DL, DR�?*/
+/* 逻辑轮序与 Motor.c 的 motor_pwm() 参数一致：UL, UR, DL, DR。 */
 static volatile int g_raw_pwm[4] = {0, 0, 0, 0};
 static float g_target_speed_cmps = 40.0f;
 static float g_target_position_cm = 50.0f;
@@ -120,12 +108,6 @@ static uint8 g_point_target_valid = 0U;
 static float g_point_target_x_m = 0.0f;
 static float g_point_target_y_m = 0.0f;
 static Position g_blueserial_point_target_path[3];
-/* One-shot delayed motion lets the PC release Bluetooth/Wi-Fi coexistence before the car moves. */
-static float g_next_start_delay_s = 0.0f;
-static volatile uint16 g_delayed_command_ticks = 0U;
-static volatile uint8 g_delayed_command_ready = 0U;
-static uint8 g_delayed_command_executing = 0U;
-static char g_delayed_command[BLUESERIAL_RX_FRAME_LEN] = "";
 
 static float BlueSerial_ClampFloat(float value, float min_value, float max_value)
 {
@@ -178,26 +160,17 @@ static void BlueSerial_ZeroSpeedCommand(void)
 }
 
 /*
- * 蓝牙侧保持“逻辑轮序”不变。新旧电机板的物理通道重映射、方向反向和编码器修�?
- * 全部集中�?Motor.c 内部处理，避免蓝牙模块再维护一套容易跑偏的映射关系�?
+ * 蓝牙侧保持“逻辑轮序”不变。新旧电机板的物理通道重映射、方向反向和编码器修正
+ * 全部集中在 Motor.c 内部处理，避免蓝牙模块再维护一套容易跑偏的映射关系。
  */
 static void BlueSerial_ApplyRawPwm(void)
 {
     motor_pwm(g_raw_pwm[0], g_raw_pwm[1], g_raw_pwm[2], g_raw_pwm[3]);
 }
 
-static void BlueSerial_CancelDelayedCommandLocked(void)
-{
-    g_delayed_command_ticks = 0U;
-    g_delayed_command_ready = 0U;
-    g_next_start_delay_s = 0.0f;
-    g_delayed_command[0] = '\0';
-}
-
-/* 调用者需要在关中断状态下进入，避�?10ms 控制中断读到半更新状态�?*/
+/* 调用者需要在关中断状态下进入，避免 10ms 控制中断读到半更新状态。 */
 static void BlueSerial_StopControlLocked(void)
 {
-    BlueSerial_CancelDelayedCommandLocked();
     g_control_mode = BLUESERIAL_MODE_STOP;
     g_turn_quarters_remaining = 0U;
     g_yaw_hold_enabled = 0U;
@@ -229,8 +202,7 @@ uint8 BlueSerial_IsControlActive(void)
     uint8 active;
 
     primask = interrupt_global_disable();
-    active = (g_control_mode != BLUESERIAL_MODE_STOP || g_yaw_hold_enabled ||
-              g_delayed_command_ticks != 0U || g_delayed_command_ready) ? 1U : 0U;
+    active = (g_control_mode != BLUESERIAL_MODE_STOP || g_yaw_hold_enabled) ? 1U : 0U;
     interrupt_global_enable(primask);
     return active;
 }
@@ -249,7 +221,7 @@ static void BlueSerial_ToggleYawHold(void)
     }
     else
     {
-        /* 原地航向保持：记录当�?yaw，让 path_follow 只输出角速度，不生成平移速度�?*/
+        /* 原地航向保持：记录当前 yaw，让 path_follow 只输出角速度，不生成平移速度。 */
         hold_yaw_deg = eulerAngle.yaw;
         path_follow_set_path(NULL, 0U);
         g_control_mode = BLUESERIAL_MODE_STOP;
@@ -306,9 +278,9 @@ static void BlueSerial_EnterPathMode(void)
 }
 
 /*
- * 目标速度模式不创建路径，也不调用 S 曲线规划�?
- * 四轮速度 PID 会把实际车速拉�?g_target_speed_cmps；启动时锁定此前选择的方向，path_follow 在这�?
- * 仅提供航向保持角速度，避免直行过程中逐渐偏航�?
+ * 目标速度模式不创建路径，也不调用 S 曲线规划。
+ * 四轮速度 PID 会把实际车速拉到 g_target_speed_cmps；启动时锁定此前选择的方向，path_follow 在这里
+ * 仅提供航向保持角速度，避免直行过程中逐渐偏航。
  */
 static uint8 BlueSerial_StartSpeedCruise(void)
 {
@@ -380,8 +352,8 @@ static uint8 BlueSerial_ConvertVisionPoseToMeter(const CarPose *pose, float *x_m
     }
 
     /*
-     * 视觉端的车姿坐标�?path_follow 的执行坐标不是同一套轴定义�?
-     * 这里复用 path.h 里的补偿开关，保持蓝牙上报值和控制状态机里的视觉定位值一致�?
+     * 视觉端的车姿坐标和 path_follow 的执行坐标不是同一套轴定义。
+     * 这里复用 path.h 里的补偿开关，保持蓝牙上报值和控制状态机里的视觉定位值一致。
      */
 #if PATH_COORD_TRANSPOSE_COMPENSATE
     row_f = pose->x;
@@ -444,8 +416,8 @@ static void BlueSerial_PrintPositionReport(uint8 vision_valid)
 static void BlueSerial_StartPositionRequest(void)
 {
     /*
-     * 先消�?UART1 已到达的旧数据，再记录帧计数并发送新请求�?
-     * 后续只认 car_frame_count 增量，避免把上一次缓存的视觉定位误当成新结果�?
+     * 先消费 UART1 已到达的旧数据，再记录帧计数并发送新请求。
+     * 后续只认 car_frame_count 增量，避免把上一次缓存的视觉定位误当成新结果。
      */
     process_blob_data();
     g_position_request_start_frame = car_frame_count;
@@ -676,8 +648,8 @@ static void BlueSerial_StartCenteredRelativeMove(float delta_x_m, float delta_y_
     }
 
     /*
-     * Position.row/col �?uint8，不能保存负格点。蓝牙相对移动使用虚拟中心格�?
-     * 作为临时起点，避�?backward/right �?0 附近出发时把 -1 写成 255�?
+     * Position.row/col 是 uint8，不能保存负格点。蓝牙相对移动使用虚拟中心格点
+     * 作为临时起点，避免 backward/right 从 0 附近出发时把 -1 写成 255。
      */
     if (max_delta_m > ((float)BLUESERIAL_RELATIVE_MAX_OFFSET_CELL * grid_m))
     {
@@ -756,7 +728,7 @@ static uint8 BlueSerial_StartConfiguredMove(void)
 
     /*
      * 手机端的前后左右按“当前车头朝向”解释：
-     * forward/backward 沿车头方向，left/right 沿车体横向方向�?
+     * forward/backward 沿车头方向，left/right 沿车体横向方向。
      */
     switch (direction)
     {
@@ -851,8 +823,8 @@ static void BlueSerial_ServiceMotionCompletion(void)
     }
 
     /*
-     * 一次路径动作完成后释放蓝牙路径接管；如果之前打开�?yawhold�?
-     * 则继续保持航向，否则停止电机输出�?
+     * 一次路径动作完成后释放蓝牙路径接管；如果之前打开过 yawhold，
+     * 则继续保持航向，否则停止电机输出。
      */
     g_control_mode = BLUESERIAL_MODE_STOP;
     car_go_flag = g_yaw_hold_enabled ? 1U : 0U;
@@ -1073,8 +1045,8 @@ void BlueSerial_RxIrqHandler(void)
     uint8 ch = 0U;
 
     /*
-     * LPUART 可能一次中断里已经积累多个字节，这里尽量读�?RX FIFO�?
-     * 注意：仍然只做轻量收帧状态机，不�?ISR �?sscanf/printf/控制电机�?
+     * LPUART 可能一次中断里已经积累多个字节，这里尽量读空 RX FIFO。
+     * 注意：仍然只做轻量收帧状态机，不在 ISR 里 sscanf/printf/控制电机。
      */
     while (uart_query_byte(BLUESERIAL_UART, &ch))
     {
@@ -1186,7 +1158,6 @@ static uint8 BlueSerial_SetSlider(const char *name, float value)
     int wheel_index;
     int pwm_value;
     float applied_value;
-    uint8 band_index;
 
     wheel_index = BlueSerial_GetLogicalWheelIndex(name);
     if (wheel_index >= 0)
@@ -1218,136 +1189,6 @@ static uint8 BlueSerial_SetSlider(const char *name, float value)
         g_target_position_cm = applied_value;
         interrupt_global_enable(primask);
         BlueSerial_Printf("OK next_position=%.1fcm\r\n", applied_value);
-        return 1U;
-    }
-    if (strcmp(name, "start.delay") == 0)
-    {
-        applied_value = BlueSerial_ClampFloat(value, 0.0f, BLUESERIAL_MAX_START_DELAY_S);
-        primask = interrupt_global_disable();
-        g_next_start_delay_s = applied_value;
-        interrupt_global_enable(primask);
-        BlueSerial_Printf("OK start.delay=%.2fs one_shot\r\n", applied_value);
-        return 1U;
-    }
-    if (strcmp(name, "kin.linear") == 0)
-    {
-        applied_value = BlueSerial_ClampFloat(value, BLUESERIAL_MIN_KINEMATIC_SCALE, BLUESERIAL_MAX_KINEMATIC_SCALE);
-        primask = interrupt_global_disable();
-        linear_correction_factor = applied_value;
-        Kinematics_UpdateCalibration();
-        path_follow_set_pulses_per_meter((float)pulse_per_meter);
-        interrupt_global_enable(primask);
-        BlueSerial_Printf("OK kin.linear=%.5f ppm=%.2f\r\n", applied_value, (float)pulse_per_meter);
-        return 1U;
-    }
-    if (strcmp(name, "kin.angular") == 0)
-    {
-        applied_value = BlueSerial_ClampFloat(value, BLUESERIAL_MIN_KINEMATIC_SCALE, BLUESERIAL_MAX_KINEMATIC_SCALE);
-        primask = interrupt_global_disable();
-        angular_correction_factor = applied_value;
-        Kinematics_UpdateCalibration();
-        interrupt_global_enable(primask);
-        BlueSerial_Printf("OK kin.angular=%.5f radius=%.5f\r\n", applied_value, rx_plus_ry_cali);
-        return 1U;
-    }
-    if (strcmp(name, "kin.lateral") == 0)
-    {
-        applied_value = BlueSerial_ClampFloat(value, BLUESERIAL_MIN_KINEMATIC_SCALE, BLUESERIAL_MAX_KINEMATIC_SCALE);
-        primask = interrupt_global_disable();
-        lateral_correction_factor_runtime = applied_value;
-        interrupt_global_enable(primask);
-        BlueSerial_Printf("OK kin.lateral=%.5f\r\n", applied_value);
-        return 1U;
-    }
-    if (strcmp(name, "kin.coupling") == 0)
-    {
-        applied_value = BlueSerial_ClampFloat(value, -BLUESERIAL_MAX_COUPLING_ABS, BLUESERIAL_MAX_COUPLING_ABS);
-        primask = interrupt_global_disable();
-        lateral_to_longitudinal_coupling_runtime = applied_value;
-        interrupt_global_enable(primask);
-        BlueSerial_Printf("OK kin.coupling=%.5f\r\n", applied_value);
-        return 1U;
-    }
-    if (strcmp(name, "pos.kp") == 0)
-    {
-        applied_value = BlueSerial_ClampFloat(value, 0.0f, BLUESERIAL_MAX_POSITION_KP);
-        primask = interrupt_global_disable();
-        pid_stay.fKp = applied_value;
-        PID_Clear(&pid_stay);
-        interrupt_global_enable(primask);
-        BlueSerial_Printf("OK pos.kp=%.4f\r\n", applied_value);
-        return 1U;
-    }
-    if (strcmp(name, "pos.ki") == 0)
-    {
-        applied_value = BlueSerial_ClampFloat(value, 0.0f, BLUESERIAL_MAX_POSITION_KI);
-        primask = interrupt_global_disable();
-        pid_stay.fKi = applied_value;
-        PID_Clear(&pid_stay);
-        interrupt_global_enable(primask);
-        BlueSerial_Printf("OK pos.ki=%.4f\r\n", applied_value);
-        return 1U;
-    }
-    if (strcmp(name, "pos.kd") == 0)
-    {
-        applied_value = BlueSerial_ClampFloat(value, 0.0f, BLUESERIAL_MAX_POSITION_KD);
-        primask = interrupt_global_disable();
-        pid_stay.fKd = applied_value;
-        PID_Clear(&pid_stay);
-        interrupt_global_enable(primask);
-        BlueSerial_Printf("OK pos.kd=%.4f\r\n", applied_value);
-        return 1U;
-    }
-    if (strcmp(name, "guide.kp") == 0)
-    {
-        applied_value = BlueSerial_ClampFloat(value, 0.0f, BLUESERIAL_MAX_GUIDE_KP);
-        path_line_guide_kp = applied_value;
-        BlueSerial_Printf("OK guide.kp=%.4f\r\n", applied_value);
-        return 1U;
-    }
-    if (strcmp(name, "guide.min") == 0)
-    {
-        applied_value = BlueSerial_ClampFloat(value, 0.0f, BLUESERIAL_MAX_GUIDE_SPEED_CMPS);
-        path_line_guide_min_cmps = applied_value;
-        BlueSerial_Printf("OK guide.min=%.3fcmps\r\n", applied_value);
-        return 1U;
-    }
-    if (strcmp(name, "guide.max") == 0)
-    {
-        applied_value = BlueSerial_ClampFloat(value, 0.0f, BLUESERIAL_MAX_GUIDE_SPEED_CMPS);
-        path_line_guide_max_cmps = applied_value;
-        BlueSerial_Printf("OK guide.max=%.3fcmps\r\n", applied_value);
-        return 1U;
-    }
-    if (strcmp(name, "guide.deadband") == 0)
-    {
-        applied_value = BlueSerial_ClampFloat(value, 0.0f, BLUESERIAL_MAX_GUIDE_DEADBAND_CM);
-        path_line_guide_deadband_m = applied_value * 0.01f;
-        BlueSerial_Printf("OK guide.deadband=%.3fcm\r\n", applied_value);
-        return 1U;
-    }
-    if (strcmp(name, "scurve.amax") == 0)
-    {
-        applied_value = BlueSerial_ClampFloat(value, 0.05f, BLUESERIAL_MAX_SCURVE_ACCEL_MPS2);
-        primask = interrupt_global_disable();
-        for (band_index = 0U; band_index < PATH_FOLLOW_SCURVE_BAND_COUNT; ++band_index)
-        {
-            g_path_follow_scurve_band_cfg[band_index].amax_mps2 = applied_value;
-        }
-        interrupt_global_enable(primask);
-        BlueSerial_Printf("OK scurve.amax=%.4fmps2\r\n", applied_value);
-        return 1U;
-    }
-    if (strcmp(name, "scurve.jmax") == 0)
-    {
-        applied_value = BlueSerial_ClampFloat(value, 0.1f, BLUESERIAL_MAX_SCURVE_JERK_MPS3);
-        primask = interrupt_global_disable();
-        for (band_index = 0U; band_index < PATH_FOLLOW_SCURVE_BAND_COUNT; ++band_index)
-        {
-            g_path_follow_scurve_band_cfg[band_index].jmax_mps3 = applied_value;
-        }
-        interrupt_global_enable(primask);
-        BlueSerial_Printf("OK scurve.jmax=%.4fmps3\r\n", applied_value);
         return 1U;
     }
     if (strcmp(name, "yaw.kp") == 0)
@@ -1451,38 +1292,8 @@ static void BlueSerial_PrintStatus(void)
     }
 }
 
-static uint8 BlueSerial_IsDelayEligibleCommand(const char *command)
-{
-    return (strcmp(command, "start") == 0 || strcmp(command, "run") == 0 ||
-            strcmp(command, "apply") == 0 || strcmp(command, "move") == 0 ||
-            strcmp(command, "turn90") == 0 || strcmp(command, "turn360") == 0 ||
-            strcmp(command, "turn90r") == 0 || strcmp(command, "turn360r") == 0) ? 1U : 0U;
-}
-
 static uint8 BlueSerial_RunButton(const char *command)
 {
-    if (!g_delayed_command_executing && g_next_start_delay_s > 0.0f &&
-        BlueSerial_IsDelayEligibleCommand(command))
-    {
-        uint32 primask;
-        uint16 delay_ticks = (uint16)(g_next_start_delay_s * 100.0f + 0.5f);
-        if (delay_ticks == 0U)
-        {
-            delay_ticks = 1U;
-        }
-        primask = interrupt_global_disable();
-        BlueSerial_StopControlLocked();
-        (void)strncpy(g_delayed_command, command, sizeof(g_delayed_command) - 1U);
-        g_delayed_command[sizeof(g_delayed_command) - 1U] = '\0';
-        g_delayed_command_ticks = delay_ticks;
-        g_delayed_command_ready = 0U;
-        g_next_start_delay_s = 0.0f;
-        interrupt_global_enable(primask);
-        motor_pwm(0, 0, 0, 0);
-        BlueSerial_Printf("ARMED %s delay=%.2fs\r\n", command, (float)delay_ticks * 0.01f);
-        return 1U;
-    }
-
     if (strcmp(command, "forward") == 0 || strcmp(command, "go ahead") == 0)
     {
         BlueSerial_SelectMoveDirection(BLUESERIAL_MOVE_FORWARD);
@@ -1647,8 +1458,6 @@ void BlueSerial_CommandTask(void)
 {
     char command[BLUESERIAL_RX_FRAME_LEN];
     uint8 read_index;
-    uint8 run_delayed = 0U;
-    uint32 primask;
 
     while (g_rx_queue_read != g_rx_queue_write)
     {
@@ -1657,24 +1466,6 @@ void BlueSerial_CommandTask(void)
         command[sizeof(command) - 1U] = '\0';
         g_rx_queue_read = (uint8)((read_index + 1U) % BLUESERIAL_RX_QUEUE_LEN);
         BlueSerial_ParseCommand(command);
-    }
-
-    primask = interrupt_global_disable();
-    if (g_delayed_command_ready)
-    {
-        (void)strncpy(command, g_delayed_command, sizeof(command) - 1U);
-        command[sizeof(command) - 1U] = '\0';
-        g_delayed_command_ready = 0U;
-        g_delayed_command[0] = '\0';
-        g_delayed_command_executing = 1U;
-        run_delayed = 1U;
-    }
-    interrupt_global_enable(primask);
-
-    if (run_delayed)
-    {
-        (void)BlueSerial_RunButton(command);
-        g_delayed_command_executing = 0U;
     }
 }
 
@@ -1685,8 +1476,8 @@ void BlueSerial_ControlTick10ms(void)
         path_follow_output_t unused_output = {0};
 
         /*
-         * 原始 PWM 调试时也更新一次里程计。这样退�?PWM 后再用路径遥控，
-         * path_follow 内部位姿不会长时间停留在旧值�?
+         * 原始 PWM 调试时也更新一次里程计。这样退出 PWM 后再用路径遥控，
+         * path_follow 内部位姿不会长时间停留在旧值。
          */
         path_follow_update(eulerAngle.yaw, &unused_output);
         BlueSerial_ApplyRawPwm();
@@ -1746,14 +1537,6 @@ void BlueSerial_ControlTick10ms(void)
 
 void BlueSerial_PathDebugTick10ms(void)
 {
-    if (g_delayed_command_ticks > 0U)
-    {
-        --g_delayed_command_ticks;
-        if (g_delayed_command_ticks == 0U)
-        {
-            g_delayed_command_ready = 1U;
-        }
-    }
 #if BLUESERIAL_ENABLE_PERIODIC_TELEMETRY
     static uint8 tick_div = 0U;
 
@@ -1795,16 +1578,16 @@ static void BlueSerial_GetActualBodySpeed(float *vx_cmps, float *vy_cmps, float 
     w_dr = (float)down_R_all * count_to_mps;
 
     *vy_cmps = 0.25f * (-w_ul + w_ur + w_dl - w_dr) *
-               100.0f * lateral_correction_factor_runtime;
+               100.0f * LATERAL_CORRECTION_FACTOR;
     *vx_cmps = 0.25f * (w_ul + w_ur + w_dl + w_dr) * 100.0f +
-               lateral_to_longitudinal_coupling_runtime * (*vy_cmps);
+               LATERAL_TO_LONGITUDINAL_COUPLING_FACTOR * (*vy_cmps);
     *omega_radps = (-w_ul + w_ur - w_dl + w_dr) / (2.0f * D_X + 2.0f * D_Y);
 }
 #endif
 
 void BlueSerial_PathDebugReport(void)
 {
-    /* 即使关闭周期遥测，也必须持续服务命令队列和动作完成检测�?*/
+    /* 即使关闭周期遥测，也必须持续服务命令队列和动作完成检测。 */
     BlueSerial_CommandTask();
     BlueSerial_ServiceMotionCompletion();
     BlueSerial_ServicePositionRequest();
@@ -1844,11 +1627,11 @@ void BlueSerial_PathDebugReport(void)
 
     /*
      * 50ms 遥测帧：
-     * TSPD/ASPD 为目�?实际标量速度，单�?cm/s�?
-     * TVEL/AVEL 为目�?实际车体三轴速度，线速度 cm/s，角速度 rad/s�?
-     * TPOS/APOS 为目�?实际位置，单�?m�?
-     * TYAW/AYAW 为目�?实际航向，单�?deg�?
-     * ENC_ULURDLDR 为最�?10ms 的四轮编码器计数�?
+     * TSPD/ASPD 为目标/实际标量速度，单位 cm/s；
+     * TVEL/AVEL 为目标/实际车体三轴速度，线速度 cm/s，角速度 rad/s；
+     * TPOS/APOS 为目标/实际位置，单位 m；
+     * TYAW/AYAW 为目标/实际航向，单位 deg；
+     * ENC_ULURDLDR 为最近 10ms 的四轮编码器计数。
      */
     BlueSerial_Printf("TSPD %.1f ASPD %.1f TVEL %.1f %.1f %.3f AVEL %.1f %.1f %.3f "
                       "TPOS %.3f %.3f APOS %.3f %.3f TYAW %.2f AYAW %.2f "

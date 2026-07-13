@@ -151,6 +151,7 @@ static Position g_single_target_path[2];
 static Position g_offset_path[3];
 static Position g_pose_move_path[3];
 static uint8 g_stationary_yaw_hold_enabled;
+static float g_yaw_sensor_to_world_offset_deg;
 static volatile uint8 g_bluetooth_report_pending;
 
 /* Public compatibility objects declared by path_follow.h. */
@@ -1444,6 +1445,7 @@ void path_follow_init(float grid_size_m, float pulses_per_meter)
     g_pf.target_yaw_deg = 0.0f;
 
     g_stationary_yaw_hold_enabled = 0U;
+    g_yaw_sensor_to_world_offset_deg = 0.0f;
     g_bluetooth_report_pending = 0U;
     path_follow_reset_scurve_band_defaults();
     pf_clear_pause_config();
@@ -1477,6 +1479,21 @@ void path_follow_init(float grid_size_m, float pulses_per_meter)
     pf_init_pid_object(&pid_world_x, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f);
     pf_init_pid_object(&pid_world_y, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f);
     pf_init_pid_object(&pid_accel_yaw, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f);
+}
+
+float path_follow_map_sensor_yaw(float sensor_yaw_deg)
+{
+    return pf_wrap_deg(sensor_yaw_deg + g_yaw_sensor_to_world_offset_deg);
+}
+
+void path_follow_set_yaw_reference(float world_yaw_deg, float sensor_yaw_deg)
+{
+    g_yaw_sensor_to_world_offset_deg = pf_wrap_deg(world_yaw_deg - sensor_yaw_deg);
+}
+
+void path_follow_clear_yaw_reference(void)
+{
+    g_yaw_sensor_to_world_offset_deg = 0.0f;
 }
 
 void path_follow_reset_pose(float x_m, float y_m, float yaw_deg)
@@ -1603,6 +1620,7 @@ void path_follow_update(float yaw_deg, path_follow_output_t *out)
     float vy_world_cmps;
     float yaw_error_deg;
 
+    yaw_deg = path_follow_map_sensor_yaw(yaw_deg);
     pf_clear_output(out);
     pf_update_odometry(yaw_deg);
 
@@ -1690,6 +1708,7 @@ void path_follow_update(float yaw_deg, path_follow_output_t *out)
 
 void path_follow_update_yaw_hold(float yaw_deg, path_follow_output_t *out)
 {
+    yaw_deg = path_follow_map_sensor_yaw(yaw_deg);
     pf_clear_output(out);
     pf_update_odometry(yaw_deg);
     pf_output_yaw_hold(yaw_deg, out);

@@ -1,20 +1,20 @@
 /*
- * UART8 蓝牙串口调参和遥控模块。
+ * UART8 蓝牙串口调参和遥控模块�?
  *
- * 兼容的蓝牙帧格式：
- *   [slider,name,value]  滑条调参，例如 [slider,speed,40]
- *   [button_name]        按钮命令，例如 [forward]、[start]、[stop]
+ * 兼容的蓝牙帧格式�?
+ *   [slider,name,value]  滑条调参，例�?[slider,speed,40]
+ *   [button_name]        按钮命令，例�?[forward]、[start]、[stop]
  *   [button,name]        兼容部分小程序发送的 button 前缀格式
  *
  * 直线遥控的使用顺序：
  *   [forward] / [backward] / [left] / [right] 选择下一次运动方向；
- *   [slider,speed,value] 和 [slider,position,value] 设置速度和距离；
- *   [start]（也兼容 run/apply/move）提交一次按目标位置停止的 S 曲线相对位移动作；
- *   [speed]（也兼容 cruise/speed.start）按所选方向和目标速度持续匀速行驶，直到 stop。
+ *   [slider,speed,value] �?[slider,position,value] 设置速度和距离；
+ *   [start]（也兼容 run/apply/move）提交一次按目标位置停止�?S 曲线相对位移动作�?
+ *   [speed]（也兼容 cruise/speed.start）按所选方向和目标速度持续匀速行驶，直到 stop�?
  *
- * 中断适配原则：
- *   UART8 ISR 只负责收字节、拼帧、入队；字符串解析、printf、路径控制、电机状态切换
- *   都在主循环或 10ms 控制任务里完成，避免串口中断阻塞 PIT 控制中断。
+ * 中断适配原则�?
+ *   UART8 ISR 只负责收字节、拼帧、入队；字符串解析、printf、路径控制、电机状态切�?
+ *   都在主循环或 10ms 控制任务里完成，避免串口中断阻塞 PIT 控制中断�?
  */
 
 #include "zf_common_headfile.h"
@@ -40,9 +40,9 @@
 #define BLUESERIAL_TX_PIN                       UART8_TX_D16
 #define BLUESERIAL_RX_PIN                       UART8_RX_D17
 #define BLUESERIAL_IRQN                         LPUART8_IRQn
-/* UART8 优先级低于 PIT 控制中断，蓝牙突发数据不会抢占底盘闭环。 */
+/* UART8 优先级低�?PIT 控制中断，蓝牙突发数据不会抢占底盘闭环�?*/
 #define BLUESERIAL_IRQ_PRIORITY                 8U
-/* 默认关闭 50ms 周期遥测，避免蓝牙持续刷屏；命令 ACK/ERR 回包仍然保留。 */
+/* 默认关闭 50ms 周期遥测，避免蓝牙持续刷屏；命令 ACK/ERR 回包仍然保留�?*/
 #define BLUESERIAL_ENABLE_PERIODIC_TELEMETRY    0U
 #define BLUESERIAL_PATH_REPORT_PERIOD_TICKS     5U
 #define BLUESERIAL_RX_FRAME_LEN                 80U
@@ -64,10 +64,10 @@
 
 typedef enum
 {
-    BLUESERIAL_MODE_STOP = 0,      /* 蓝牙未接管底盘输出。 */
-    BLUESERIAL_MODE_RAW_PWM,       /* 蓝牙直接下发四轮 PWM，用于电机方向/接线检查。 */
-    BLUESERIAL_MODE_PATH_MOTION,   /* 目标位置模式：由 path_follow 完成 S 曲线启停。 */
-    BLUESERIAL_MODE_SPEED_CRUISE   /* 目标速度模式：按所选方向持续输出速度，不创建位置目标。 */
+    BLUESERIAL_MODE_STOP = 0,      /* 蓝牙未接管底盘输出�?*/
+    BLUESERIAL_MODE_RAW_PWM,       /* 蓝牙直接下发四轮 PWM，用于电机方�?接线检查�?*/
+    BLUESERIAL_MODE_PATH_MOTION,   /* 目标位置模式：由 path_follow 完成 S 曲线启停�?*/
+    BLUESERIAL_MODE_SPEED_CRUISE   /* 目标速度模式：按所选方向持续输出速度，不创建位置目标�?*/
 } blueserial_control_mode_t;
 
 typedef enum
@@ -90,7 +90,7 @@ static volatile uint8 g_last_rx_frame_len = 0U;
 
 static volatile uint8 g_blueserial_path_report_pending = 0U;
 static volatile blueserial_control_mode_t g_control_mode = BLUESERIAL_MODE_STOP;
-/* 逻辑轮序与 Motor.c 的 motor_pwm() 参数一致：UL, UR, DL, DR。 */
+/* 逻辑轮序�?Motor.c �?motor_pwm() 参数一致：UL, UR, DL, DR�?*/
 static volatile int g_raw_pwm[4] = {0, 0, 0, 0};
 static float g_target_speed_cmps = 40.0f;
 static float g_target_position_cm = 50.0f;
@@ -160,15 +160,15 @@ static void BlueSerial_ZeroSpeedCommand(void)
 }
 
 /*
- * 蓝牙侧保持“逻辑轮序”不变。新旧电机板的物理通道重映射、方向反向和编码器修正
- * 全部集中在 Motor.c 内部处理，避免蓝牙模块再维护一套容易跑偏的映射关系。
+ * 蓝牙侧保持“逻辑轮序”不变。新旧电机板的物理通道重映射、方向反向和编码器修�?
+ * 全部集中�?Motor.c 内部处理，避免蓝牙模块再维护一套容易跑偏的映射关系�?
  */
 static void BlueSerial_ApplyRawPwm(void)
 {
     motor_pwm(g_raw_pwm[0], g_raw_pwm[1], g_raw_pwm[2], g_raw_pwm[3]);
 }
 
-/* 调用者需要在关中断状态下进入，避免 10ms 控制中断读到半更新状态。 */
+/* 调用者需要在关中断状态下进入，避�?10ms 控制中断读到半更新状态�?*/
 static void BlueSerial_StopControlLocked(void)
 {
     g_control_mode = BLUESERIAL_MODE_STOP;
@@ -176,6 +176,7 @@ static void BlueSerial_StopControlLocked(void)
     g_yaw_hold_enabled = 0U;
     path_follow_set_path(NULL, 0U);
     path_follow_set_stationary_yaw_hold_enabled(0U);
+    path_follow_clear_yaw_reference();
     car_go_flag = 0U;
     car_stop_flag = 0U;
     BlueSerial_ZeroSpeedCommand();
@@ -221,8 +222,8 @@ static void BlueSerial_ToggleYawHold(void)
     }
     else
     {
-        /* 原地航向保持：记录当前 yaw，让 path_follow 只输出角速度，不生成平移速度。 */
-        hold_yaw_deg = eulerAngle.yaw;
+        /* 原地航向保持：记录当�?yaw，让 path_follow 只输出角速度，不生成平移速度�?*/
+        hold_yaw_deg = path_follow_map_sensor_yaw(eulerAngle.yaw);
         path_follow_set_path(NULL, 0U);
         g_control_mode = BLUESERIAL_MODE_STOP;
         g_turn_quarters_remaining = 0U;
@@ -278,9 +279,9 @@ static void BlueSerial_EnterPathMode(void)
 }
 
 /*
- * 目标速度模式不创建路径，也不调用 S 曲线规划。
- * 四轮速度 PID 会把实际车速拉到 g_target_speed_cmps；启动时锁定此前选择的方向，path_follow 在这里
- * 仅提供航向保持角速度，避免直行过程中逐渐偏航。
+ * 目标速度模式不创建路径，也不调用 S 曲线规划�?
+ * 四轮速度 PID 会把实际车速拉�?g_target_speed_cmps；启动时锁定此前选择的方向，path_follow 在这�?
+ * 仅提供航向保持角速度，避免直行过程中逐渐偏航�?
  */
 static uint8 BlueSerial_StartSpeedCruise(void)
 {
@@ -293,7 +294,7 @@ static uint8 BlueSerial_StartSpeedCruise(void)
     }
 
     primask = interrupt_global_disable();
-    hold_yaw_deg = eulerAngle.yaw;
+    hold_yaw_deg = path_follow_map_sensor_yaw(eulerAngle.yaw);
     g_cruise_move_direction = g_next_move_direction;
     g_turn_quarters_remaining = 0U;
     g_yaw_hold_enabled = 0U;
@@ -352,8 +353,8 @@ static uint8 BlueSerial_ConvertVisionPoseToMeter(const CarPose *pose, float *x_m
     }
 
     /*
-     * 视觉端的车姿坐标和 path_follow 的执行坐标不是同一套轴定义。
-     * 这里复用 path.h 里的补偿开关，保持蓝牙上报值和控制状态机里的视觉定位值一致。
+     * 视觉端的车姿坐标�?path_follow 的执行坐标不是同一套轴定义�?
+     * 这里复用 path.h 里的补偿开关，保持蓝牙上报值和控制状态机里的视觉定位值一致�?
      */
 #if PATH_COORD_TRANSPOSE_COMPENSATE
     row_f = pose->x;
@@ -369,6 +370,48 @@ static uint8 BlueSerial_ConvertVisionPoseToMeter(const CarPose *pose, float *x_m
 
     *x_m = row_f * GRID_SIZE_M;
     *y_m = col_f * GRID_SIZE_M;
+    return 1U;
+}
+
+static uint8 BlueSerial_InitializeExternalPose(float grid_x, float grid_y, float grid_yaw_deg)
+{
+    uint32 primask;
+    CarPose external_pose = {0};
+    float x_m = 0.0f;
+    float y_m = 0.0f;
+
+    if (!isfinite(grid_x) || !isfinite(grid_y) || !isfinite(grid_yaw_deg) ||
+        grid_x < 0.0f || grid_x > (float)(MAP_COLS - 1U) ||
+        grid_y < 0.0f || grid_y > (float)(MAP_ROWS - 1U))
+    {
+        BlueSerial_Printf("ERR initpose_range x=0..%u y=0..%u\r\n",
+                          (unsigned int)(MAP_COLS - 1U),
+                          (unsigned int)(MAP_ROWS - 1U));
+        return 0U;
+    }
+
+    external_pose.x = grid_x;
+    external_pose.y = grid_y;
+    external_pose.yaw = grid_yaw_deg;
+    if (!BlueSerial_ConvertVisionPoseToMeter(&external_pose, &x_m, &y_m))
+    {
+        BlueSerial_Printf("ERR initpose_convert\r\n");
+        return 0U;
+    }
+
+    primask = interrupt_global_disable();
+    BlueSerial_StopControlLocked();
+    path_follow_set_yaw_reference(grid_yaw_deg, eulerAngle.yaw);
+    path_follow_reset_pose(x_m, y_m, grid_yaw_deg);
+    path_follow_set_target_yaw(grid_yaw_deg);
+    path_follow_set_stationary_yaw_hold_enabled(1U);
+    g_yaw_hold_enabled = 1U;
+    car_go_flag = 1U;
+    car_stop_flag = 0U;
+    interrupt_global_enable(primask);
+
+    BlueSerial_Printf("OK initpose grid=%.4f,%.4f,%.3f odom_m=%.4f,%.4f imu=%.3f\r\n",
+                      grid_x, grid_y, grid_yaw_deg, x_m, y_m, eulerAngle.yaw);
     return 1U;
 }
 
@@ -416,8 +459,8 @@ static void BlueSerial_PrintPositionReport(uint8 vision_valid)
 static void BlueSerial_StartPositionRequest(void)
 {
     /*
-     * 先消费 UART1 已到达的旧数据，再记录帧计数并发送新请求。
-     * 后续只认 car_frame_count 增量，避免把上一次缓存的视觉定位误当成新结果。
+     * 先消�?UART1 已到达的旧数据，再记录帧计数并发送新请求�?
+     * 后续只认 car_frame_count 增量，避免把上一次缓存的视觉定位误当成新结果�?
      */
     process_blob_data();
     g_position_request_start_frame = car_frame_count;
@@ -648,8 +691,8 @@ static void BlueSerial_StartCenteredRelativeMove(float delta_x_m, float delta_y_
     }
 
     /*
-     * Position.row/col 是 uint8，不能保存负格点。蓝牙相对移动使用虚拟中心格点
-     * 作为临时起点，避免 backward/right 从 0 附近出发时把 -1 写成 255。
+     * Position.row/col �?uint8，不能保存负格点。蓝牙相对移动使用虚拟中心格�?
+     * 作为临时起点，避�?backward/right �?0 附近出发时把 -1 写成 255�?
      */
     if (max_delta_m > ((float)BLUESERIAL_RELATIVE_MAX_OFFSET_CELL * grid_m))
     {
@@ -728,7 +771,7 @@ static uint8 BlueSerial_StartConfiguredMove(void)
 
     /*
      * 手机端的前后左右按“当前车头朝向”解释：
-     * forward/backward 沿车头方向，left/right 沿车体横向方向。
+     * forward/backward 沿车头方向，left/right 沿车体横向方向�?
      */
     switch (direction)
     {
@@ -823,8 +866,8 @@ static void BlueSerial_ServiceMotionCompletion(void)
     }
 
     /*
-     * 一次路径动作完成后释放蓝牙路径接管；如果之前打开过 yawhold，
-     * 则继续保持航向，否则停止电机输出。
+     * 一次路径动作完成后释放蓝牙路径接管；如果之前打开�?yawhold�?
+     * 则继续保持航向，否则停止电机输出�?
      */
     g_control_mode = BLUESERIAL_MODE_STOP;
     car_go_flag = g_yaw_hold_enabled ? 1U : 0U;
@@ -1045,8 +1088,8 @@ void BlueSerial_RxIrqHandler(void)
     uint8 ch = 0U;
 
     /*
-     * LPUART 可能一次中断里已经积累多个字节，这里尽量读空 RX FIFO。
-     * 注意：仍然只做轻量收帧状态机，不在 ISR 里 sscanf/printf/控制电机。
+     * LPUART 可能一次中断里已经积累多个字节，这里尽量读�?RX FIFO�?
+     * 注意：仍然只做轻量收帧状态机，不�?ISR �?sscanf/printf/控制电机�?
      */
     while (uart_query_byte(BLUESERIAL_UART, &ch))
     {
@@ -1406,8 +1449,16 @@ static void BlueSerial_ParseCommand(char *raw_command)
     char *trimmed_name;
     float value;
     float target_x_m;
+    float target_y_m;
     char extra;
     char *command = BlueSerial_TrimCommand(raw_command);
+
+    if (sscanf(command, "initpose,%f,%f,%f %c",
+               &value, &target_x_m, &target_y_m, &extra) == 3)
+    {
+        (void)BlueSerial_InitializeExternalPose(value, target_x_m, target_y_m);
+        return;
+    }
 
     if (sscanf(command, "%15[^,],%31[^,],%f", type, name, &value) == 3)
     {
@@ -1476,8 +1527,8 @@ void BlueSerial_ControlTick10ms(void)
         path_follow_output_t unused_output = {0};
 
         /*
-         * 原始 PWM 调试时也更新一次里程计。这样退出 PWM 后再用路径遥控，
-         * path_follow 内部位姿不会长时间停留在旧值。
+         * 原始 PWM 调试时也更新一次里程计。这样退�?PWM 后再用路径遥控，
+         * path_follow 内部位姿不会长时间停留在旧值�?
          */
         path_follow_update(eulerAngle.yaw, &unused_output);
         BlueSerial_ApplyRawPwm();
@@ -1587,7 +1638,7 @@ static void BlueSerial_GetActualBodySpeed(float *vx_cmps, float *vy_cmps, float 
 
 void BlueSerial_PathDebugReport(void)
 {
-    /* 即使关闭周期遥测，也必须持续服务命令队列和动作完成检测。 */
+    /* 即使关闭周期遥测，也必须持续服务命令队列和动作完成检测�?*/
     BlueSerial_CommandTask();
     BlueSerial_ServiceMotionCompletion();
     BlueSerial_ServicePositionRequest();
@@ -1627,11 +1678,11 @@ void BlueSerial_PathDebugReport(void)
 
     /*
      * 50ms 遥测帧：
-     * TSPD/ASPD 为目标/实际标量速度，单位 cm/s；
-     * TVEL/AVEL 为目标/实际车体三轴速度，线速度 cm/s，角速度 rad/s；
-     * TPOS/APOS 为目标/实际位置，单位 m；
-     * TYAW/AYAW 为目标/实际航向，单位 deg；
-     * ENC_ULURDLDR 为最近 10ms 的四轮编码器计数。
+     * TSPD/ASPD 为目�?实际标量速度，单�?cm/s�?
+     * TVEL/AVEL 为目�?实际车体三轴速度，线速度 cm/s，角速度 rad/s�?
+     * TPOS/APOS 为目�?实际位置，单�?m�?
+     * TYAW/AYAW 为目�?实际航向，单�?deg�?
+     * ENC_ULURDLDR 为最�?10ms 的四轮编码器计数�?
      */
     BlueSerial_Printf("TSPD %.1f ASPD %.1f TVEL %.1f %.1f %.3f AVEL %.1f %.1f %.3f "
                       "TPOS %.3f %.3f APOS %.3f %.3f TYAW %.2f AYAW %.2f "

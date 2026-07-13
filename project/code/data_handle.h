@@ -37,12 +37,15 @@
 
 /* 协议标记：帧头/帧尾 */
 #define MAP_FRAME_HEADER_TAG "$MAP"
+/* Legacy receive-only frame tag. New camera position frames are Cx,y lines. */
 #define CAR_FRAME_HEADER_TAG "$CAR"
 #define FRAME_TAIL_TAG "$END"
 
-/* 请求命令：向上位机主动请求地图或车姿 */
-#define UART_CMD_MAP "MAP"
-#define UART_CMD_CAR "CAR"
+/* Map/position camera line commands (CRLF terminated). */
+#define UART_CMD_MAP "START\r\n"
+#define UART_CMD_CAR "CARPOS\r\n"
+#define UART_CMD_CAR_STREAM_START "CARINIT\r\n"
+#define UART_CMD_CAR_STREAM_STOP "CARSTOP\r\n"
 
 /*
  * loadmode.py 支持的识别命令：
@@ -118,8 +121,11 @@ void uart_blob_rx_interrupt_handler(void);
 void vision_uart_rx_interrupt_handler(void);
 /* 发送 "MAP" 请求命令 */
 void uart_send_map_request(void);
-/* 发送 "CAR" 请求命令 */
+/* Request one C<x100>,<y100> position line with CARPOS. */
 void uart_send_car_request(void);
+/* Optional continuous position reporting controls. */
+void uart_start_car_stream(void);
+void uart_stop_car_stream(void);
 /* 按“识别类型 + 识别距离”发送新协议命令，命令末尾已包含 '\n'。 */
 bool uart_send_vision_request(VisionRecognitionType type, VisionRecognitionDistance distance);
 /* 向视觉摄像头发送数字识别请求：distance=1 两格，distance=2 一格。 */

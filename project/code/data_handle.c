@@ -17,11 +17,14 @@
 #define CAR_FRAME_HEADER_TAG_LEN   4U
 #define FRAME_TAIL_TAG_LEN         4U
 #define CAR_LINE_COUNT             3U
+#define CAMERA_GRID_COORD_SCALE    100.0f
+#define CAMERA_MAP_BORDER_CELLS    1.0f
 
 typedef enum {
     FRAME_TYPE_NONE = 0,
     FRAME_TYPE_MAP,
-    FRAME_TYPE_CAR
+    FRAME_TYPE_CAR,
+    FRAME_TYPE_CAR_LINE
 } frame_type_t;
 
 static uint8_t uart_fifo_buf[FIFO_SIZE];
@@ -378,10 +381,6 @@ static bool parse_map_payload(const uint8_t *payload, uint16_t payload_len)
         }
     }
 
-    if (!car_found) {
-        return false;
-    }
-
     memset(obstacles, 0, sizeof(obstacles));
     memset(boxes, 0, sizeof(boxes));
     memset(targets, 0, sizeof(targets));
@@ -403,7 +402,10 @@ static bool parse_map_payload(const uint8_t *payload, uint16_t payload_len)
     Boxes_count = new_boxes_count;
     Targets_count = new_targets_count;
     Bombs_count = new_bombs_count;
-    car = new_car;
+    /* START may return its final fixed-size map even when car detection failed. */
+    if (car_found) {
+        car = new_car;
+    }
 
     memcpy(map_data, new_map, sizeof(map_data));
     map_data_ready = true;
@@ -544,29 +546,143 @@ static bool parse_car_payload(const uint8_t *payload, uint16_t payload_len)
     return true;
 }
 
+/*
+ * Parse C<x100>,<y100>. The camera coordinate system includes the outside
+ * wall ring, while the planner map is the cropped 10x14 interior.
+ * C-1,-1 is a transient miss and must not overwrite the last valid pose.
+ */
+static bool parse_car_coordinate_line(const uint8_t *line, uint16_t line_len)
+{
+    char text[48] = {0};
+    char *comma = NULL;
+    char *end_ptr = NULL;
+    long x_raw = 0;
+    long y_raw = 0;
+    int32 row_rounded = 0;
+    int32 col_rounded = 0;
+
+    if (line == NULL || line_len < 4U || line_len >= sizeof(text)) {
+        return false;
+    }
+
+    memcpy(text, line, line_len);
+    text[line_len] = '\0';
+    if ('C' != text[0]) {
+        return false;
+    }
+
+    comma = strchr(text + 1, ',');
+    if (comma == NULL || strchr(comma + 1, ',') != NULL) {
+        return false;
+    }
+
+    *comma = '\0';
+    if ('\0' == text[1] || '\0' == comma[1]) {
+        return false;
+    }
+
+    x_raw = strtol(text + 1, &end_ptr, 10);
+    if (end_ptr == (text + 1) || '\0' != *end_ptr) {
+        return false;
+    }
+
+    y_raw = strtol(comma + 1, &end_ptr, 10);
+    if (end_ptr == (comma + 1) || '\0' != *end_ptr) {
+        return false;
+    }
+
+    if (-1L == x_raw && -1L == y_raw) {
+        return false;
+    }
+
+    car_pose.x_raw = (int32)x_raw;
+    car_pose.y_raw = (int32)y_raw;
+    car_pose.yaw_raw = 0;
+    car_pose.x = ((float)x_raw / CAMERA_GRID_COORD_SCALE) - CAMERA_MAP_BORDER_CELLS;
+    car_pose.y = ((float)y_raw / CAMERA_GRID_COORD_SCALE) - CAMERA_MAP_BORDER_CELLS;
+    car_pose.yaw = 0.0f;
+
+    row_rounded = (car_pose.y >= 0.0f) ? (int32)(car_pose.y + 0.5f) : (int32)(car_pose.y - 0.5f);
+    col_rounded = (car_pose.x >= 0.0f) ? (int32)(car_pose.x + 0.5f) : (int32)(car_pose.x - 0.5f);
+
+    if (row_rounded < 0) {
+        row_rounded = 0;
+    } else if (row_rounded >= MAP_ROWS) {
+        row_rounded = MAP_ROWS - 1;
+    }
+    if (col_rounded < 0) {
+        col_rounded = 0;
+    } else if (col_rounded >= MAP_COLS) {
+        col_rounded = MAP_COLS - 1;
+    }
+
+    car.row = (uint8)row_rounded;
+    car.col = (uint8)col_rounded;
+    car_pose_ready = true;
+    car_pose_updated = true;
+    car_frame_count++;
+    return true;
+}
+
+/* Only a line-leading C can start a position frame. */
+static int find_car_line_start(const uint8_t *buf, uint16_t len)
+{
+    uint16_t i = 0U;
+
+    if (buf == NULL) {
+        return -1;
+    }
+
+    for (i = 0U; i < len; i++) {
+        if ('C' == buf[i] &&
+            (0U == i || '\r' == buf[i - 1U] || '\n' == buf[i - 1U])) {
+            return (int)i;
+        }
+    }
+    return -1;
+}
+
 /* 在当前 stream_buf 中找“最靠前”的帧头，返回帧类型、起始下标和帧头长度 */
 static frame_type_t find_first_frame(uint16_t *start_index, uint16_t *header_len)
 {
     int map_start = find_pattern(stream_buf, stream_len, MAP_FRAME_HEADER_TAG, MAP_FRAME_HEADER_TAG_LEN);
     int car_start = find_pattern(stream_buf, stream_len, CAR_FRAME_HEADER_TAG, CAR_FRAME_HEADER_TAG_LEN);
+    int car_line_start = find_car_line_start(stream_buf, stream_len);
+    int first_start = -1;
 
     if (start_index == NULL || header_len == NULL) {
         return FRAME_TYPE_NONE;
     }
 
-    if (map_start < 0 && car_start < 0) {
+    if (map_start < 0 && car_start < 0 && car_line_start < 0) {
         return FRAME_TYPE_NONE;
     }
 
-    if (map_start >= 0 && (car_start < 0 || map_start <= car_start)) {
+    if (map_start >= 0) {
+        first_start = map_start;
+    }
+    if (car_start >= 0 && (first_start < 0 || car_start < first_start)) {
+        first_start = car_start;
+    }
+    if (car_line_start >= 0 && (first_start < 0 || car_line_start < first_start)) {
+        first_start = car_line_start;
+    }
+
+    if (map_start == first_start) {
         *start_index = (uint16_t)map_start;
         *header_len = MAP_FRAME_HEADER_TAG_LEN;
         return FRAME_TYPE_MAP;
     }
 
-    *start_index = (uint16_t)car_start;
-    *header_len = CAR_FRAME_HEADER_TAG_LEN;
-    return FRAME_TYPE_CAR;
+    if (car_start == first_start) {
+        *start_index = (uint16_t)car_start;
+        *header_len = CAR_FRAME_HEADER_TAG_LEN;
+        return FRAME_TYPE_CAR;
+    }
+
+    *start_index = (uint16_t)car_line_start;
+    *header_len = 1U;
+    return FRAME_TYPE_CAR_LINE;
 }
 
 /*
@@ -588,7 +704,7 @@ static void parse_packets(void)
     uint16_t packet_end = 0U;
     int end_rel = 0;
 
-    while (stream_len >= (MAP_FRAME_HEADER_TAG_LEN + FRAME_TAIL_TAG_LEN)) {
+    while (stream_len > 0U) {
         frame_type = find_first_frame(&start_index, &header_len);
         if (FRAME_TYPE_NONE == frame_type) {
             compact_stream_buffer();
@@ -597,6 +713,23 @@ static void parse_packets(void)
 
         if (start_index > 0U) {
             consume_stream_prefix(start_index);
+            continue;
+        }
+
+        if (FRAME_TYPE_CAR_LINE == frame_type) {
+            uint16_t line_end = 0U;
+
+            while (line_end < stream_len &&
+                   '\r' != stream_buf[line_end] && '\n' != stream_buf[line_end]) {
+                line_end++;
+            }
+            if (line_end >= stream_len) {
+                return;
+            }
+
+            (void)parse_car_coordinate_line(stream_buf, line_end);
+            packet_end = skip_line_break_prefix(stream_buf, stream_len, line_end);
+            consume_stream_prefix(packet_end);
             continue;
         }
 
@@ -1121,6 +1254,16 @@ void uart_send_map_request(void)
 void uart_send_car_request(void)
 {
     uart_write_string(UART_INDEX, UART_CMD_CAR);
+}
+
+void uart_start_car_stream(void)
+{
+    uart_write_string(UART_INDEX, UART_CMD_CAR_STREAM_START);
+}
+
+void uart_stop_car_stream(void)
+{
+    uart_write_string(UART_INDEX, UART_CMD_CAR_STREAM_STOP);
 }
 
 /* 向视觉识别端请求一次数字识别。发送前清掉半包数据，避免旧残留误触发本次结果。 */

@@ -98,6 +98,8 @@ static blueserial_move_direction_t g_next_move_direction = BLUESERIAL_MOVE_FORWA
 static blueserial_move_direction_t g_cruise_move_direction = BLUESERIAL_MOVE_FORWARD;
 static uint8 g_turn_quarters_remaining = 0U;
 static float g_turn_step_deg = 90.0f;
+static float g_turn_target_yaw_deg = 0.0f;
+static uint8 g_turn_target_yaw_valid = 0U;
 static volatile uint8 g_yaw_hold_enabled = 0U;
 static Position g_blueserial_relative_path[3];
 static uint8 g_position_request_pending = 0U;
@@ -120,6 +122,19 @@ static float BlueSerial_ClampFloat(float value, float min_value, float max_value
         return max_value;
     }
     return value;
+}
+
+static float BlueSerial_WrapYawDeg(float yaw_deg)
+{
+    while (yaw_deg > 180.0f)
+    {
+        yaw_deg -= 360.0f;
+    }
+    while (yaw_deg <= -180.0f)
+    {
+        yaw_deg += 360.0f;
+    }
+    return yaw_deg;
 }
 
 static int BlueSerial_ClampInt(int value, int min_value, int max_value)
@@ -177,6 +192,7 @@ static void BlueSerial_StopControlLocked(void)
     path_follow_set_path(NULL, 0U);
     path_follow_set_stationary_yaw_hold_enabled(0U);
     path_follow_clear_yaw_reference();
+    g_turn_target_yaw_valid = 0U;
     car_go_flag = 0U;
     car_stop_flag = 0U;
     BlueSerial_ZeroSpeedCommand();
@@ -231,6 +247,8 @@ static void BlueSerial_ToggleYawHold(void)
         BlueSerial_ClearWheelPid();
         PID_Clear(&pid_yaw);
         path_follow_set_target_yaw(hold_yaw_deg);
+        g_turn_target_yaw_deg = hold_yaw_deg;
+        g_turn_target_yaw_valid = 1U;
         path_follow_set_stationary_yaw_hold_enabled(1U);
         g_yaw_hold_enabled = 1U;
         car_go_flag = 1U;
@@ -294,7 +312,14 @@ static uint8 BlueSerial_StartSpeedCruise(void)
     }
 
     primask = interrupt_global_disable();
-    hold_yaw_deg = path_follow_map_sensor_yaw(eulerAngle.yaw);
+    hold_yaw_deg = g_turn_target_yaw_valid ?
+                   g_turn_target_yaw_deg :
+                   path_follow_map_sensor_yaw(eulerAngle.yaw);
+    if (!g_turn_target_yaw_valid)
+    {
+        g_turn_target_yaw_deg = hold_yaw_deg;
+        g_turn_target_yaw_valid = 1U;
+    }
     g_cruise_move_direction = g_next_move_direction;
     g_turn_quarters_remaining = 0U;
     g_yaw_hold_enabled = 0U;
@@ -404,6 +429,8 @@ static uint8 BlueSerial_InitializeExternalPose(float grid_x, float grid_y, float
     path_follow_set_yaw_reference(grid_yaw_deg, eulerAngle.yaw);
     path_follow_reset_pose(x_m, y_m, grid_yaw_deg);
     path_follow_set_target_yaw(grid_yaw_deg);
+    g_turn_target_yaw_deg = BlueSerial_WrapYawDeg(grid_yaw_deg);
+    g_turn_target_yaw_valid = 1U;
     path_follow_set_stationary_yaw_hold_enabled(1U);
     g_yaw_hold_enabled = 1U;
     car_go_flag = 1U;
@@ -648,6 +675,11 @@ static uint8 BlueSerial_StartPointTargetMove(void)
     target_x_m = g_point_target_x_m;
     target_y_m = g_point_target_y_m;
     path_follow_get_status(&status);
+    if (!g_turn_target_yaw_valid)
+    {
+        g_turn_target_yaw_deg = status.yaw_deg;
+        g_turn_target_yaw_valid = 1U;
+    }
     started = BlueSerial_BuildPointTargetPath(status.x_m,
                                              status.y_m,
                                              target_x_m,
@@ -658,7 +690,9 @@ static uint8 BlueSerial_StartPointTargetMove(void)
         g_turn_quarters_remaining = 0U;
         BlueSerial_ApplyConfiguredPathSpeedLocked();
         BlueSerial_EnterPathMode();
-        path_follow_set_target_yaw(status.yaw_deg);
+        path_follow_set_target_yaw(g_turn_target_yaw_valid ?
+                                   g_turn_target_yaw_deg :
+                                   status.yaw_deg);
     }
     interrupt_global_enable(primask);
 
@@ -754,6 +788,7 @@ static uint8 BlueSerial_StartConfiguredMove(void)
     blueserial_move_direction_t direction;
     path_follow_status_t status = {0};
     float yaw_rad;
+    float hold_yaw_deg;
     float position_m;
     float delta_x_m = 0.0f;
     float delta_y_m = 0.0f;
@@ -767,6 +802,12 @@ static uint8 BlueSerial_StartConfiguredMove(void)
     direction = g_next_move_direction;
     path_follow_get_status(&status);
     yaw_rad = status.yaw_deg * ((float)M_PI / 180.0f);
+    if (!g_turn_target_yaw_valid)
+    {
+        g_turn_target_yaw_deg = status.yaw_deg;
+        g_turn_target_yaw_valid = 1U;
+    }
+    hold_yaw_deg = g_turn_target_yaw_deg;
     position_m = g_target_position_cm * 0.01f;
 
     /*
@@ -803,17 +844,16 @@ static uint8 BlueSerial_StartConfiguredMove(void)
     g_turn_quarters_remaining = 0U;
     BlueSerial_ApplyConfiguredPathSpeedLocked();
     BlueSerial_EnterPathMode();
-    BlueSerial_StartCenteredRelativeMove(delta_x_m, delta_y_m, status.yaw_deg);
+    BlueSerial_StartCenteredRelativeMove(delta_x_m, delta_y_m, hold_yaw_deg);
     interrupt_global_enable(primask);
     return 1U;
 }
 
 static void BlueSerial_StartNextQuarterTurn(void)
 {
-    path_follow_status_t status = {0};
-
-    path_follow_get_status(&status);
-    path_follow_start_rotate_to_yaw(status.yaw_deg + g_turn_step_deg);
+    g_turn_target_yaw_deg = BlueSerial_WrapYawDeg(g_turn_target_yaw_deg +
+                                                  g_turn_step_deg);
+    path_follow_start_rotate_to_yaw(g_turn_target_yaw_deg);
 }
 
 static uint8 BlueSerial_StartTurn(uint8 quarter_count, float step_deg)
@@ -826,6 +866,11 @@ static uint8 BlueSerial_StartTurn(uint8 quarter_count, float step_deg)
     }
 
     primask = interrupt_global_disable();
+    if (!g_turn_target_yaw_valid)
+    {
+        g_turn_target_yaw_deg = path_follow_map_sensor_yaw(eulerAngle.yaw);
+        g_turn_target_yaw_valid = 1U;
+    }
     g_turn_quarters_remaining = quarter_count;
     g_turn_step_deg = step_deg;
     BlueSerial_EnterPathMode();
@@ -887,6 +932,7 @@ static void BlueSerial_ServiceMotionCompletion(void)
 static void BlueSerial_EnterRawPwmMode(void)
 {
     g_turn_quarters_remaining = 0U;
+    g_turn_target_yaw_valid = 0U;
     g_yaw_hold_enabled = 0U;
     path_follow_set_path(NULL, 0U);
     path_follow_set_stationary_yaw_hold_enabled(0U);
@@ -908,6 +954,8 @@ void Blue_Serial_Init(void)
     g_last_rx_frame[0] = '\0';
     g_last_rx_frame_len = 0U;
     g_blueserial_path_report_pending = 0U;
+    g_turn_target_yaw_deg = 0.0f;
+    g_turn_target_yaw_valid = 0U;
     uart_init(BLUESERIAL_UART, BLUESERIAL_BAUDRATE, BLUESERIAL_TX_PIN, BLUESERIAL_RX_PIN);
     interrupt_set_priority(BLUESERIAL_IRQN, BLUESERIAL_IRQ_PRIORITY);
     uart_rx_interrupt(BLUESERIAL_UART, ZF_ENABLE);

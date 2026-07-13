@@ -15,6 +15,7 @@
 
 #define PF_POSITION_TOLERANCE_M          0.015f
 #define PF_YAW_TOLERANCE_DEG             0.5f
+#define PF_YAW_SETTLE_CYCLES              8U
 #define PF_MAX_LINEAR_SPEED_MPS          3.0f
 #define PF_MAX_ANGULAR_SPEED_DEGPS       300.0f
 #define PF_TEMP_PATH_GRID_M              0.01f
@@ -143,6 +144,7 @@ typedef struct
     uint8 paused;
     uint8 pause_events_enabled;
     uint8 rotate_only_active;
+    uint8 yaw_settle_cycles;
     uint8 profile_active;
 } pf_context_t;
 
@@ -1343,6 +1345,7 @@ static void pf_apply_path(const Position *path,
     g_pf.path_origin_y_m = 0.0f;
     g_pf.pause_events_enabled = pause_events_enabled ? 1U : 0U;
     g_pf.rotate_only_active = 0U;
+    g_pf.yaw_settle_cycles = 0U;
     g_pf.active = (path != NULL && steps > 0U) ? 1U : 0U;
 
     pf_reset_pause_runtime();
@@ -1592,6 +1595,7 @@ void path_follow_start_rotate_to_yaw(float target_yaw_deg)
     pf_apply_path(NULL, 0U, g_pf.default_grid_m, 0U);
     path_follow_set_target_yaw(target_yaw_deg);
     PID_Clear(&pid_yaw);
+    g_pf.yaw_settle_cycles = 0U;
     g_pf.rotate_only_active = 1U;
 }
 
@@ -1629,15 +1633,27 @@ void path_follow_update(float yaw_deg, path_follow_output_t *out)
         yaw_error_deg = pf_yaw_error_deg(yaw_deg, g_pf.target_yaw_deg);
         if (fabsf(yaw_error_deg) <= g_pf.yaw_tolerance_deg)
         {
-            g_pf.rotate_only_active = 0U;
-            PID_Clear(&pid_yaw);
-            if (out != NULL)
+            if (g_pf.yaw_settle_cycles < PF_YAW_SETTLE_CYCLES)
             {
-                out->reached = 1U;
+                g_pf.yaw_settle_cycles++;
             }
+            if (g_pf.yaw_settle_cycles >= PF_YAW_SETTLE_CYCLES)
+            {
+                g_pf.rotate_only_active = 0U;
+                g_pf.yaw_settle_cycles = 0U;
+                PID_Clear(&pid_yaw);
+                if (out != NULL)
+                {
+                    out->reached = 1U;
+                }
+                return;
+            }
+
+            pf_output_yaw_hold(yaw_deg, out);
             return;
         }
 
+        g_pf.yaw_settle_cycles = 0U;
         pf_output_yaw_hold(yaw_deg, out);
         return;
     }

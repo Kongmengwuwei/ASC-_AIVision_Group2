@@ -288,6 +288,8 @@ static uint8 g_localize_camera_settled = 0U;
 static uint8 g_localize_stop_sequence_started = 0U;
 static uint8 g_localize_fresh_pose_request_started = 0U;
 static uint8 g_localize_car_frame_base = 0U;
+static uint8 g_localize_map_prefetch_started = 0U;
+static uint8 g_localize_map_frame_base = 0U;
 static uint32 g_localize_stop_stable_start_tick = 0U;
 static uint32 g_localize_post_stop_start_tick = 0U;
 
@@ -458,6 +460,8 @@ static void reset_localization_accumulator(void)
     g_localize_stop_sequence_started = 0U;
     g_localize_fresh_pose_request_started = 0U;
     g_localize_car_frame_base = 0U;
+    g_localize_map_prefetch_started = 0U;
+    g_localize_map_frame_base = 0U;
     g_localize_stop_stable_start_tick = 0U;
     g_localize_post_stop_start_tick = 0U;
     memset(g_localize_samples_x_m, 0, sizeof(g_localize_samples_x_m));
@@ -2210,6 +2214,47 @@ static uint8 get_camera_position_meter(float *x_m, float *y_m)
     return 1U;
 }
 
+static void start_localization_map_prefetch_once(void)
+{
+    if (g_localize_map_prefetch_started)
+    {
+        return;
+    }
+
+    /* Only accept a map produced after this localization has started. */
+    g_localize_map_frame_base = map_frame_count;
+    g_localize_map_prefetch_started = 1U;
+    map_data_updated = false;
+    clear_map_request_wait();
+    send_map_request_once();
+}
+
+static uint8 localization_prefetched_map_ready(void)
+{
+    return (g_localize_map_prefetch_started && map_data_ready &&
+            map_frame_count != g_localize_map_frame_base) ? 1U : 0U;
+}
+
+static void finish_localization_to_map_or_plan(void)
+{
+    if (localization_prefetched_map_ready())
+    {
+        g_wait_new_map_frame = 0U;
+        if (g_control_flow_phase == CONTROL_FLOW_PUSHBOX)
+        {
+            apply_saved_identify_ids_to_current_map();
+        }
+        map_data_updated = false;
+        clear_map_request_wait();
+        set_control_phase_stage(CONTROL_PHASE_STEP_PLAN_PATH);
+        return;
+    }
+
+    /* The prefetch has not arrived yet: resume the normal map wait/retry flow. */
+    mark_wait_new_map_frame();
+    set_control_phase_stage(CONTROL_PHASE_STEP_WAIT_CAMERA_DATA);
+}
+
 static uint8 settle_camera_before_localization_once(void)
 {
     uint32 now_tick;
@@ -2221,6 +2266,7 @@ static uint8 settle_camera_before_localization_once(void)
 
     if (Algorithm_Test_PresetInput_IsEnabled())
     {
+        start_localization_map_prefetch_once();
         (void)Algorithm_Test_PresetInput_ProvideCarPoseFrame();
         g_localize_camera_settled = 1U;
         return 1U;
@@ -2242,6 +2288,7 @@ static uint8 settle_camera_before_localization_once(void)
         uart_blob_clear_pending_data();
         g_localize_stop_sequence_started = 1U;
         g_localize_post_stop_start_tick = now_tick;
+        start_localization_map_prefetch_once();
     }
 
     if (!localization_wheels_stopped()) {
@@ -2622,8 +2669,7 @@ static void handle_localization_stage(void)
         if (g_control_flow_phase == CONTROL_FLOW_IDENTIFY)
         {
         }
-        mark_wait_new_map_frame();
-        set_control_phase_stage(CONTROL_PHASE_STEP_WAIT_CAMERA_DATA);
+        finish_localization_to_map_or_plan();
         return;
     }
 
@@ -2643,8 +2689,7 @@ static void handle_localization_stage(void)
 
     if (!g_localize_fresh_pose_request_started)
     {
-        /* The request baseline is recorded after the old stream has drained. */
-        uart_blob_clear_pending_data();
+        /* The CARSTOP drain is complete; keep a concurrently received MAP frame. */
         g_localize_car_frame_base = car_frame_count;
         car_pose_updated = false;
         g_localize_fresh_pose_request_started = 1U;

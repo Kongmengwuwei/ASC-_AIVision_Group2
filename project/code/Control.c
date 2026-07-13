@@ -56,10 +56,11 @@ float g_control_prestart_depart_compensate_m = -0.025f;
  * MAP/CAR requests are sent on demand. These 10 ms tick guards only retry
  * when a request is already pending and no matching response has arrived.
  */
-#define CONTROL_REQ_MAP_RETRY_TIMEOUT_TICKS 200U
-#define CONTROL_REQ_CAR_RETRY_TIMEOUT_TICKS 120U
+#define CONTROL_REQ_MAP_RETRY_TIMEOUT_TICKS 500U
+#define CONTROL_REQ_CAR_RETRY_TIMEOUT_TICKS 200U
 #define CONTROL_LOCALIZE_STOP_STABLE_TICKS 20U
 #define CONTROL_LOCALIZE_POST_STOP_DRAIN_TICKS 40U
+#define CONTROL_LOCALIZE_CAR_QUIET_BEFORE_MAP_TICKS 20U
 #define CONTROL_LOCALIZE_WHEEL_STOP_ENCODER_TOL 5
 #define CONTROL_LOCALIZE_MAX_SAMPLES 5U
 #define CONTROL_LOCALIZE_TWO_SAMPLE_MATCH_M 0.03f
@@ -290,8 +291,11 @@ static uint8 g_localize_fresh_pose_request_started = 0U;
 static uint8 g_localize_car_frame_base = 0U;
 static uint8 g_localize_map_prefetch_started = 0U;
 static uint8 g_localize_map_frame_base = 0U;
+static uint8 g_localize_map_prefetch_scheduled = 0U;
+static uint8 g_localize_prefetch_car_frame_base = 0U;
 static uint32 g_localize_stop_stable_start_tick = 0U;
 static uint32 g_localize_post_stop_start_tick = 0U;
+static uint32 g_localize_map_prefetch_quiet_start_tick = 0U;
 
 /**
  * @brief 起步动作是否已经触发�?
@@ -462,8 +466,11 @@ static void reset_localization_accumulator(void)
     g_localize_car_frame_base = 0U;
     g_localize_map_prefetch_started = 0U;
     g_localize_map_frame_base = 0U;
+    g_localize_map_prefetch_scheduled = 0U;
+    g_localize_prefetch_car_frame_base = 0U;
     g_localize_stop_stable_start_tick = 0U;
     g_localize_post_stop_start_tick = 0U;
+    g_localize_map_prefetch_quiet_start_tick = 0U;
     memset(g_localize_samples_x_m, 0, sizeof(g_localize_samples_x_m));
     memset(g_localize_samples_y_m, 0, sizeof(g_localize_samples_y_m));
     g_localize_yaw_align_started = 0U;
@@ -2226,6 +2233,55 @@ static void start_localization_map_prefetch_once(void)
     send_map_request_once();
 }
 
+static void schedule_localization_map_prefetch_after_car(void)
+{
+    if (g_localize_map_prefetch_started || g_localize_map_prefetch_scheduled)
+    {
+        return;
+    }
+
+    if (Algorithm_Test_PresetInput_IsEnabled())
+    {
+        start_localization_map_prefetch_once();
+        return;
+    }
+
+    /*
+     * A timed-out CARPOS can leave an extra response in the camera/UART path.
+     * Wait for a short interval with no new CAR frame before issuing START, so
+     * a late coordinate line cannot be inserted into and invalidate $MAP.
+     */
+    g_localize_map_prefetch_scheduled = 1U;
+    g_localize_prefetch_car_frame_base = car_frame_count;
+    g_localize_map_prefetch_quiet_start_tick = g_control_tick_10ms;
+    car_pose_updated = false;
+}
+
+static void service_localization_map_prefetch(void)
+{
+    if (g_localize_map_prefetch_started || !g_localize_map_prefetch_scheduled)
+    {
+        return;
+    }
+
+    if (car_frame_count != g_localize_prefetch_car_frame_base)
+    {
+        g_localize_prefetch_car_frame_base = car_frame_count;
+        g_localize_map_prefetch_quiet_start_tick = g_control_tick_10ms;
+        car_pose_updated = false;
+        return;
+    }
+
+    if ((uint32)(g_control_tick_10ms - g_localize_map_prefetch_quiet_start_tick) <
+        CONTROL_LOCALIZE_CAR_QUIET_BEFORE_MAP_TICKS)
+    {
+        return;
+    }
+
+    g_localize_map_prefetch_scheduled = 0U;
+    start_localization_map_prefetch_once();
+}
+
 static uint8 localization_prefetched_map_ready(void)
 {
     return (g_localize_map_prefetch_started && map_data_ready &&
@@ -2652,6 +2708,8 @@ static void handle_localization_stage(void)
 
     if (g_localize_yaw_align_started)
     {
+        service_localization_map_prefetch();
+
         /*
          * 视觉位置已经写入 path_follow，当前只等待“车头回正到发车方向基准”结束。
          * 这里用 path_follow 的 active 标志做握手，避免在原地转向尚未完成时提前取图规划。
@@ -2661,6 +2719,13 @@ static void handle_localization_stage(void)
         {
             car_go_flag = 1U;
             car_stop_flag = 0U;
+            return;
+        }
+
+        if (!g_localize_map_prefetch_started)
+        {
+            /* Yaw is ready; remain stopped until the CAR quiet window expires. */
+            control_hold_yaw_closed_loop();
             return;
         }
 
@@ -2750,7 +2815,7 @@ static void handle_localization_stage(void)
      * consumed. The map is then prefetched while the chassis aligns its yaw,
      * so localization and map acquisition no longer starve each other.
      */
-    start_localization_map_prefetch_once();
+    schedule_localization_map_prefetch_after_car();
     /*
      * 初始定位的关键修正：
      * - 视觉只提供地图位置平均值；

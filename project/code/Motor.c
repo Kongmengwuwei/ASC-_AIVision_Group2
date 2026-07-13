@@ -272,6 +272,7 @@ static int motor_apply_deadzone_compensation(int pid_output,
                                              int deadzone_fwd,
                                              int deadzone_rev)
 {
+#if MOTOR_DEADZONE_COMPENSATION_ENABLE
     if (target_speed >= MOTOR_DEADZONE_TARGET_MIN_COUNTS)
     {
         pid_output += deadzone_fwd;
@@ -280,6 +281,11 @@ static int motor_apply_deadzone_compensation(int pid_output,
     {
         pid_output -= deadzone_rev;
     }
+#else
+    (void)target_speed;
+    (void)deadzone_fwd;
+    (void)deadzone_rev;
+#endif
 
     return Limit_int(LIMIT_PWM_MIN, pid_output, LIMIT_PWM_MAX);
 }

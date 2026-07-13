@@ -68,6 +68,9 @@
 #define LIMIT_PWM_MIN              -6000
 #define LIMIT_PWM_MAX               6000
 
+/* Set to 0 to disable motor dead-zone PWM compensation without bypassing wheel PID. */
+#define MOTOR_DEADZONE_COMPENSATION_ENABLE    1U
+
 /* Measured no-load start thresholds, using 85% as conservative feedforward. */
 #define MOTOR_DEADZONE_TARGET_MIN_COUNTS  2
 #define MOTOR_UL_DEADZONE_FWD             410

@@ -60,8 +60,10 @@
 //参数宏定义
 #define ENCODER_RESOLUTION      2390.0   //编码器分辨率, 轮子转一圈，编码器产生的脉冲数
 #define WHEEL_DIAMETER          0.06239  //轮子直径,单位：米@
-#define LATERAL_CORRECTION_FACTOR 0.901589f  //实际横移距离 / 计划横移距离
-#define LATERAL_TO_LONGITUDINAL_COUPLING_FACTOR 0.0f  // dx drift / dy travel
+#define LINEAR_DISTANCE_CORRECTION_FACTOR 1.009406f  // 上位机地图实测线性距离修正，约 12080 pulse/m
+#define LATERAL_CORRECTION_FACTOR 0.940000f  //实际横移距离 / 计划横移距离
+#define LATERAL_TO_LONGITUDINAL_COUPLING_FACTOR (-0.029000f)  // signed dx drift / dy travel
+#define LATERAL_TO_LONGITUDINAL_BIAS_FACTOR 0.000000f  // direction-independent dx drift / abs(dy)
 #define D_X                     0.176     //底盘Y轴上两轮中心的间距
 #define D_Y                     0.20     //底盘X轴上两轮中心的间距
 #define PID_RATE                100       //PID调节PWM值的频率
@@ -99,6 +101,10 @@ extern int16 encoder_data_quaddec3;
 extern int16 encoder_data_quaddec4;
 extern double pulse_per_meter;
 extern float rx_plus_ry_cali;
+extern float motor_lateral_correction_factor;
+extern float motor_lateral_to_longitudinal_coupling_factor;
+extern float motor_lateral_to_longitudinal_bias_factor;
+extern float motor_rotation_radius_m;
 
 extern float speed_three_array[3];
 extern int speed_encoder[4];
@@ -116,4 +122,4 @@ void Kinematics_Init(void);
 void Kinematics_Inverse(float* input, int* output);
 
 #endif
-	
+

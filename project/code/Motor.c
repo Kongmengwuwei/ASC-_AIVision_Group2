@@ -4,6 +4,7 @@
 #include "zf_driver_encoder.h"
 #include "PID_config.h"
 #include "PID.h"
+#include <math.h>
 
 
 float speed_three_array[3] = {0};
@@ -305,7 +306,11 @@ void motor_control(int* input_speed_encoder)
 double pulse_per_meter = 0;
 float rx_plus_ry_cali = 0.3;
 double angular_correction_factor = 1.0;
-double linear_correction_factor = 1.0;
+double linear_correction_factor = LINEAR_DISTANCE_CORRECTION_FACTOR;
+float motor_lateral_correction_factor = LATERAL_CORRECTION_FACTOR;
+float motor_lateral_to_longitudinal_coupling_factor = LATERAL_TO_LONGITUDINAL_COUPLING_FACTOR;
+float motor_lateral_to_longitudinal_bias_factor = LATERAL_TO_LONGITUDINAL_BIAS_FACTOR;
+float motor_rotation_radius_m = (D_X + D_Y) * 0.5f;
 //double angular_correction_factor = 1.0;
 float r_x = 0;
 float r_y = 0;
@@ -321,6 +326,7 @@ void Kinematics_Init(void)
     r_x = D_X/2;
     r_y = D_Y/2;
     rx_plus_ry_cali = (r_x + r_y)/angular_correction_factor;
+	motor_rotation_radius_m = rx_plus_ry_cali;
 	memset(&speed_three_array, 0, sizeof(speed_three_array));
 	memset(&speed_encoder, 0, sizeof(speed_encoder));
 }
@@ -334,15 +340,16 @@ void Kinematics_Inverse(float* input, int* output)
 {
 	float desired_vy_mps = input[1] * 0.01f;
 	float v_tx = input[0] * 0.01f -
-	             LATERAL_TO_LONGITUDINAL_COUPLING_FACTOR * desired_vy_mps;
-	float v_ty = desired_vy_mps / LATERAL_CORRECTION_FACTOR;
+	             motor_lateral_to_longitudinal_coupling_factor * desired_vy_mps -
+	             motor_lateral_to_longitudinal_bias_factor * fabsf(desired_vy_mps);
+	float v_ty = desired_vy_mps / motor_lateral_correction_factor;
 	float omega = input[2];                //rad/s（弧度/秒）
 	static float v_w[4] = {0};
 	
-	v_w[0] = v_tx - v_ty - (r_x + r_y)*omega;               //rx+ry=0.215
-	v_w[1] = v_tx + v_ty + (r_x + r_y)*omega;
-	v_w[2] = v_tx + v_ty - (r_x + r_y)*omega;
-	v_w[3] = v_tx - v_ty + (r_x + r_y)*omega;
+	v_w[0] = v_tx - v_ty - motor_rotation_radius_m*omega;               //rx+ry=0.215
+	v_w[1] = v_tx + v_ty + motor_rotation_radius_m*omega;
+	v_w[2] = v_tx + v_ty - motor_rotation_radius_m*omega;
+	v_w[3] = v_tx - v_ty + motor_rotation_radius_m*omega;
 
     //计算一个PID控制周期内，电机编码器计数值的变化
 	output[0] = (int)(v_w[0] * pulse_per_meter/PID_RATE);   //上左    *125

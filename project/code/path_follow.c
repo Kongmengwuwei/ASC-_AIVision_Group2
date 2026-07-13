@@ -13,10 +13,10 @@
 #define M_PI 3.14159265358979323846
 #endif
 
-#define PF_POSITION_TOLERANCE_M          0.015f
+#define PF_POSITION_TOLERANCE_M          0.020f
 #define PF_YAW_TOLERANCE_DEG             0.5f
 #define PF_MAX_LINEAR_SPEED_MPS          3.0f
-#define PF_MAX_ANGULAR_SPEED_DEGPS       300.0f
+#define PF_MAX_ANGULAR_SPEED_DEGPS       400.0f
 #define PF_TEMP_PATH_GRID_M              0.01f
 #define PF_MIN_VALID_GRID_M              0.0001f
 #define PF_INVALID_INDEX                 ((size_t)-1)
@@ -34,11 +34,19 @@
 #define PF_LINE_GUIDE_MAX_CMPS           12.0f
 #define PF_LINE_GUIDE_DEADBAND_M         0.0025f
 
-#define PF_YAW_KP                        6.0f
+#define PF_YAW_KP                        8.0f
 #define PF_YAW_KI                        0.0f
 #define PF_YAW_KD                        10.5f
 #define PF_YAW_FILTER_ALPHA              0.9f
-#define PF_YAW_FEEDFORWARD_MIN_DEGPS     5.0f
+#define PF_YAW_FEEDFORWARD_MIN_DEGPS     8.0f
+
+/* Translation/stationary heading hold deliberately uses a gentler loop. */
+#define PF_YAW_HOLD_KP                   8.0f
+#define PF_YAW_HOLD_KI                   0.0f
+#define PF_YAW_HOLD_KD                   10.5f
+#define PF_YAW_HOLD_FILTER_ALPHA         0.9f
+#define PF_YAW_HOLD_FEEDFORWARD_MIN_DEGPS 8.0f
+#define PF_YAW_HOLD_MAX_DEGPS            350.0f
 
 typedef struct
 {
@@ -152,6 +160,7 @@ static Position g_offset_path[3];
 static Position g_pose_move_path[3];
 static uint8 g_stationary_yaw_hold_enabled;
 static volatile uint8 g_bluetooth_report_pending;
+static void pf_sync_position_pid_gains(void);
 
 /* Public compatibility objects declared by path_follow.h. */
 tagPID_T pid_world_x;
@@ -159,6 +168,7 @@ tagPID_T pid_world_y;
 tagPID_T pid_stay;
 static tagPID_T pid_stay_y;
 tagPID_T pid_yaw;
+tagPID_T pid_yaw_hold;
 tagPID_T pid_accel_yaw;
 
 uint8 car_direction = 0U;
@@ -176,8 +186,12 @@ float path_hold_trim_release_distance = PF_POSITION_LOOP_RELEASE_M;
 /* Runtime-tunable line guidance and yaw low-speed feedforward. */
 float path_line_guide_kp = 0.0f;
 float path_line_guide_min_cmps = 0.0f;
+float path_line_guide_max_cmps = PF_LINE_GUIDE_MAX_CMPS;
+float path_line_guide_deadband_m = PF_LINE_GUIDE_DEADBAND_M;
 float path_yaw_feedforward_min_degps = PF_YAW_FEEDFORWARD_MIN_DEGPS;
 float path_yaw_feedforward_deadband_deg = PF_YAW_TOLERANCE_DEG;
+float path_yaw_hold_feedforward_min_degps = PF_YAW_HOLD_FEEDFORWARD_MIN_DEGPS;
+float path_yaw_hold_max_degps = PF_YAW_HOLD_MAX_DEGPS;
 
 /* Other legacy compensation variables remain link-compatible but unused. */
 float path_yaw_target_base_comp_deg = 0.0f;
@@ -187,20 +201,20 @@ float path_rotate_center_offset_y_cm = 0.0f;
 
 static const path_follow_scurve_band_cfg_t g_default_speed_bands[PATH_FOLLOW_SCURVE_BAND_COUNT] =
 {
-    {0.30f,   0.40f, 1.05f, 3.50f},
-    {0.50f,   0.50f, 1.05f, 3.50f},
-    {0.70f,   0.65f, 1.05f, 3.50f},
-    {0.90f,   0.75f, 1.05f, 3.50f},
-    {1000.0f, 1.50f, 1.05f, 3.50f}
+    {0.30f,   0.25f, 0.60f, 1.80f},
+    {0.50f,   0.35f, 0.70f, 2.20f},
+    {0.70f,   0.45f, 0.80f, 2.50f},
+    {1.50f,   0.90f, 1.05f, 3.50f},
+    {1000.0f, 1.50f, 1.50f, 5.00f}
 };
 
 path_follow_scurve_band_cfg_t g_path_follow_scurve_band_cfg[PATH_FOLLOW_SCURVE_BAND_COUNT] =
 {
-    {0.30f,   0.40f, 1.05f, 3.50f},
-    {0.50f,   0.50f, 1.05f, 3.50f},
-    {0.70f,   0.65f, 1.05f, 3.50f},
-    {0.90f,   0.75f, 1.05f, 3.50f},
-    {1000.0f, 1.50f, 1.05f, 3.50f}
+    {0.30f,   0.25f, 0.60f, 1.80f},
+    {0.50f,   0.35f, 0.70f, 2.20f},
+    {0.70f,   0.45f, 0.80f, 2.50f},
+    {1.50f,   0.90f, 1.05f, 3.50f},
+    {1000.0f, 1.50f, 1.50f, 5.00f}
 };
 
 static float pf_clamp(float value, float min_value, float max_value)
@@ -349,6 +363,110 @@ void path_follow_sanitize_scurve_band_cfg(void)
             band->jmax_mps3 = g_default_speed_bands[i].jmax_mps3;
         }
     }
+}
+
+void path_follow_set_pulses_per_meter(float pulses_per_meter)
+{
+    if (pulses_per_meter > 1.0f)
+    {
+        g_pf.pulses_per_meter = pulses_per_meter;
+    }
+}
+
+void path_follow_set_position_pid(float kp,
+                                  float ki,
+                                  float kd,
+                                  float max_output_cmps,
+                                  float alpha)
+{
+    pid_stay.fKp = kp;
+    pid_stay.fKi = ki;
+    pid_stay.fKd = kd;
+    pid_stay.fMax_Iout = max_output_cmps;
+    pid_stay.fMax_Out = (int)max_output_cmps;
+    pid_stay.alpha = alpha;
+    pf_sync_position_pid_gains();
+    PID_Clear(&pid_stay);
+    PID_Clear(&pid_stay_y);
+}
+
+void path_follow_set_position_tolerance_m(float tolerance_m)
+{
+    if (tolerance_m > 0.0f)
+    {
+        g_pf.position_tolerance_m = tolerance_m;
+    }
+}
+
+float path_follow_get_position_tolerance_m(void)
+{
+    return g_pf.position_tolerance_m;
+}
+
+void path_follow_set_yaw_tolerance_deg(float tolerance_deg)
+{
+    if (tolerance_deg > 0.0f)
+    {
+        g_pf.yaw_tolerance_deg = tolerance_deg;
+    }
+}
+
+float path_follow_get_yaw_tolerance_deg(void)
+{
+    return g_pf.yaw_tolerance_deg;
+}
+
+void path_follow_set_max_angular_speed_degps(float max_speed_degps)
+{
+    if (max_speed_degps > 0.0f)
+    {
+        g_pf.max_angular_speed_degps = max_speed_degps;
+        pid_yaw.fMax_Out = (int)max_speed_degps;
+    }
+}
+
+static void pf_clear_yaw_pid_states(void)
+{
+    PID_Clear(&pid_yaw);
+    PID_Clear(&pid_yaw_hold);
+}
+
+float path_follow_get_max_angular_speed_degps(void)
+{
+    return g_pf.max_angular_speed_degps;
+}
+
+void path_follow_reset_runtime_tuning_defaults(void)
+{
+    g_pf.position_tolerance_m = PF_POSITION_TOLERANCE_M;
+    g_pf.yaw_tolerance_deg = PF_YAW_TOLERANCE_DEG;
+    g_pf.max_angular_speed_degps = PF_MAX_ANGULAR_SPEED_DEGPS;
+    path_hold_trim_release_distance = PF_POSITION_LOOP_RELEASE_M;
+    path_line_guide_kp = 0.0f;
+    path_line_guide_min_cmps = 0.0f;
+    path_line_guide_max_cmps = PF_LINE_GUIDE_MAX_CMPS;
+    path_line_guide_deadband_m = PF_LINE_GUIDE_DEADBAND_M;
+    path_yaw_feedforward_min_degps = PF_YAW_FEEDFORWARD_MIN_DEGPS;
+    path_yaw_feedforward_deadband_deg = PF_YAW_TOLERANCE_DEG;
+    path_yaw_hold_feedforward_min_degps = PF_YAW_HOLD_FEEDFORWARD_MIN_DEGPS;
+    path_yaw_hold_max_degps = PF_YAW_HOLD_MAX_DEGPS;
+    path_follow_set_position_pid(PF_POSITION_KP,
+                                 PF_POSITION_KI,
+                                 PF_POSITION_KD,
+                                 PF_POSITION_MAX_OUT_CMPS,
+                                 PF_POSITION_FILTER_ALPHA);
+    pid_yaw.fKp = PF_YAW_KP;
+    pid_yaw.fKi = PF_YAW_KI;
+    pid_yaw.fKd = PF_YAW_KD;
+    pid_yaw.fMax_Out = (int)PF_MAX_ANGULAR_SPEED_DEGPS;
+    pid_yaw.alpha = PF_YAW_FILTER_ALPHA;
+    pid_yaw_hold.fKp = PF_YAW_HOLD_KP;
+    pid_yaw_hold.fKi = PF_YAW_HOLD_KI;
+    pid_yaw_hold.fKd = PF_YAW_HOLD_KD;
+    pid_yaw_hold.fMax_Out = (int)PF_YAW_HOLD_MAX_DEGPS;
+    pid_yaw_hold.alpha = PF_YAW_HOLD_FILTER_ALPHA;
+    pf_clear_yaw_pid_states();
+    path_follow_reset_scurve_band_defaults();
 }
 
 static float pf_mps_to_cmps(float value_mps)
@@ -989,17 +1107,17 @@ static uint8 pf_apply_line_guidance(const pf_geometry_t *geometry,
     relative_y_m = g_pf.pose.y_m - start_y_m;
     normal_error_m = relative_x_m * normal_x + relative_y_m * normal_y;
 
-    if (fabsf(normal_error_m) <= PF_LINE_GUIDE_DEADBAND_M)
+    if (fabsf(normal_error_m) <= path_line_guide_deadband_m)
     {
         effective_error_m = 0.0f;
     }
     else if (normal_error_m > 0.0f)
     {
-        effective_error_m = normal_error_m - PF_LINE_GUIDE_DEADBAND_M;
+        effective_error_m = normal_error_m - path_line_guide_deadband_m;
     }
     else
     {
-        effective_error_m = normal_error_m + PF_LINE_GUIDE_DEADBAND_M;
+        effective_error_m = normal_error_m + path_line_guide_deadband_m;
     }
 
     trim_cmps = path_line_guide_kp * fabsf(effective_error_m * 100.0f);
@@ -1007,7 +1125,7 @@ static uint8 pf_apply_line_guidance(const pf_geometry_t *geometry,
     {
         trim_cmps += fmaxf(path_line_guide_min_cmps, 0.0f);
     }
-    trim_cmps = fminf(trim_cmps, PF_LINE_GUIDE_MAX_CMPS);
+    trim_cmps = fminf(trim_cmps, path_line_guide_max_cmps);
     if (effective_error_m > 0.0f)
     {
         trim_cmps = -trim_cmps;
@@ -1053,26 +1171,43 @@ static float pf_yaw_command_radps(float yaw_deg)
     float error_deg = pf_yaw_error_deg(yaw_deg, g_pf.target_yaw_deg);
     float output_degps;
     float feedforward_deadband_deg;
+    float feedforward_min_degps;
+    float max_output_degps;
+    tagPID_T *controller;
+
+    if (g_pf.rotate_only_active)
+    {
+        controller = &pid_yaw;
+        feedforward_min_degps = path_yaw_feedforward_min_degps;
+        max_output_degps = g_pf.max_angular_speed_degps;
+    }
+    else
+    {
+        controller = &pid_yaw_hold;
+        feedforward_min_degps = path_yaw_hold_feedforward_min_degps;
+        max_output_degps = path_yaw_hold_max_degps;
+    }
 
     if (fabsf(error_deg) <= g_pf.yaw_tolerance_deg)
     {
+        PID_Clear(controller);
         return 0.0f;
     }
 
-    output_degps = (float)PID_Location_Calculate(&pid_yaw, 0.0f, error_deg);
+    output_degps = (float)PID_Location_Calculate(controller, 0.0f, error_deg);
     feedforward_deadband_deg = fmaxf(path_yaw_feedforward_deadband_deg,
                                     g_pf.yaw_tolerance_deg);
-    if (path_yaw_feedforward_min_degps > 0.0f &&
+    if (feedforward_min_degps > 0.0f &&
         fabsf(error_deg) > feedforward_deadband_deg &&
-        fabsf(output_degps) < path_yaw_feedforward_min_degps)
+        fabsf(output_degps) < feedforward_min_degps)
     {
         output_degps = (error_deg > 0.0f) ?
-                       path_yaw_feedforward_min_degps :
-                       -path_yaw_feedforward_min_degps;
+                       feedforward_min_degps :
+                       -feedforward_min_degps;
     }
     output_degps = pf_clamp(output_degps,
-                            -g_pf.max_angular_speed_degps,
-                            g_pf.max_angular_speed_degps);
+                            -max_output_degps,
+                            max_output_degps);
     return output_degps * ((float)M_PI / 180.0f);
 }
 
@@ -1105,8 +1240,9 @@ static void pf_update_odometry(float yaw_deg)
                            wheel_dl_mps + wheel_dr_mps);
     vy_body_mps = 0.25f * (-wheel_ul_mps + wheel_ur_mps +
                            wheel_dl_mps - wheel_dr_mps) *
-                  LATERAL_CORRECTION_FACTOR;
-    vx_body_mps += LATERAL_TO_LONGITUDINAL_COUPLING_FACTOR * vy_body_mps;
+                  motor_lateral_correction_factor;
+    vx_body_mps += motor_lateral_to_longitudinal_coupling_factor * vy_body_mps;
+    vx_body_mps += motor_lateral_to_longitudinal_bias_factor * fabsf(vy_body_mps);
 
     yaw_rad = yaw_deg * ((float)M_PI / 180.0f);
     cos_yaw = cosf(yaw_rad);
@@ -1164,7 +1300,7 @@ static void pf_finish_path(path_follow_output_t *out)
     g_pf.active = 0U;
     g_pf.paused = 0U;
     pf_reset_motion_state();
-    PID_Clear(&pid_yaw);
+    pf_clear_yaw_pid_states();
 
     if (out != NULL)
     {
@@ -1346,7 +1482,7 @@ static void pf_apply_path(const Position *path,
 
     pf_reset_pause_runtime();
     pf_reset_motion_state();
-    PID_Clear(&pid_yaw);
+    pf_clear_yaw_pid_states();
 
     /* A normal planned path usually includes the current cell as point zero. */
     if (g_pf.active && steps > 1U)
@@ -1456,6 +1592,12 @@ void path_follow_init(float grid_size_m, float pulses_per_meter)
                        PF_YAW_KD,
                        PF_MAX_ANGULAR_SPEED_DEGPS,
                        PF_YAW_FILTER_ALPHA);
+    pf_init_pid_object(&pid_yaw_hold,
+                       PF_YAW_HOLD_KP,
+                       PF_YAW_HOLD_KI,
+                       PF_YAW_HOLD_KD,
+                       PF_YAW_HOLD_MAX_DEGPS,
+                       PF_YAW_HOLD_FILTER_ALPHA);
 
     /* Near-target X/Y position loop restored from the original controller. */
     pf_init_pid_object(&pid_stay,
@@ -1485,7 +1627,7 @@ void path_follow_reset_pose(float x_m, float y_m, float yaw_deg)
     g_pf.pose.y_m = y_m;
     g_pf.pose.yaw_deg = pf_wrap_deg(yaw_deg);
     pf_reset_motion_state();
-    PID_Clear(&pid_yaw);
+    pf_clear_yaw_pid_states();
 }
 
 void path_follow_set_external_position(float x_m, float y_m, uint8 valid)
@@ -1559,10 +1701,7 @@ void path_follow_hold_current_yaw(void)
 void path_follow_set_stationary_yaw_hold_enabled(uint8 enabled)
 {
     g_stationary_yaw_hold_enabled = enabled ? 1U : 0U;
-    if (!g_stationary_yaw_hold_enabled)
-    {
-        PID_Clear(&pid_yaw);
-    }
+    PID_Clear(&pid_yaw_hold);
 }
 
 uint8 path_follow_get_stationary_yaw_hold_enabled(void)

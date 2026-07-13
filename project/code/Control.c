@@ -53,10 +53,10 @@ float g_control_prestart_depart_compensate_m = -0.025f;
 /* ========================= 参数配置�?========================= */
 
 /*
- * MAP/CAR requests are sent on demand. These loop-count guards only retry
+ * MAP/CAR requests are sent on demand. These 10 ms tick guards only retry
  * when a request is already pending and no matching response has arrived.
  */
-#define CONTROL_REQ_MAP_RETRY_TIMEOUT_LOOPS 200U
+#define CONTROL_REQ_MAP_RETRY_TIMEOUT_TICKS 200U
 #define CONTROL_REQ_CAR_RETRY_TIMEOUT_TICKS 120U
 #define CONTROL_LOCALIZE_STOP_STABLE_TICKS 20U
 #define CONTROL_LOCALIZE_POST_STOP_DRAIN_TICKS 40U
@@ -315,7 +315,7 @@ static float g_localize_samples_x_m[CONTROL_LOCALIZE_MAX_SAMPLES] = {0.0f};
 static float g_localize_samples_y_m[CONTROL_LOCALIZE_MAX_SAMPLES] = {0.0f};
 
 static uint8 g_map_request_waiting = 0U;
-static uint16 g_map_request_wait_loops = 0U;
+static uint32 g_map_request_wait_start_tick = 0U;
 
 static uint8 g_car_request_waiting = 0U;
 static uint32 g_car_request_wait_start_tick = 0U;
@@ -472,7 +472,7 @@ static void reset_localization_accumulator(void)
 static void clear_map_request_wait(void)
 {
     g_map_request_waiting = 0U;
-    g_map_request_wait_loops = 0U;
+    g_map_request_wait_start_tick = 0U;
 }
 
 static void clear_car_request_wait(void)
@@ -487,12 +487,12 @@ static void send_map_request_once(void)
     {
         (void)Algorithm_Test_PresetInput_ProvideMapFrame();
         g_map_request_waiting = 0U;
-        g_map_request_wait_loops = 0U;
+        g_map_request_wait_start_tick = 0U;
         return;
     }
     uart_send_map_request();
     g_map_request_waiting = 1U;
-    g_map_request_wait_loops = 0U;
+    g_map_request_wait_start_tick = g_control_tick_10ms;
 }
 
 static void send_car_request_once(void)
@@ -517,11 +517,8 @@ static void service_map_request_wait(void)
         return;
     }
 
-    if (g_map_request_wait_loops < CONTROL_REQ_MAP_RETRY_TIMEOUT_LOOPS)
-    {
-        g_map_request_wait_loops++;
-    }
-    if (g_map_request_wait_loops >= CONTROL_REQ_MAP_RETRY_TIMEOUT_LOOPS)
+    if ((uint32)(g_control_tick_10ms - g_map_request_wait_start_tick) >=
+        CONTROL_REQ_MAP_RETRY_TIMEOUT_TICKS)
     {
         send_map_request_once();
     }
@@ -2250,8 +2247,14 @@ static void finish_localization_to_map_or_plan(void)
         return;
     }
 
-    /* The prefetch has not arrived yet: resume the normal map wait/retry flow. */
-    mark_wait_new_map_frame();
+    /*
+     * The request may still be in flight while yaw alignment finishes. Keep
+     * its original frame baseline and retry timer when entering stage 31.
+     * Rebasing here could miss a just-arriving response, while clearing the
+     * wait state would immediately send a duplicate START to the same camera.
+     */
+    g_wait_new_map_frame = 1U;
+    g_wait_map_frame_base = g_localize_map_frame_base;
     set_control_phase_stage(CONTROL_PHASE_STEP_WAIT_CAMERA_DATA);
 }
 
@@ -2266,7 +2269,6 @@ static uint8 settle_camera_before_localization_once(void)
 
     if (Algorithm_Test_PresetInput_IsEnabled())
     {
-        start_localization_map_prefetch_once();
         (void)Algorithm_Test_PresetInput_ProvideCarPoseFrame();
         g_localize_camera_settled = 1U;
         return 1U;
@@ -2288,7 +2290,6 @@ static uint8 settle_camera_before_localization_once(void)
         uart_blob_clear_pending_data();
         g_localize_stop_sequence_started = 1U;
         g_localize_post_stop_start_tick = now_tick;
-        start_localization_map_prefetch_once();
     }
 
     if (!localization_wheels_stopped()) {
@@ -2742,6 +2743,14 @@ static void handle_localization_stage(void)
     }
 
     clear_car_request_wait();
+
+    /*
+     * START and CARPOS share UART1 and are handled by the same camera. Start
+     * MAP recognition only after all localization CARPOS samples have been
+     * consumed. The map is then prefetched while the chassis aligns its yaw,
+     * so localization and map acquisition no longer starve each other.
+     */
+    start_localization_map_prefetch_once();
     /*
      * 初始定位的关键修正：
      * - 视觉只提供地图位置平均值；

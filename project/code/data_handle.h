@@ -110,6 +110,8 @@ typedef struct {
 void uart_blob_init(void);
 /* 主循环调用：读取 FIFO 并尝试解析完整帧 */
 void process_blob_data(void);
+/* Discard pending map/position UART bytes and any incomplete frame. */
+void uart_blob_clear_pending_data(void);
 /* 主循环调用：读取视觉识别 UART FIFO，并按行解析 NUM/IMG 结果。 */
 void process_vision_data(void);
 /* 直接从多行字符串解析地图（不经过串口帧） */

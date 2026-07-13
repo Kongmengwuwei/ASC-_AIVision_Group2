@@ -5,6 +5,8 @@
 void Blue_Serial_Init(void);
 void BlueSerial_Printf(char *format, ...);
 void BlueSerial_GetLastRxFrame(char *buffer, uint16 length);
+/* Send the existing POSITION vision/odometry report without requesting a new camera frame. */
+void BlueSerial_ReportPosition(void);
 
 /* 由 LPUART8_IRQHandler 调用：只收字节、拼帧、入队，不在中断里解析命令。 */
 void BlueSerial_RxIrqHandler(void);

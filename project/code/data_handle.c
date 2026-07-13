@@ -1,4 +1,5 @@
 #include "data_handle.h"
+#include "zf_common_interrupt.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -1147,6 +1148,19 @@ void process_blob_data(void)
 
     append_stream_bytes(fifo_read_buf, read_len);
     parse_packets();
+}
+
+void uart_blob_clear_pending_data(void)
+{
+    uint32 primask = interrupt_global_disable();
+
+    fifo_clear(&uart_data_fifo);
+    memset(fifo_read_buf, 0, sizeof(fifo_read_buf));
+    memset(stream_buf, 0, sizeof(stream_buf));
+    stream_len = 0U;
+    car_pose_updated = false;
+
+    interrupt_global_enable(primask);
 }
 
 /*

@@ -413,6 +413,16 @@ static void BlueSerial_PrintPositionReport(uint8 vision_valid)
     }
 }
 
+/*
+ * Reuse the same POSITION payload as the [position] command for autonomous
+ * visual-localization updates. This only reports the cached valid pose; it
+ * never sends CARPOS or changes chassis control state.
+ */
+void BlueSerial_ReportPosition(void)
+{
+    BlueSerial_PrintPositionReport(car_pose_ready ? 1U : 0U);
+}
+
 static void BlueSerial_StartPositionRequest(void)
 {
     /*

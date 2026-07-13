@@ -75,6 +75,9 @@ void control_init(void);
  */
 void control_process(void);
 
+/* 10 ms timebase hook. Call once from the encoder/control PIT tick. */
+void control_tick_10ms(void);
+
 /**
  * @brief 人工触发重新开始一轮“定位->规划->执行”流程。
  *

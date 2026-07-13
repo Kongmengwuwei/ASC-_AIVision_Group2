@@ -57,9 +57,12 @@ float g_control_prestart_depart_compensate_m = -0.025f;
  * when a request is already pending and no matching response has arrived.
  */
 #define CONTROL_REQ_MAP_RETRY_TIMEOUT_LOOPS 200U
-#define CONTROL_REQ_CAR_RETRY_TIMEOUT_LOOPS 200U
-/* Loop passes before consuming CAR pose frames to avoid using delayed camera data. */
-#define CONTROL_CAMERA_POSE_SETTLE_LOOPS 20U
+#define CONTROL_REQ_CAR_RETRY_TIMEOUT_TICKS 120U
+#define CONTROL_LOCALIZE_STOP_STABLE_TICKS 20U
+#define CONTROL_LOCALIZE_POST_STOP_DRAIN_TICKS 40U
+#define CONTROL_LOCALIZE_WHEEL_STOP_ENCODER_TOL 5
+#define CONTROL_LOCALIZE_MAX_SAMPLES 5U
+#define CONTROL_LOCALIZE_TWO_SAMPLE_MATCH_M 0.03f
 #define CONTROL_PRESET_RECOGNITION_DELAY_MS 500U
 /* 推炸弹到爆炸点后停留 0.5s，等待爆炸效果生效 */
 #define CONTROL_BOMB_EXPLOSION_PAUSE_MS 500U
@@ -245,9 +248,9 @@ static uint8 g_start_yaw_ready = 0U;
 
 static uint8 g_wait_new_map_frame = 0U;
 static uint8 g_wait_map_frame_base = 0U;
-static uint8 g_relocalize_force_fresh_pose = 0U;
 /* 定位取样完成后，先用 IMU 闭环把车头转回发车方向基准，再允许进入取图/规划。 */
 static uint8 g_localize_yaw_align_started = 0U;
+static volatile uint32 g_control_tick_10ms = 0U;
 
 static size_t g_identify_segment_start_idx = 0U;
 static size_t g_identify_endpoint_indices[MAX_CAR_PATH] = {0U};
@@ -282,7 +285,11 @@ static uint8 g_saved_identify_ids_ready = 0U;
  */
 static uint8 g_localize_sample_count = 0U;
 static uint8 g_localize_camera_settled = 0U;
-static uint16 g_localize_camera_settle_loops = 0U;
+static uint8 g_localize_stop_sequence_started = 0U;
+static uint8 g_localize_fresh_pose_request_started = 0U;
+static uint8 g_localize_car_frame_base = 0U;
+static uint32 g_localize_stop_stable_start_tick = 0U;
+static uint32 g_localize_post_stop_start_tick = 0U;
 
 /**
  * @brief 起步动作是否已经触发�?
@@ -298,19 +305,18 @@ static float g_prestart_nominal_target_y_m = 0.0f;
 /**
  * @brief 初始定位阶段累计的视�?X 坐标和（米）�?
  */
-static float g_localize_sum_x_m = 0.0f;
+static float g_localize_samples_x_m[CONTROL_LOCALIZE_MAX_SAMPLES] = {0.0f};
 
 /**
  * @brief 初始定位阶段累计的视�?Y 坐标和（米）�?
  */
-static float g_localize_sum_y_m = 0.0f;
-static float g_localize_sum_yaw_deg = 0.0f;
+static float g_localize_samples_y_m[CONTROL_LOCALIZE_MAX_SAMPLES] = {0.0f};
 
 static uint8 g_map_request_waiting = 0U;
 static uint16 g_map_request_wait_loops = 0U;
 
 static uint8 g_car_request_waiting = 0U;
-static uint16 g_car_request_wait_loops = 0U;
+static uint32 g_car_request_wait_start_tick = 0U;
 
 /* ========================= 内部工具函数 ========================= */
 
@@ -364,22 +370,6 @@ static void control_hold_yaw_closed_loop(void)
     control_enable_yaw_closed_loop();
     car_go_flag = 1U;
     car_stop_flag = 0U;
-}
-
-static void report_visual_localization_bluetooth(float cam_x_m,
-                                                 float cam_y_m,
-                                                 float cam_yaw_deg)
-{
-    path_follow_status_t odom = {0};
-
-    path_follow_get_status(&odom);
-    BlueSerial_Printf("VLOC cam=%.3f,%.3f odom=%.3f,%.3f vyaw=%.1f oyaw=%.1f\r\n",
-                      cam_x_m,
-                      cam_y_m,
-                      odom.x_m,
-                      odom.y_m,
-                      cam_yaw_deg,
-                      odom.yaw_deg);
 }
 
 /**
@@ -465,10 +455,13 @@ static void reset_localization_accumulator(void)
 {
     g_localize_sample_count = 0U;
     g_localize_camera_settled = 0U;
-    g_localize_camera_settle_loops = 0U;
-    g_localize_sum_x_m = 0.0f;
-    g_localize_sum_y_m = 0.0f;
-    g_localize_sum_yaw_deg = 0.0f;
+    g_localize_stop_sequence_started = 0U;
+    g_localize_fresh_pose_request_started = 0U;
+    g_localize_car_frame_base = 0U;
+    g_localize_stop_stable_start_tick = 0U;
+    g_localize_post_stop_start_tick = 0U;
+    memset(g_localize_samples_x_m, 0, sizeof(g_localize_samples_x_m));
+    memset(g_localize_samples_y_m, 0, sizeof(g_localize_samples_y_m));
     g_localize_yaw_align_started = 0U;
 }
 
@@ -481,7 +474,7 @@ static void clear_map_request_wait(void)
 static void clear_car_request_wait(void)
 {
     g_car_request_waiting = 0U;
-    g_car_request_wait_loops = 0U;
+    g_car_request_wait_start_tick = 0U;
 }
 
 static void send_map_request_once(void)
@@ -504,12 +497,12 @@ static void send_car_request_once(void)
     {
         (void)Algorithm_Test_PresetInput_ProvideCarPoseFrame();
         g_car_request_waiting = 0U;
-        g_car_request_wait_loops = 0U;
+        g_car_request_wait_start_tick = 0U;
         return;
     }
     uart_send_car_request();
     g_car_request_waiting = 1U;
-    g_car_request_wait_loops = 0U;
+    g_car_request_wait_start_tick = g_control_tick_10ms;
 }
 
 static void service_map_request_wait(void)
@@ -538,11 +531,8 @@ static void service_car_request_wait(void)
         return;
     }
 
-    if (g_car_request_wait_loops < CONTROL_REQ_CAR_RETRY_TIMEOUT_LOOPS)
-    {
-        g_car_request_wait_loops++;
-    }
-    if (g_car_request_wait_loops >= CONTROL_REQ_CAR_RETRY_TIMEOUT_LOOPS)
+    if ((uint32)(g_control_tick_10ms - g_car_request_wait_start_tick) >=
+        CONTROL_REQ_CAR_RETRY_TIMEOUT_TICKS)
     {
         send_car_request_once();
     }
@@ -779,6 +769,52 @@ static size_t continuous_preset_index_for_level(uint8 level_index)
     return preset_index % Map_preset_count;
 }
 
+static uint8 localization_wheels_stopped(void)
+{
+    return (abs_int16_local(up_L_all) <= CONTROL_LOCALIZE_WHEEL_STOP_ENCODER_TOL &&
+            abs_int16_local(up_R_all) <= CONTROL_LOCALIZE_WHEEL_STOP_ENCODER_TOL &&
+            abs_int16_local(down_L_all) <= CONTROL_LOCALIZE_WHEEL_STOP_ENCODER_TOL &&
+            abs_int16_local(down_R_all) <= CONTROL_LOCALIZE_WHEEL_STOP_ENCODER_TOL) ? 1U : 0U;
+}
+
+static float localization_median(const float *samples, uint8 count)
+{
+    float sorted[CONTROL_LOCALIZE_MAX_SAMPLES] = {0.0f};
+    uint8 i;
+    uint8 j;
+    float temp;
+
+    if (samples == NULL || count == 0U) {
+        return 0.0f;
+    }
+    if (count > CONTROL_LOCALIZE_MAX_SAMPLES) {
+        count = CONTROL_LOCALIZE_MAX_SAMPLES;
+    }
+
+    memcpy(sorted, samples, (size_t)count * sizeof(sorted[0]));
+    for (i = 1U; i < count; i++) {
+        temp = sorted[i];
+        j = i;
+        while (j > 0U && sorted[j - 1U] > temp) {
+            sorted[j] = sorted[j - 1U];
+            j--;
+        }
+        sorted[j] = temp;
+    }
+
+    return sorted[count / 2U];
+}
+
+static uint8 localization_first_two_samples_match(void)
+{
+    float dx = g_localize_samples_x_m[1] - g_localize_samples_x_m[0];
+    float dy = g_localize_samples_y_m[1] - g_localize_samples_y_m[0];
+    float threshold_sq = CONTROL_LOCALIZE_TWO_SAMPLE_MATCH_M *
+                         CONTROL_LOCALIZE_TWO_SAMPLE_MATCH_M;
+
+    return ((dx * dx + dy * dy) <= threshold_sq) ? 1U : 0U;
+}
+
 static void reset_level_runtime_state_for_launch(void)
 {
     g_path_plan_paused = 0U;
@@ -795,7 +831,6 @@ static void reset_level_runtime_state_for_launch(void)
     g_prestart_nominal_target_y_m = 0.0f;
     g_wait_new_map_frame = 0U;
     g_wait_map_frame_base = 0U;
-    g_relocalize_force_fresh_pose = 0U;
     reset_identify_runtime_state();
     clear_saved_identify_ids();
     vision_clear_pending_data();
@@ -2050,12 +2085,10 @@ static void finish_identify_flow_and_relocalize(void)
 
     if (should_enter_vision_localization_stage())
     {
-        g_relocalize_force_fresh_pose = 1U;
         set_control_phase_stage(CONTROL_PHASE_STEP_LOCALIZE);
     }
     else
     {
-        g_relocalize_force_fresh_pose = 0U;
         mark_wait_new_map_frame();
         set_control_phase_stage(CONTROL_PHASE_STEP_WAIT_CAMERA_DATA);
     }
@@ -2179,6 +2212,8 @@ static uint8 get_camera_position_meter(float *x_m, float *y_m)
 
 static uint8 settle_camera_before_localization_once(void)
 {
+    uint32 now_tick;
+
     if (g_localize_camera_settled)
     {
         return 1U;
@@ -2192,13 +2227,40 @@ static uint8 settle_camera_before_localization_once(void)
     }
 
     /*
-     * Let the camera FIFO drain over several control-loop passes instead of
-     * blocking the whole chassis task with system_delay_ms().
+     * A camera position is approximately 350 ms behind its report time while
+     * the chassis is moving. Stop CARINIT immediately, then require both a
+     * 400 ms post-stop drain and 200 ms of quiet encoder feedback before CARPOS.
+     * The two waits overlap while the car is braking.
      */
-    process_blob_data();
-    if (g_localize_camera_settle_loops < CONTROL_CAMERA_POSE_SETTLE_LOOPS)
-    {
-        g_localize_camera_settle_loops++;
+    car_go_flag = 1U;
+    car_stop_flag = 1U;
+    now_tick = g_control_tick_10ms;
+
+    if (!g_localize_stop_sequence_started) {
+        /* Discard any continuous-report frame that may have started in motion. */
+        uart_stop_car_stream();
+        uart_blob_clear_pending_data();
+        g_localize_stop_sequence_started = 1U;
+        g_localize_post_stop_start_tick = now_tick;
+    }
+
+    if (!localization_wheels_stopped()) {
+        g_localize_stop_stable_start_tick = 0U;
+        return 0U;
+    }
+
+    if (0U == g_localize_stop_stable_start_tick) {
+        g_localize_stop_stable_start_tick = now_tick;
+        return 0U;
+    }
+
+    if ((uint32)(now_tick - g_localize_stop_stable_start_tick) <
+        CONTROL_LOCALIZE_STOP_STABLE_TICKS) {
+        return 0U;
+    }
+
+    if ((uint32)(now_tick - g_localize_post_stop_start_tick) <
+        CONTROL_LOCALIZE_POST_STOP_DRAIN_TICKS) {
         return 0U;
     }
 
@@ -2494,7 +2556,6 @@ static void handle_prestart_move(void)
         }
         control_hold_yaw_closed_loop();
         reset_localization_accumulator();
-        g_relocalize_force_fresh_pose = 0U;
         if (should_enter_vision_localization_stage())
         {
             set_control_phase_stage(CONTROL_PHASE_STEP_LOCALIZE);
@@ -2512,8 +2573,9 @@ static void handle_prestart_move(void)
  *
  * 核心逻辑�?
  * - 按需请求视觉车位�?
- * - 采集多帧位置后取平均
- * - 将里程计位置重置到视觉平均位置
+ * - 仅采集停车后主动请求到的新位置帧
+ * - 采集多帧位置后取坐标中值，抑制单帧异常值
+ * - 将里程计位置重置到视觉中值位置
  * - 航向不采用视觉 yaw，而是先原地转向校正回发车方向基准
  */
 static void handle_localization_stage(void)
@@ -2534,7 +2596,6 @@ static void handle_localization_stage(void)
         {
         }
         g_level_start_localization_required = 0U;
-        g_relocalize_force_fresh_pose = 0U;
         clear_car_request_wait();
         mark_wait_new_map_frame();
         set_control_phase_stage(CONTROL_PHASE_STEP_WAIT_CAMERA_DATA);
@@ -2558,7 +2619,6 @@ static void handle_localization_stage(void)
         g_localize_yaw_align_started = 0U;
         control_hold_yaw_closed_loop();
         g_level_start_localization_required = 0U;
-        g_relocalize_force_fresh_pose = 0U;
         if (g_control_flow_phase == CONTROL_FLOW_IDENTIFY)
         {
         }
@@ -2571,24 +2631,35 @@ static void handle_localization_stage(void)
     {
         min_samples = CONTROL_RELOCALIZE_MIN_SAMPLES_PUSHBOX;
     }
+    if (min_samples > CONTROL_LOCALIZE_MAX_SAMPLES)
+    {
+        min_samples = CONTROL_LOCALIZE_MAX_SAMPLES;
+    }
 
     if (!settle_camera_before_localization_once())
     {
-        service_car_request_wait();
+        return;
+    }
+
+    if (!g_localize_fresh_pose_request_started)
+    {
+        /* The request baseline is recorded after the old stream has drained. */
+        uart_blob_clear_pending_data();
+        g_localize_car_frame_base = car_frame_count;
+        car_pose_updated = false;
+        g_localize_fresh_pose_request_started = 1U;
+        send_car_request_once();
         return;
     }
 
     if (car_pose_updated)
     {
         car_pose_updated = false;
-        clear_car_request_wait();
-        accept_sample = 1U;
-    }
-    else if (!g_relocalize_force_fresh_pose &&
-             g_localize_sample_count == 0U && car_pose_ready)
-    {
-        /* 启动初期若已有缓存帧，允许先吃一帧，避免死等 updated 标志�?*/
-        accept_sample = 1U;
+        if (car_frame_count != g_localize_car_frame_base)
+        {
+            clear_car_request_wait();
+            accept_sample = 1U;
+        }
     }
 
     if (!accept_sample)
@@ -2602,19 +2673,28 @@ static void handle_localization_stage(void)
         return;
     }
 
-    g_localize_sum_x_m += cam_x_m;
-    g_localize_sum_y_m += cam_y_m;
-    g_localize_sum_yaw_deg += car_pose.yaw;
+    g_localize_samples_x_m[g_localize_sample_count] = cam_x_m;
+    g_localize_samples_y_m[g_localize_sample_count] = cam_y_m;
     g_localize_sample_count++;
 
-    if (g_localize_sample_count < min_samples)
+    if (g_localize_sample_count == 2U &&
+        localization_first_two_samples_match())
     {
+        avg_x_m = 0.5f * (g_localize_samples_x_m[0] + g_localize_samples_x_m[1]);
+        avg_y_m = 0.5f * (g_localize_samples_y_m[0] + g_localize_samples_y_m[1]);
+    }
+    else if (g_localize_sample_count < min_samples)
+    {
+        g_localize_car_frame_base = car_frame_count;
+        car_pose_updated = false;
         send_car_request_once();
         return;
     }
-
-    avg_x_m = g_localize_sum_x_m / (float)g_localize_sample_count;
-    avg_y_m = g_localize_sum_y_m / (float)g_localize_sample_count;
+    else
+    {
+        avg_x_m = localization_median(g_localize_samples_x_m, g_localize_sample_count);
+        avg_y_m = localization_median(g_localize_samples_y_m, g_localize_sample_count);
+    }
 
     clear_car_request_wait();
     /*
@@ -2623,10 +2703,8 @@ static void handle_localization_stage(void)
      * - 航向目标强制采用发车时记录的方向基准；
      * - 下发原地转向，让 IMU yaw 闭环把车头实际纠正回发车方向。
      */
-    report_visual_localization_bluetooth(avg_x_m,
-                                         avg_y_m,
-                                         g_localize_sum_yaw_deg / (float)g_localize_sample_count);
     path_follow_reset_pose(avg_x_m, avg_y_m, start_base_yaw_deg);
+    BlueSerial_ReportPosition();
     path_follow_start_rotate_to_yaw(start_base_yaw_deg);
     control_enable_yaw_closed_loop();
     car_go_flag = 1U;
@@ -2654,12 +2732,10 @@ static void handle_wait_camera_data(void)
             if (get_camera_position_meter(&cam_x_m, &cam_y_m))
             {
                 /* 等地图阶段若拿到新位置，顺带轻量同步一次里程计；方向仍使用发车基准。 */
-                report_visual_localization_bluetooth(cam_x_m,
-                                                     cam_y_m,
-                                                     car_pose.yaw);
                 path_follow_reset_pose(cam_x_m,
                                        cam_y_m,
                                        map_dir_to_yaw_deg(CONTROL_MAP_DIR_RIGHT));
+                BlueSerial_ReportPosition();
             }
         }
     }
@@ -3126,6 +3202,11 @@ static void handle_error_stage(void)
     }
 
     service_map_request_wait();
+}
+
+void control_tick_10ms(void)
+{
+    g_control_tick_10ms++;
 }
 
 void control_init(void)

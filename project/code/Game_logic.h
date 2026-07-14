@@ -13,4 +13,13 @@ void Plan_path_Mode2(void);
 /* 模式3：识别模式 */
 void Plan_path_Identify(void);
 
+/* 识别访问顺序；真实相机识别前 g_identify_seq_id 中的值可能为 0。 */
+extern uint8 g_identify_seq_kind[MAX_BOXES + MAX_TARGETS];
+extern uint8 g_identify_seq_id[MAX_BOXES + MAX_TARGETS];
+extern int g_identify_seq_len;
+
+/* 本次识别规划预计炸毁的初始障碍格。 */
+extern Position g_blown_cell[MAX_OBSTACLES];
+extern int g_blown_count;
+
 #endif

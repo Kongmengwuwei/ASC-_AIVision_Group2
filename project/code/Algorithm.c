@@ -1,4 +1,4 @@
-﻿#include "Algorithm.h"
+#include "Algorithm.h"
 #include <string.h>
 
 /*
@@ -168,20 +168,24 @@ static int select_top_bomb_indices_by_score(const Position *bombs,
 }
 
 /*
- * 灏嗛殰纰嶇墿/鐐稿脊/绠卞瓙鍐欏叆涓€缁?grid銆? * grid 姣忎釜鍗曞厓鏄綅鏍囪锛? * - 浣?4 浣嶈褰曟槸鍚︿负闅滅銆佺偢寮广€佺瀛愮瓑绫诲埆銆? * - 楂?4 浣嶅湪绠卞瓙鍦烘櫙涓嬭褰曗€滅瀛愮储寮曗€?0~15锛岃秴鍑烘埅鏂埌 15)銆? */
+ * 将障碍物/炸弹/箱子写入一维 grid。
+ * grid 每个单元是位标记：
+ * - 低 4 位记录是否为障碍、炸弹、箱子等类别。
+ * - 高 4 位在箱子场景下记录"箱子索引"（0~15，超出截断到 15）。
+ */
 static void grid_build(int row_cnt, int col_cnt,
                        const Position *obstacles, int obstacles_cnt,
                        const Position *bombs, int bombs_cnt,
                        const Position *boxes, int boxes_cnt,
                        uint8_t *grid)
 {
-    // 纭畾缃戞牸澶у皬
+    // 确定网格大小
     int n = row_cnt * col_cnt;
     if (n > grid_size)
         n = grid_size;
-    // 娓呯┖缃戞牸
+    // 清空网格
     memset(grid, 0, n);
-    // 鏍囪鍚勫潡
+    // 标记各块
     for (int i = 0; i < obstacles_cnt; i++)
     {
         int r = obstacles[i].row, c = obstacles[i].col;
@@ -205,7 +209,10 @@ static void grid_build(int row_cnt, int col_cnt,
         }
     }
 }
-/* 妫€鏌ュ崟鍏冩槸鍚︿笉鍙€氳锛氶殰纰?/ 鐐稿脊 / 宸插皝閿佺偢寮广€?*/
+/* 检查单元是否不可通行：障碍 / 炸弹 / 已封锁炸弹。*/
+/* 仅对小车本体导航生效：允许炸弹被推入待炸墙格，但禁止小车在爆破前穿过该格。 */
+static Position g_car_forbidden_cell = {255, 255, 0};
+
 static int check_obstacle(uint8_t *grid, int col_cnt, int row, int col)
 {
     if (row < 0 || col < 0)
@@ -213,7 +220,9 @@ static int check_obstacle(uint8_t *grid, int col_cnt, int row, int col)
     return ((grid[col_cnt * row + col] & (OBSTACLE | BOMB | BLOCKED_BOMB)) != 0);
 }
 /*
- * 鍒ゆ柇鏌愪綅缃槸鍚﹀瓨鍦ㄢ€滈櫎 skip_index 澶栫殑绠卞瓙鈥濄€? * 鐢ㄤ簬鈥滄鍦ㄦ帹鍔ㄧ skip_index 涓瀛愨€濇椂锛屽拷鐣ュ畠鑷韩鍗犱綅锛屼粎妫€鏌ュ叾浠栫瀛愮鎾炪€? */
+ * 判断某位置是否存在"除 skip_index 外的箱子"。
+ * 用于"正在推动第 skip_index 个箱子"时，忽略它自身占位，仅检查其他箱子碰撞。
+ */
 static inline int BOX_EXCLUDING(const uint8_t *grid, int col_cnt, int row, int col, size_t skip_index)
 {
     size_t index = (size_t)(row * col_cnt + col);
@@ -224,7 +233,7 @@ static inline int BOX_EXCLUDING(const uint8_t *grid, int col_cnt, int row, int c
         return 1;
     return (size_t)(cell >> 4) != skip_index;
 }
-/* BOX_EXCLUDING 鐨勮竟鐣屽寘瑁呯増鏈€?*/
+/* BOX_EXCLUDING 的边界包装版本。*/
 static int check_box_with_excluding(uint8_t *grid, int col_cnt, int row, int col, size_t skip_index)
 {
     if (row < 0 || col < 0)
@@ -232,9 +241,10 @@ static int check_box_with_excluding(uint8_t *grid, int col_cnt, int row, int col
     return (BOX_EXCLUDING(grid, col_cnt, row, col, skip_index));
 }
 /*
- * 鍒ゆ柇鈥滅瀛愪笅涓€姝ヨ惤鐐光€濇槸鍚﹁闃诲锛? * - 瓒婄晫闃诲
- * - 缃戞牸闅滅闃诲
- * - 涓庡叾浠栫瀛愰噸鍙犻樆濉烇紙鎺掗櫎褰撳墠姝ｅ湪鎺ㄥ姩鐨勭瀛愶級
+ * 判断"箱子下一步落点"是否被阻挡：
+ * - 越界阻挡
+ * - 网格障碍阻挡
+ * - 与其他箱子重叠阻塞（排除当前正在推动的箱子）
  */
 static int check_push_destination_blocked(uint8_t *grid, int row_cnt, int col_cnt,
                                           const Position *boxes, int boxes_cnt,
@@ -255,9 +265,12 @@ static int check_push_destination_blocked(uint8_t *grid, int row_cnt, int col_cn
     return 0;
 }
 /*
- * 浠ヤ笅鏄?2D A* 浣跨敤鐨勬渶灏忓爢宸ュ叿锛? * - 浠?f_cost 涓轰富鎺掑簭閿紝h_cost 涓烘鎺掑簭閿紙鏇存帴杩戠粓鐐硅€呬紭鍏堬級銆? * - 鐢ㄦ暟缁勫疄鐜颁簩鍙夊爢锛岄檷浣?open 闆嗗悎鍙栨渶灏忎唬浠疯妭鐐圭殑澶嶆潅搴︺€? */
+ * 以下是 2D A* 使用的最小堆工具：
+ * - 以 f_cost 为主排序键，h_cost 为次排序键（更接近终点者优先）。
+ * - 用数组实现二叉堆，降低 open 集合取最小代价节点的复杂度。
+ */
 
-/* 浜ゆ崲鍫嗘暟缁勪腑鐨勪袱涓Ы浣嶃€?*/
+/* 交换堆数组中的两个槽位 */
 static inline void heap_swap(binary_heap *heap, int i, int j)
 {
     int node_i = heap->index[i];
@@ -267,7 +280,7 @@ static inline void heap_swap(binary_heap *heap, int i, int j)
     heap_pos_2d[node_i] = j;
     heap_pos_2d[node_j] = i;
 }
-/* 姣旇緝鍫嗗唴涓や釜鑺傜偣浼樺厛绾с€?*/
+/* 比较堆内两个节点优先级。*/
 static inline int heap_compare_less(const a_star_param *nodes, const binary_heap *heap, int i, int j)
 {
     int index_i = heap->index[i];
@@ -278,7 +291,7 @@ static inline int heap_compare_less(const a_star_param *nodes, const binary_heap
     return nodes[index_i].h_cost < nodes[index_j].h_cost;
 }
 
-/* 鍫嗕笂娴細鐢ㄤ簬鏂版彃鍏ユ垨浠ｄ环涓嬮檷鍚庣殑閲嶆帓銆?*/
+/* 堆上浮：用于新插入或代价下降后的重排 */
 static inline void heap_sift_up(a_star_param *nodes, binary_heap *heap, int i)
 {
     while (i > 0)
@@ -293,7 +306,7 @@ static inline void heap_sift_up(a_star_param *nodes, binary_heap *heap, int i)
             break;
     }
 }
-/* 鍫嗕笅娌夛細鐢ㄤ簬寮瑰嚭鍫嗛《鍚庢妸灏惧厓绱犳斁鍒版牴骞舵仮澶嶅爢搴忋€?*/
+/* 堆下沉：用于弹出堆顶后把尾元素放到根并恢复堆序 */
 static inline void heap_sift_down(a_star_param *nodes, binary_heap *heap, int i)
 {
     int size = heap->size;
@@ -320,7 +333,7 @@ static inline void heap_sift_down(a_star_param *nodes, binary_heap *heap, int i)
     }
 }
 
-/* 鍘嬪叆 open 闆嗗悎銆?*/
+/* 压入 open 集合 */
 static void heap_push(a_star_param *nodes, binary_heap *heap, int node_index)
 {
     if (heap->size >= grid_size || node_index < 0 || node_index >= grid_size)
@@ -333,7 +346,7 @@ static void heap_push(a_star_param *nodes, binary_heap *heap, int node_index)
     heap_pos_2d[node_index] = i;
     heap_sift_up(nodes, heap, i);
 }
-/* 寮瑰嚭 open 闆嗗悎涓渶浼樿妭鐐广€?*/
+/* 弹出 open 集合中最优节点 */
 static int heap_pop(a_star_param *nodes, binary_heap *heap)
 {
     if (heap->size == 0)
@@ -352,7 +365,7 @@ static int heap_pop(a_star_param *nodes, binary_heap *heap)
     return top;
 }
 
-/* 鑺傜偣宸叉湁鏇翠紭 g_cost 鏃讹紝瑙﹀彂鍫嗗唴浣嶇疆鏇存柊銆?*/
+/* 节点已有更优 g_cost 时，触发堆内位置更新 */
 static void heap_update(a_star_param *nodes, binary_heap *heap, int node_index)
 {
     if (node_index < 0 || node_index >= grid_size)
@@ -362,14 +375,14 @@ static void heap_update(a_star_param *nodes, binary_heap *heap, int node_index)
     heap_sift_up(nodes, heap, heap_pos_2d[node_index]);
 }
 
-/* Four-direction A* heuristic: each orthogonal move costs 10. */
+/* 四方向 A* 启发函数：每次正交移动代价为 10 */
 static inline int orthogonal_distance(Position p1, Position p2)
 {
     int dif_row = p1.row > p2.row ? p1.row - p2.row : p2.row - p1.row;
     int dif_col = p1.col > p2.col ? p1.col - p2.col : p2.col - p1.col;
     return 10 * (dif_row + dif_col);
 }
-/* 鏇煎搱椤胯窛绂伙細鐢ㄤ簬绠卞瓙鎺ㄩ€侀樁娈电殑鍚彂浼拌銆?*/
+/* 曼哈顿距离：用于箱子推送阶段的启发估计 */
 static inline int manhattan_distance_cells(Position p1, Position p2)
 {
     int dif_row = p1.row > p2.row ? p1.row - p2.row : p2.row - p1.row;
@@ -377,13 +390,12 @@ static inline int manhattan_distance_cells(Position p1, Position p2)
     return dif_row + dif_col;
 }
 
-/* 2D A* 鑺傜偣姹犮€?*/
+/* 2D A* 节点池。*/
 a_star_param a_star[grid_size];
 
 /*
- * 2D A*: car path from start to target.
- * Movement is fixed to four orthogonal directions; allow_diagonal is kept only
- * for compatibility with existing call sites.
+ * 2D A*：小车从起点到目标的路径规划
+ * 移动固定为四个正交方向；保留 allow_diagonal 参数仅为兼容现有调用点
  */
 static int a_star_path_plan(int row_cnt, int col_cnt,
                             const Position *obstacles, int obstacles_cnt,
@@ -395,16 +407,16 @@ static int a_star_path_plan(int row_cnt, int col_cnt,
 {
     (void)allow_diagonal;
 
-    // Validate start/target.
+    // 校验起点/目标
     if (start.row >= row_cnt || start.col >= col_cnt)
         return -1;
     if (target.row >= row_cnt || target.col >= col_cnt)
         return -1;
-    // Build occupancy grid.
+    // 构建占据网格
     uint8_t grid[grid_size];
     grid_build(row_cnt, col_cnt, obstacles, obstacles_cnt, bombs, bombs_cnt, boxes, boxes_cnt, grid);
 
-    // 鍒濆鍖?A* 鐨勮妭鐐硅闂粍鏍囪瘑
+    // 初始化 A* 的节点访问组标识
     memset(a_star, 0, sizeof(a_star));
 
     binary_heap open_set;
@@ -446,7 +458,7 @@ static int a_star_path_plan(int row_cnt, int col_cnt,
             if (!out_path)
                 return a_star[target_index].path_len;
 
-            // 宸叉壘鍒拌矾寰勶紝鍚戝鍥炴函
+            // 已找到路径，向后回溯
             int path_len = 0;
             int curr = target_index;
             while (curr != -1)
@@ -464,7 +476,7 @@ static int a_star_path_plan(int row_cnt, int col_cnt,
                 out_path[i] = out_path[path_len - 1 - i];
                 out_path[path_len - 1 - i] = temp;
             }
-            return path_len; // 姝ｅ父杩斿洖璺緞姝ユ暟
+            return path_len; // 正常返回路径步数
         }
 
         // Expand neighbors.
@@ -477,18 +489,21 @@ static int a_star_path_plan(int row_cnt, int col_cnt,
             {
                 int neighbor_index = nr * col_cnt + nc;
 
-                // 鍒╃敤宸叉湁鏂规硶妫€娴嬬洰鏍囨牸鏈韩鏄惁鍙€氳繃缃戞牸 (鍖呮嫭澧欏拰绠卞瓙)
+                // 利用已有方法检测目标格本身是否可通过网格（包括墙和箱子）
                 if (check_obstacle(grid, col_cnt, nr, nc) || (grid[neighbor_index] & BOX))
                     continue;
 
-                // 濡傛灉宸茬粡鍔犲叆浜?close 闆嗗悎
+                if (nr == (int)g_car_forbidden_cell.row && nc == (int)g_car_forbidden_cell.col)
+                    continue;
+
+                // 如果已经加入了 close 集合
                 if (a_star[neighbor_index].open_or_close == 2)
                     continue;
 
                 int tentative_g_cost = a_star[current_index].g_cost + move_cost[i];
 
                 if (a_star[neighbor_index].open_or_close == 0)
-                { // unvisited (姝ゅ墠鏈璁块棶杩?
+                { // unvisited（此前未被访问过）
                     a_star[neighbor_index].parent_index = current_index;
                     a_star[neighbor_index].g_cost = tentative_g_cost;
                     a_star[neighbor_index].h_cost = orthogonal_distance((Position){nr, nc}, target);
@@ -499,7 +514,7 @@ static int a_star_path_plan(int row_cnt, int col_cnt,
                 }
                 else if (tentative_g_cost < a_star[neighbor_index].g_cost)
                 {
-                    // Already in open set, but found a better route.
+                    // 已在 open 集合中，但发现了更优路径
                     a_star[neighbor_index].parent_index = current_index;
                     a_star[neighbor_index].g_cost = tentative_g_cost;
                     a_star[neighbor_index].f_cost = a_star[neighbor_index].g_cost + a_star[neighbor_index].h_cost;
@@ -509,16 +524,18 @@ static int a_star_path_plan(int row_cnt, int col_cnt,
             }
         }
     }
-    return -1; // 瀵绘壘涓嶅埌璺緞
+    return -1; // 未找到路径
 }
 
 /*
- * 3D A* 鐘舵€佸畾涔夛細
+ * 3D A* 状态定义：
  * state = (box_row, box_col, face)
- * - face 琛ㄧず灏忚溅绔欏湪绠卞瓙鍝竴渚у苟鍑嗗鍚戝摢涓柟鍚戞帹銆? * - 鍚屼竴涓瀛愭牸瀛愭湁 4 涓湞鍚戠姸鎬侊紝鍥犳瀹归噺鏄?grid_size * 4銆? */
+ * - face 表示小车站在箱子哪一侧并准备向哪个方向推。
+ * - 同一个箱子格子有 4 个朝向状态，因此容量是 grid_size * 4。
+ */
 a_star_3d_param a_star_3d[grid_size * 4];
 
-/* 3D A* 鐨勫爢浜ゆ崲銆?*/
+/* 3D A* 的堆交换 */
 static inline void heap_swap_3d(binary_heap_3d *heap, int i, int j)
 {
     int node_i = heap->index[i];
@@ -528,7 +545,7 @@ static inline void heap_swap_3d(binary_heap_3d *heap, int i, int j)
     heap_pos_3d[node_i] = j;
     heap_pos_3d[node_j] = i;
 }
-/* 3D A* 鐨勪紭鍏堢骇姣旇緝锛歠 涓轰富锛実 鍜?h 涓鸿緟銆?*/
+/* 3D A* 的优先级比较：f 为主，g 和 h 为辅。*/
 static inline int heap_compare_less_3d(const binary_heap_3d *heap, int i, int j)
 {
     int index_i = heap->index[i];
@@ -541,7 +558,7 @@ static inline int heap_compare_less_3d(const binary_heap_3d *heap, int i, int j)
     return a_star_3d[index_i].h_cost < a_star_3d[index_j].h_cost;
 }
 
-/* 3D A* 鍫嗕笂娴€?*/
+/* 3D A* 堆上浮。*/
 static inline void heap_sift_up_3d(binary_heap_3d *heap, int i)
 {
     while (i > 0)
@@ -556,7 +573,7 @@ static inline void heap_sift_up_3d(binary_heap_3d *heap, int i)
             break;
     }
 }
-/* 3D A* 鍫嗕笅娌夈€?*/
+/* 3D A* 堆下沉。*/
 static inline void heap_sift_down_3d(binary_heap_3d *heap, int i)
 {
     int size = heap->size;
@@ -583,7 +600,7 @@ static inline void heap_sift_down_3d(binary_heap_3d *heap, int i)
     }
 }
 
-/* 3D A* 鍏ュ爢銆?*/
+/* 3D A* 入堆。*/
 static void heap_push_3d(binary_heap_3d *heap, int node_index)
 {
     if (heap->size >= grid_size * 4 || node_index < 0 || node_index >= (grid_size * 4))
@@ -596,7 +613,7 @@ static void heap_push_3d(binary_heap_3d *heap, int node_index)
     heap_pos_3d[node_index] = i;
     heap_sift_up_3d(heap, i);
 }
-/* 3D A* 鍑哄爢銆?*/
+/* 3D A* 出堆。*/
 static int heap_pop_3d(binary_heap_3d *heap)
 {
     if (heap->size == 0)
@@ -615,7 +632,7 @@ static int heap_pop_3d(binary_heap_3d *heap)
     return top;
 }
 
-/* 3D A* 鑺傜偣浠ｄ环鏀硅繘鍚庣殑閲嶆帓銆?*/
+/* 3D A* 节点代价改进后的重排。*/
 static void heap_update_3d(binary_heap_3d *heap, int node_index)
 {
     if (node_index < 0 || node_index >= (grid_size * 4))
@@ -626,9 +643,16 @@ static void heap_update_3d(binary_heap_3d *heap, int node_index)
 }
 
 /*
- * 3D A*锛堟帹绠变富绠楁硶锛夛細
- * - 璧风偣锛氬厛鏋氫妇 4 涓彲鑳芥帹闈紝绛涘嚭灏忚溅鍙埌杈剧殑鍏ユ帹濮挎€併€? * - 鎵╁睍锛? *   1) 鍚屽悜鐩存帹锛氱瀛愬墠杩涗竴姝ワ紝face 涓嶅彉銆? *   2) 缁曡鎹㈠悜锛氱瀛愪笉鍔紝灏忚溅缁曞埌鍙︿竴渚э紝face 鏀瑰彉銆? * - 浠ｄ环璁捐锛? *   COST_PUSH > COST_WALK锛岄紦鍔卞噺灏戞棤鏁堣蛋鍔紱
- *   COST_REORIENT_PENALTY 绾︽潫棰戠箒鎹㈠悜銆? * - 杈撳嚭锛氳繑鍥炲畬鏁粹€滃皬杞﹁矾寰勨€濓紝涓嶆槸浠呯瀛愯建杩广€? */
+ * 3D A*（推箱主算法）：
+ * - 起点：先枚举 4 个可能推面，筛出小车可到达的入推姿态。
+ * - 扩展：
+ *   1) 同向直推：箱子前进一步，face 不变。
+ *   2) 绕行换向：箱子不动，小车绕到另一侧，face 改变。
+ * - 代价设计：
+ *   COST_PUSH > COST_WALK，鼓励减少无效走动；
+ *   COST_REORIENT_PENALTY 约束频繁换向。
+ * - 输出：返回完整"小车路径"，不是仅箱子轨迹。
+ */
 int a_star_path_plan_3d(int row_cnt, int col_cnt,
                         const Position *obstacles, int obstacles_cnt,
                         const Position *bombs, int bombs_cnt,
@@ -697,7 +721,7 @@ int a_star_path_plan_3d(int row_cnt, int col_cnt,
     if (min_target_distance_from_start == 999999)
         return -1;
 
-    // 浠?涓柟鍚戜腑閫夋嫨鎺ㄥ悜
+    // 从 4 个方向中选择推向
     for (int f = 0; f < 4; f++)
     {
         int push_point_row = box_start.row - dir_row_3d[f];
@@ -712,7 +736,7 @@ int a_star_path_plan_3d(int row_cnt, int col_cnt,
                                            box_index,
                                            first_push_row, first_push_col))
             continue;
-        // Compute path from car to push point.
+        //计算小车到推点的路径
         int walk_len = a_star_path_plan(row_cnt, col_cnt,
                                         obstacles, obstacles_cnt, bombs, bombs_cnt,
                                         local_boxes, boxes_cnt,
@@ -722,17 +746,17 @@ int a_star_path_plan_3d(int row_cnt, int col_cnt,
 
         if (walk_len >= 0)
         {
-            // If car can reach this push face, initialize that state.
+            // 如果小车能到达这个推面，初始化该状态
             int state_index = (box_start.row * col_cnt + box_start.col) * 4 + f;
 
-            // 璁＄畻鍒拌揪鐩爣鐐圭殑璺濈
+            // 计算到达目标点的距离
             a_star_3d[state_index].g_cost = walk_len * COST_WALK;
-            a_star_3d[state_index].h_cost = min_target_distance_from_start * COST_PUSH; // 璋冩暣姣斾緥锛屼紭鍏堣€冭檻绠卞瓙缁堢偣
+            a_star_3d[state_index].h_cost = min_target_distance_from_start * COST_PUSH; // 调整比例，优先考虑箱子终点
             a_star_3d[state_index].f_cost = a_star_3d[state_index].g_cost + a_star_3d[state_index].h_cost;
             a_star_3d[state_index].parent_index = -1;
             a_star_3d[state_index].path_len = walk_len;
             a_star_3d[state_index].open_or_close = 1;
-            a_star_3d[state_index].is_push = 0; // 娌℃帹杩囷紝鍒氳浆绉诲埌鎺ㄤ綅
+            a_star_3d[state_index].is_push = 0; // 没推过，刚转移到推位
 
             heap_push_3d(&open_set, state_index);
         }
@@ -769,8 +793,8 @@ int a_star_path_plan_3d(int row_cnt, int col_cnt,
         {
             target_3d_index = curr_index;
             break;
-        } // 鎺ㄥ畬璺冲嚭
-        // Push box forward with same face.
+        } // 推完跳出
+        // 保持同一推面向前推箱子
         int next_row = row + dir_row_3d[face];
         int next_col = col + dir_col_3d[face];
 
@@ -779,10 +803,10 @@ int a_star_path_plan_3d(int row_cnt, int col_cnt,
                                             box_index,
                                             next_row, next_col))
         {
-            int next_index = (next_row * col_cnt + next_col) * 4 + face; // face涓嶅彉锛屾病鎹㈡帹闈?
+            int next_index = (next_row * col_cnt + next_col) * 4 + face; // face 不变，没换推面
             if (a_star_3d[next_index].open_or_close != 2)
             {
-                int tentative_g = a_star_3d[curr_index].g_cost + COST_PUSH; // 绂诲紑鍘熻矾寰勶紝娣诲姞鍋忕Щ浠ｄ环
+                int tentative_g = a_star_3d[curr_index].g_cost + COST_PUSH; // 离开原路径，添加偏移代价
 
                 if (a_star_3d[next_index].open_or_close == 0 || tentative_g < a_star_3d[next_index].g_cost)
                 {
@@ -792,7 +816,7 @@ int a_star_path_plan_3d(int row_cnt, int col_cnt,
                     a_star_3d[next_index].h_cost = min_target_h[next_row * col_cnt + next_col] * COST_PUSH;
                     a_star_3d[next_index].f_cost = tentative_g + a_star_3d[next_index].h_cost;
                     a_star_3d[next_index].path_len = a_star_3d[curr_index].path_len + 1;
-                    a_star_3d[next_index].is_push = 1; // 鐩磋蛋
+                    a_star_3d[next_index].is_push = 1; // 直走
 
                     if (a_star_3d[next_index].open_or_close == 0)
                     {
@@ -806,24 +830,24 @@ int a_star_path_plan_3d(int row_cnt, int col_cnt,
                 }
             }
         }
-        // Reposition car to another push face without moving box.
+        // 将小车重新定位到另一个推面，不移动箱子
         for (int next_face = 0; next_face < 4; next_face++)
         {
             if (next_face == face)
-                continue; // 璺宠繃鐩稿悓鏂瑰悜
+                continue; // 跳过相同方向
 
-            int next_index = (row * col_cnt + col) * 4 + next_face; // 鍙敼鍙樹簡鎺ㄥ悜
+            int next_index = (row * col_cnt + col) * 4 + next_face; // 只改变了推向
             if (a_star_3d[next_index].open_or_close == 2)
-                continue; // 璺宠繃宸插叧闂殑璺緞
+                continue; // 跳过已关闭的路径
 
-            // 璁＄畻灏忚溅闇€瑕佺粫鍒扮殑浣嶇疆
+            // 计算小车需要绕到的位置
             int target_face_row = row - dir_row_3d[next_face];
             int target_face_col = col - dir_col_3d[next_face];
 
             if (target_face_row < 0 || target_face_row >= row_cnt || target_face_col < 0 || target_face_col >= col_cnt)
                 continue;
-            local_boxes[box_index] = (Position){row, col}; // 灏嗗綋鍓嶈鎺ㄥ姩瀵硅薄鏀惧湪瀹炴椂浣嶇疆
-            // Reorientation occupancy check.
+            local_boxes[box_index] = (Position){row, col}; // 将当前被推动对象放在实时位置
+            // 换向占据检查
             if (check_push_destination_blocked(grid, row_cnt, col_cnt,
                                                local_boxes, boxes_cnt,
                                                box_index,
@@ -846,10 +870,10 @@ int a_star_path_plan_3d(int row_cnt, int col_cnt,
                 {
                     a_star_3d[next_index].parent_index = curr_index;
                     a_star_3d[next_index].g_cost = tentative_g;
-                    a_star_3d[next_index].h_cost = a_star_3d[curr_index].h_cost; // 绠卞瓙娌″姩
+                    a_star_3d[next_index].h_cost = a_star_3d[curr_index].h_cost; // 箱子没动
                     a_star_3d[next_index].f_cost = tentative_g + a_star_3d[next_index].h_cost;
                     a_star_3d[next_index].path_len = a_star_3d[curr_index].path_len + walk_len;
-                    a_star_3d[next_index].is_push = 0; // 鎹㈠悜鎺?
+                    a_star_3d[next_index].is_push = 0; // 换向推
                     if (a_star_3d[next_index].open_or_close == 0)
                     {
                         a_star_3d[next_index].open_or_close = 1;
@@ -890,7 +914,7 @@ int a_star_path_plan_3d(int row_cnt, int col_cnt,
     int push_start_index = -1;
     int push_end_index = -1;
 
-    // 鍏堣灏忚溅璺戝埌鎺ㄧ偣
+    // 先让小车跑到推点
     int start_index = sp_path[0];
     int start_row = (start_index / 4) / col_cnt;
     int start_col = (start_index / 4) % col_cnt;
@@ -923,7 +947,7 @@ int a_star_path_plan_3d(int row_cnt, int col_cnt,
 
         if (a_star_3d[curr_index].is_push == 1)
         {
-            // 鐩存帹
+            // 直推
             if (push_start_index < 0 && total_car_len > 0)
                 push_start_index = total_car_len - 1;
             push_end_index = total_car_len;
@@ -931,7 +955,7 @@ int a_star_path_plan_3d(int row_cnt, int col_cnt,
         }
         else
         {
-            // Walk around for reorientation.
+            // 绕行以换向
             Position c_from = {prev_r - dir_row_3d[prev_f], prev_c - dir_col_3d[prev_f]};
             Position c_to = {prev_r - dir_row_3d[curr_f], prev_c - dir_col_3d[curr_f]};
 
@@ -966,12 +990,12 @@ void simulate_bomb_explosion(Position *obstacles, int *obstacles_cnt, Position b
     {
         int dr = obstacles[i].row - bomb_target.row;
         int dc = obstacles[i].col - bomb_target.col;
-        // 濡傛灉鍦?3x3 涔濆鏍煎唴锛屽澹佽鐐告瘉
+        // 如果在 3x3 九宫格内，将墙标记为炸毁
         if (dr >= -1 && dr <= 1 && dc >= -1 && dc <= 1)
             continue;
         obstacles[new_cnt++] = obstacles[i];
     }
-    // Clear remaining slots.
+    // 清空剩余槽位
     for (int i = new_cnt; i < *obstacles_cnt; i++)
     {
         obstacles[i].row = -1;
@@ -1094,7 +1118,7 @@ int evaluate_bomb_shortcut(int row_cnt, int col_cnt,
                            Position *out_box_target,
                            int *out_bomb_event_index)
 {
-    // 鎶婄偢寮瑰姞鍏ョ瀛愭暟缁勮繘琛孉*璁＄畻
+    // 把炸弹加入箱子数组进行 A* 计算
     Position temp_boxes[MAX_BOXES + 1];
     for (int i = 0; i < boxes_cnt; i++)
         temp_boxes[i] = boxes[i];
@@ -1103,7 +1127,7 @@ int evaluate_bomb_shortcut(int row_cnt, int col_cnt,
     temp_boxes[virtual_bomb_box_index] = bombs[bomb_index];
     int temp_boxes_cnt = boxes_cnt + 1;
 
-    // 鍓旈櫎杩欓鐐稿脊
+    // 剔除这颗炸弹
     Position temp_bombs[MAX_BOMBS + 2];
     int temp_bombs_cnt = 0;
     for (int i = 0; i < bombs_cnt; i++)
@@ -1112,7 +1136,7 @@ int evaluate_bomb_shortcut(int row_cnt, int col_cnt,
             temp_bombs[temp_bombs_cnt++] = bombs[i];
     }
 
-    // 鍓旈櫎鐩爣澧欏锛屼互渚垮彲浠ュ皢鐐稿脊鐩存帴鎺ㄥ叆澧欏鐨勫潗鏍囧唴鐖嗙牬
+    // 剔除目标墙壁，以便可以将炸弹直接推入墙壁的坐标内爆破
     Position phase1_obs[grid_size];
     int phase1_obs_cnt = 0;
     for (int i = 0; i < obstacles_cnt; i++)
@@ -1125,7 +1149,9 @@ int evaluate_bomb_shortcut(int row_cnt, int col_cnt,
     actual_targets[0] = wall_target;
 
     Position best_bomb_target;
-    // Phase 1: push bomb to the chosen wall.
+    // 	阶段 1：把炸弹推向选定的墙
+    g_car_forbidden_cell = wall_target;
+    g_car_forbidden_cell.id = 0;
     int phase1_steps = a_star_path_plan_3d(row_cnt, col_cnt,
                                            phase1_obs, phase1_obs_cnt,
                                            temp_bombs, temp_bombs_cnt,
@@ -1136,21 +1162,23 @@ int evaluate_bomb_shortcut(int row_cnt, int col_cnt,
                                            out_full_path,
                                            &best_bomb_target);
 
+    g_car_forbidden_cell = (Position){255, 255, 0};
+
     if (phase1_steps < 0)
         return -1;
     if (max_total_steps > 0 && phase1_steps >= max_total_steps)
         return -1;
 
-    // 淇敼鍦板舰
+    // 修改地形
     Position temp_obstacles[grid_size];
     for (int i = 0; i < obstacles_cnt; i++)
         temp_obstacles[i] = obstacles[i];
     int temp_obs_cnt = obstacles_cnt;
     simulate_bomb_explosion(temp_obstacles, &temp_obs_cnt, best_bomb_target);
 
-    // 浜ゆ帴灏忚溅鍧愭爣
+    // 交接小车坐标
     Position new_car_start = out_full_path[phase1_steps - 1];
-    // Phase 2: push target box on updated terrain.
+    // 阶段 2：在更新后的地形上推目标箱子
     int phase2_steps = a_star_path_plan_3d(row_cnt, col_cnt,
                                            temp_obstacles, temp_obs_cnt,
                                            temp_bombs, temp_bombs_cnt,

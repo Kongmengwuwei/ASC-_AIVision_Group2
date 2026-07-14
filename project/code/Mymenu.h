@@ -25,8 +25,6 @@
 static float SetupNumber[SETUP_LEN] = {0.01, 0.1, 1, 10, 100};
 static uint8_t SetupIndex = 2;
 
-extern bool Algo_Test_auto;    // 自动算法测试开关
-extern bool Algo_Test_hand;    // 手动算法测试开关
 extern uint8 car_go_flag;
 extern uint8 car_stop_flag;
 

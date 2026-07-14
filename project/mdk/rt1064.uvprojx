@@ -495,16 +495,6 @@
               <FilePath>..\code\Motor.h</FilePath>
             </File>
             <File>
-              <FileName>MotorTest.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>..\code\MotorTest.c</FilePath>
-            </File>
-            <File>
-              <FileName>MotorTest.h</FileName>
-              <FileType>5</FileType>
-              <FilePath>..\code\MotorTest.h</FilePath>
-            </File>
-            <File>
               <FileName>PID.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\code\PID.c</FilePath>

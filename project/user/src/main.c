@@ -36,7 +36,6 @@
 #include "zf_common_headfile.h"
 #include <stdio.h>
 #include <string.h>
-#include "MotorTest.h"
 
 #define PIT_PRIORITY_0 (PIT_IRQn)
 #define PIT_PRIORITY_1 (PIT_IRQn)
@@ -48,12 +47,6 @@ int main(void)
   debug_init();                  // 调试端口初始化
   // 模块初始化
   system_delay_ms(300);                          // 等待主板其他外设上电完成
-#if MOTOR_BOARD_TEST_ENABLE
-  motor_board_test_run();
-  while (1) {
-    BlueSerial_Printf("\r\nMOTOR\r\n");
-  }
-#else
   flash_init();
   Menu_Init();
   uart_blob_init();
@@ -86,7 +79,6 @@ int main(void)
   interrupt_global_enable(0);
 
   control_init();
-#endif
 
   // Main loop.
   while (1)
@@ -98,7 +90,7 @@ int main(void)
 
     Menu_Switch();
     Menu_Show();
-    BlueSerial_PathDebugReport();
+    BlueSerial_Task();
   }
 }
 
@@ -113,8 +105,6 @@ void pit_1_handler(void)
   // Sample encoders before either autonomous or Bluetooth motor control.
   encoder_get();
   control_tick_10ms();
-  BlueSerial_PathDebugTick10ms();
-
   // Bluetooth takeover: when active, let BlueSerial own this 10ms motor-control tick.
   if (BlueSerial_IsControlActive())
   {

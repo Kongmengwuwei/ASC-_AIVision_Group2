@@ -42,9 +42,6 @@
 #define BLUESERIAL_IRQN                         LPUART8_IRQn
 /* UART8 优先级低于 PIT 控制中断，蓝牙突发数据不会抢占底盘闭环。 */
 #define BLUESERIAL_IRQ_PRIORITY                 8U
-/* 默认关闭 50ms 周期遥测，避免蓝牙持续刷屏；命令 ACK/ERR 回包仍然保留。 */
-#define BLUESERIAL_ENABLE_PERIODIC_TELEMETRY    0U
-#define BLUESERIAL_PATH_REPORT_PERIOD_TICKS     5U
 #define BLUESERIAL_RX_FRAME_LEN                 80U
 #define BLUESERIAL_RX_QUEUE_LEN                 16U
 #define BLUESERIAL_MAX_TARGET_SPEED_CMPS        150.0f
@@ -88,7 +85,6 @@ static volatile uint32 g_rx_drop_count = 0U;
 static char g_last_rx_frame[BLUESERIAL_RX_FRAME_LEN] = "";
 static volatile uint8 g_last_rx_frame_len = 0U;
 
-static volatile uint8 g_blueserial_path_report_pending = 0U;
 static volatile blueserial_control_mode_t g_control_mode = BLUESERIAL_MODE_STOP;
 /* 逻辑轮序与 Motor.c 的 motor_pwm() 参数一致：UL, UR, DL, DR。 */
 static volatile int g_raw_pwm[4] = {0, 0, 0, 0};
@@ -874,7 +870,6 @@ void Blue_Serial_Init(void)
     g_rx_drop_count = 0U;
     g_last_rx_frame[0] = '\0';
     g_last_rx_frame_len = 0U;
-    g_blueserial_path_report_pending = 0U;
     uart_init(BLUESERIAL_UART, BLUESERIAL_BAUDRATE, BLUESERIAL_TX_PIN, BLUESERIAL_RX_PIN);
     interrupt_set_priority(BLUESERIAL_IRQN, BLUESERIAL_IRQ_PRIORITY);
     uart_rx_interrupt(BLUESERIAL_UART, ZF_ENABLE);
@@ -1464,7 +1459,7 @@ static void BlueSerial_ParseCommand(char *raw_command)
     }
 }
 
-void BlueSerial_CommandTask(void)
+static void BlueSerial_CommandTask(void)
 {
     char command[BLUESERIAL_RX_FRAME_LEN];
     uint8 read_index;
@@ -1545,124 +1540,9 @@ void BlueSerial_ControlTick10ms(void)
     motor_pwm(0, 0, 0, 0);
 }
 
-void BlueSerial_PathDebugTick10ms(void)
+void BlueSerial_Task(void)
 {
-#if BLUESERIAL_ENABLE_PERIODIC_TELEMETRY
-    static uint8 tick_div = 0U;
-
-    if (++tick_div >= BLUESERIAL_PATH_REPORT_PERIOD_TICKS)
-    {
-        tick_div = 0U;
-        g_blueserial_path_report_pending = 1U;
-    }
-#endif
-}
-
-#if BLUESERIAL_ENABLE_PERIODIC_TELEMETRY
-static void BlueSerial_GetActualBodySpeed(float *vx_cmps, float *vy_cmps, float *omega_radps)
-{
-    float count_to_mps;
-    float w_ul;
-    float w_ur;
-    float w_dl;
-    float w_dr;
-
-    if (vx_cmps == NULL || vy_cmps == NULL || omega_radps == NULL)
-    {
-        return;
-    }
-
-    *vx_cmps = 0.0f;
-    *vy_cmps = 0.0f;
-    *omega_radps = 0.0f;
-
-    if (pulse_per_meter <= 0.0)
-    {
-        return;
-    }
-
-    count_to_mps = ((float)PID_RATE) / (float)pulse_per_meter;
-    w_ul = (float)up_L_all * count_to_mps;
-    w_ur = (float)up_R_all * count_to_mps;
-    w_dl = (float)down_L_all * count_to_mps;
-    w_dr = (float)down_R_all * count_to_mps;
-
-    *vy_cmps = 0.25f * (-w_ul + w_ur + w_dl - w_dr) *
-               100.0f * LATERAL_CORRECTION_FACTOR;
-    *vx_cmps = 0.25f * (w_ul + w_ur + w_dl + w_dr) * 100.0f +
-               LATERAL_TO_LONGITUDINAL_COUPLING_FACTOR * (*vy_cmps);
-    *omega_radps = (-w_ul + w_ur - w_dl + w_dr) / (2.0f * D_X + 2.0f * D_Y);
-}
-#endif
-
-void BlueSerial_PathDebugReport(void)
-{
-    /* 即使关闭周期遥测，也必须持续服务命令队列和动作完成检测。 */
     BlueSerial_CommandTask();
     BlueSerial_ServiceMotionCompletion();
     BlueSerial_ServicePositionRequest();
-
-#if BLUESERIAL_ENABLE_PERIODIC_TELEMETRY
-    uint32 primask;
-    path_follow_status_t status = {0};
-    int encoder_speed[4];
-    float target_vx_cmps;
-    float target_vy_cmps;
-    float target_omega_radps;
-    float actual_vx_cmps = 0.0f;
-    float actual_vy_cmps = 0.0f;
-    float actual_omega_radps = 0.0f;
-    float actual_speed_cmps;
-
-    primask = interrupt_global_disable();
-    if (g_blueserial_path_report_pending == 0U)
-    {
-        interrupt_global_enable(primask);
-        return;
-    }
-    g_blueserial_path_report_pending = 0U;
-
-    path_follow_get_status(&status);
-    target_vx_cmps = speed_three_array[0];
-    target_vy_cmps = speed_three_array[1];
-    target_omega_radps = speed_three_array[2];
-    encoder_speed[0] = up_L_all;
-    encoder_speed[1] = up_R_all;
-    encoder_speed[2] = down_L_all;
-    encoder_speed[3] = down_R_all;
-    BlueSerial_GetActualBodySpeed(&actual_vx_cmps, &actual_vy_cmps, &actual_omega_radps);
-    interrupt_global_enable(primask);
-    actual_speed_cmps = sqrtf(actual_vx_cmps * actual_vx_cmps +
-                              actual_vy_cmps * actual_vy_cmps);
-
-    /*
-     * 50ms 遥测帧：
-     * TSPD/ASPD 为目标/实际标量速度，单位 cm/s；
-     * TVEL/AVEL 为目标/实际车体三轴速度，线速度 cm/s，角速度 rad/s；
-     * TPOS/APOS 为目标/实际位置，单位 m；
-     * TYAW/AYAW 为目标/实际航向，单位 deg；
-     * ENC_ULURDLDR 为最近 10ms 的四轮编码器计数。
-     */
-    BlueSerial_Printf("TSPD %.1f ASPD %.1f TVEL %.1f %.1f %.3f AVEL %.1f %.1f %.3f "
-                      "TPOS %.3f %.3f APOS %.3f %.3f TYAW %.2f AYAW %.2f "
-                      "ENC_ULURDLDR %d %d %d %d\r\n",
-                      status.speed_ref_cmps,
-                      actual_speed_cmps,
-                      target_vx_cmps,
-                      target_vy_cmps,
-                      target_omega_radps,
-                      actual_vx_cmps,
-                      actual_vy_cmps,
-                      actual_omega_radps,
-                      status.target_x_m,
-                      status.target_y_m,
-                      status.x_m,
-                      status.y_m,
-                      status.target_yaw_deg,
-                      status.yaw_deg,
-                      encoder_speed[0],
-                      encoder_speed[1],
-                      encoder_speed[2],
-                      encoder_speed[3]);
-#endif
 }

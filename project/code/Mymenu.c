@@ -32,11 +32,6 @@ static bool last_show_data_switch = true;
 static bool menu_config_dirty = false;
 static bool menu_config_save_attempted = false;
 
-#if ALGORITHM_TEST_MANUAL_SIM_ENABLE
-char move_cmd = 'X'; // 移动命令缓存
-uint8 move_ret = 0;  // 移动结果缓存
-#endif
-
 static void Menu_Request_Redraw(void)
 {
     menu_show_divider = MENU_SHOW_PERIOD_LOOPS;
@@ -887,13 +882,6 @@ void Show_Map(void)
     // ips200_show_string(start_x + (map_cols + 1) * cell_size, start_y + FONT_H * 2, "BOM:");
     // ips200_show_uint(start_x + (map_cols + 1) * cell_size + FONT_W * 5, start_y + FONT_H * 2, Bombs_count, 2);
 
-#if ALGORITHM_TEST_MANUAL_SIM_ENABLE
-    ips200_show_char(start_x + (map_cols + 1) * cell_size, start_y + FONT_H * 5, move_cmd);
-    ips200_show_int(start_x + (map_cols + 1) * cell_size + FONT_W * 3, start_y + FONT_H * 5, move_ret, 1);
-#endif
-    ips200_show_uint(start_x + (map_cols + 1) * cell_size, start_y + FONT_H * 6, s_path_index, 3);
-    ips200_show_char(start_x + (map_cols + 1) * cell_size + FONT_W * 3, start_y + FONT_H * 6, '/');
-    ips200_show_uint(start_x + (map_cols + 1) * cell_size + FONT_W * 4, start_y + FONT_H * 6, Car_path_count, 3);
 }
 
 void State_Show(void)
@@ -1192,33 +1180,24 @@ void Menu_Switch(void)
 
     if (k1 == KEY_SHORT_PRESS)
     {
-#if !ALGORITHM_TEST_MANUAL_SIM_ENABLE
         // 常规模式下菜单操作：选中文件时增大数据，未选中时指针上�?
         if (pointer->selected == false)
             Key_Up();
         else
             Key_Plus();
-#endif
     }
     else if (k2 == KEY_SHORT_PRESS)
     {
-#if !ALGORITHM_TEST_MANUAL_SIM_ENABLE
         // 常规模式下菜单操作：选中文件时减小数据，未选中时指针下�?
         if (pointer->selected == false)
             Key_Down();
         else
             Key_Sub();
-#endif
     }
     else if (k3 == KEY_SHORT_PRESS)
     {
         // control_set_start_enabled(1);
 
-#if ALGORITHM_TEST_MANUAL_SIM_ENABLE
-        // 算法测试自动一次性执行完整路�?
-        if (Algo_Test_auto)
-            move_ret = Test_Path_ALL();
-#else
         // 常规模式下菜单操作：进入文件夹或选中/取消选中文件
         if (pointer->kind == MENU_Folder)
             Key_Enter();
@@ -1226,22 +1205,15 @@ void Menu_Switch(void)
             Key_Select();
         else
             Key_SetupCtrl_Sub();
-#endif
     }
 
     else if (k4 == KEY_SHORT_PRESS)
     {
-#if ALGORITHM_TEST_MANUAL_SIM_ENABLE
-        // 算法测试自动执行路径一�?
-        if (Algo_Test_auto)
-            move_ret = Test_Path_Step(&move_cmd);
-#else
         // 常规模式下菜单操作：选中文件时调整步进值，未选中时退出文件夹
         if (pointer->kind != MENU_Folder && pointer->selected == true)
             Key_Deselect();
         else
             Key_Exit();
-#endif
     }
 
     key_clear_state(KEY_1);

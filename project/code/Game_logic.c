@@ -178,29 +178,9 @@ static int is_valid_cell(Position p)
     return (p.row < MAP_ROWS) && (p.col < MAP_COLS);
 }
 
-static int is_identification_marker(uint8 marker_id)
-{
-    return marker_id == IDENTIFICATION;
-}
-
-static uint8 marker_priority(uint8 marker_id)
-{
-    if (marker_id == BOMB_EXPLOSION)
-        return 5;
-    if (is_identification_marker(marker_id))
-        return 4;
-    if (marker_id == PUSH_END_POINT)
-        return 3;
-    if (marker_id == PUSH_StART_POINT)
-        return 2;
-    if (marker_id == TURNING_POINT)
-        return 1;
-    return 0;
-}
-
 static uint8 merge_marker(uint8 old_marker, uint8 new_marker)
 {
-    return (marker_priority(new_marker) >= marker_priority(old_marker)) ? new_marker : old_marker;
+    return (uint8)((old_marker | new_marker) & PATH_ALL_EVENTS);
 }
 
 static int manhattan_cell_dist(Position a, Position b)
@@ -2208,8 +2188,7 @@ static void save_path_to_globals(const Position *merged_path, int merged_len)
     int uniq_len = 0;
     for (int i = 0; i < merged_len; i++)
     {
-        if (uniq_len > 0 && same_cell(car_path[uniq_len - 1], merged_path[i]) &&
-            merged_path[i].id != IDENTIFICATION)
+        if (uniq_len > 0 && same_cell(car_path[uniq_len - 1], merged_path[i]))
         {
             car_path[uniq_len - 1].id = merge_marker(car_path[uniq_len - 1].id, merged_path[i].id);
         }

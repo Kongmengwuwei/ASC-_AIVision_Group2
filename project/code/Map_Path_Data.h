@@ -24,18 +24,29 @@ typedef enum
     MAP_PRESET_PLAN_MODE2 = 2U
 } map_preset_plan_mode_t;
 
-//路径特殊点ID定义
-#define BOMB_EXPLOSION 1        // 炸弹爆炸位置标记
-#define TURNING_POINT  2        // 路径转折点标记
-#define IDENTIFICATION 3        // 识别位置统一标记
-#define PUSH_StART_POINT 4        // 推箱起步位置标记
-#define PUSH_END_POINT 5        // 推箱结束位置标记
+/*
+ * 路径事件位掩码（Position.id 在路径上下文中的含义）。
+ * 同一路径点可能同时是推箱终点、爆炸点和转折点，必须用按位或组合，
+ * 判断事件时也必须使用 (id & EVENT) 而不是相等比较。
+ */
+#define PATH_EVENT_NONE       0x00U
+#define BOMB_EXPLOSION        0x01U  // 炸弹爆炸位置标记
+#define TURNING_POINT         0x02U  // 路径转折点标记
+#define IDENTIFICATION        0x04U  // 识别位置统一标记
+#define PUSH_START_POINT      0x08U  // 推箱起步位置标记
+#define PUSH_END_POINT        0x10U  // 推箱结束位置标记
+/* 保留旧拼写，兼容已有调用代码。 */
+#define PUSH_StART_POINT      PUSH_START_POINT
+#define PATH_ALL_EVENTS       (BOMB_EXPLOSION | TURNING_POINT | IDENTIFICATION | \
+                               PUSH_START_POINT | PUSH_END_POINT)
+#define PATH_REQUIRED_EVENTS  (BOMB_EXPLOSION | IDENTIFICATION | \
+                               PUSH_START_POINT | PUSH_END_POINT)
 
 typedef struct
 {
     uint8 row; // 栅格行号
     uint8 col; // 栅格列号
-    uint8 id;  // 元素ID（箱子编号，目标编号，路径特殊点）
+    uint8 id;  // 对象上下文为编号；路径上下文为 PATH_* 事件位掩码
 } Position;
 
 typedef struct

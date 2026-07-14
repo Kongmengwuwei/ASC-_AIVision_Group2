@@ -41,6 +41,14 @@ typedef struct
     Position car_pose_grid;
 } path_map_snapshot_t;
 
+/*
+ * Snapshot protocol used by path_build_exec_from_planner():
+ * extra_map is the state before planning and current_map is the simulated final
+ * state. path.c reconstructs intermediate states from path event bits. If the
+ * reconstruction cannot be verified against current_map, shortcut checks fall
+ * back to the conservative union of the two snapshots.
+ */
+
 /**
  * @brief 将地图规划坐标转换为 path_follow 使用的执行坐标。
  */

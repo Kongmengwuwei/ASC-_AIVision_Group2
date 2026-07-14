@@ -596,7 +596,7 @@ static uint8 identify_try_make_near_half_step(const Position *stand_pos,
 
 static uint8 is_identification_marker(uint8 marker_id)
 {
-    return (marker_id == IDENTIFICATION) ? 1U : 0U;
+    return ((marker_id & IDENTIFICATION) != 0U) ? 1U : 0U;
 }
 
 static uint8 resolve_map_dir_from_delta(int32 d_row, int32 d_col, control_map_dir_t *dir_out)
@@ -2112,7 +2112,7 @@ static uint8 advance_identify_endpoint_or_finish(void)
  * @brief 为当前执行路径配置“炸弹爆炸点停留”事件。
  *
  * 逻辑：
- * - 扫描路径中 id == BOMB_EXPLOSION 的点；
+ * - 扫描路径中带有 BOMB_EXPLOSION 事件位的点；
  * - 在这些点到达后暂停固定时长（0.5s）；
  * - 若当前路径无爆炸点，则清空暂停配置。
  *
@@ -2133,7 +2133,7 @@ static void configure_bomb_pause_for_path(const Position *path, size_t steps)
 
     for (i = 0U; i < steps; i++)
     {
-        if (path[i].id != BOMB_EXPLOSION)
+        if ((path[i].id & BOMB_EXPLOSION) == 0U)
         {
             continue;
         }

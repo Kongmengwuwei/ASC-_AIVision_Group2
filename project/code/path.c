@@ -8,6 +8,11 @@
 #define PATH_COST_INF 1.0e30f
 /* 动态规划前驱索引的无效值，MAX_CAR_PATH 远小于 0xFFFF。 */
 #define PATH_INDEX_NONE 0xFFFFU
+/* 初始阶段 + 每个箱子/炸弹至多产生一次推运结束阶段。 */
+#define PATH_STAGE_SNAPSHOT_CAPACITY (MAX_BOXES + MAX_BOMBS + 1U)
+#define PATH_DYNAMIC_OBJECT_NONE 0U
+#define PATH_DYNAMIC_OBJECT_BOX  1U
+#define PATH_DYNAMIC_OBJECT_BOMB 2U
 
 /* 以下缓冲只在 path_build_exec_from_planner() 中使用。
  * 做成静态全局，是为了避免在嵌入式栈上临时申请较大的 DP 表。 */
@@ -18,6 +23,9 @@ static uint16 s_rebuild_indices[MAX_CAR_PATH] = {0U};
 static uint16 s_mandatory_prefix[MAX_CAR_PATH + 1U] = {0U};
 static uint16 s_push_edge_prefix[MAX_CAR_PATH + 1U] = {0U};
 static uint16 s_last_required_before[MAX_CAR_PATH] = {0U};
+static path_map_snapshot_t s_stage_maps[PATH_STAGE_SNAPSHOT_CAPACITY];
+static uint8 s_raw_stage_index[MAX_CAR_PATH] = {0U};
+static uint8 s_stage_model_valid = 0U;
 /* 运行期开关：1 允许动态规划选择斜线捷径，0 时只保留水平/竖直执行段。 */
 static uint8 g_path_diagonal_enabled = 1U;
 
@@ -81,56 +89,21 @@ static uint8 path_is_same_grid_cell(const Position *a, const Position *b)
 }
 
 /**
- * @brief 给路径点事件 id 分配保留优先级。
- *
- * 规划层有时会在同一个格子上连续写入多个点，例如普通转折点和爆炸点重合。
- * 压缩前会合并连续重复格子，此时必须保留更关键的事件 id：
- * 爆炸点、识别点、推箱子起止点都会影响上层状态机或 path_follow 的暂停事件，
- * 优先级必须高于普通转折点。
+ * @brief 合并同一格上的路径事件位，保留该点发生的全部事件。
  */
-static uint8 path_marker_priority(uint8 marker_id)
-{
-    if (marker_id == BOMB_EXPLOSION)
-    {
-        return 5U;
-    }
-    if (marker_id == IDENTIFICATION)
-    {
-        return 4U;
-    }
-    if (marker_id == PUSH_END_POINT)
-    {
-        return 3U;
-    }
-    if (marker_id == PUSH_StART_POINT)
-    {
-        return 2U;
-    }
-    if (marker_id == TURNING_POINT)
-    {
-        return 1U;
-    }
-    return 0U;
-}
-
 static uint8 path_merge_marker(uint8 old_marker, uint8 new_marker)
 {
-    return (path_marker_priority(new_marker) >=
-            path_marker_priority(old_marker)) ? new_marker : old_marker;
+    return (uint8)((old_marker | new_marker) & PATH_ALL_EVENTS);
 }
 
 static uint8 path_is_required_exec_marker(uint8 marker_id)
 {
-    return (marker_id == IDENTIFICATION ||
-            marker_id == BOMB_EXPLOSION ||
-            marker_id == PUSH_StART_POINT ||
-            marker_id == PUSH_END_POINT) ? 1U : 0U;
+    return ((marker_id & PATH_REQUIRED_EVENTS) != 0U) ? 1U : 0U;
 }
 
 static uint8 path_is_push_span_end_marker(uint8 marker_id)
 {
-    return (marker_id == PUSH_END_POINT ||
-            marker_id == BOMB_EXPLOSION) ? 1U : 0U;
+    return ((marker_id & (PUSH_END_POINT | BOMB_EXPLOSION)) != 0U) ? 1U : 0U;
 }
 
 static uint8 path_is_map_cell_valid(const Position *p)
@@ -289,6 +262,366 @@ static uint8 path_blocker_list_contains_cell(const Position *list,
     }
 
     return 0U;
+}
+
+static int32 path_abs_i32(int32 value)
+{
+    return (value < 0) ? -value : value;
+}
+
+static int32 path_find_position_index(const Position *list,
+                                      size_t count,
+                                      size_t capacity,
+                                      uint8 row,
+                                      uint8 col)
+{
+    size_t i = 0U;
+
+    if (list == NULL || count > capacity)
+    {
+        return -1;
+    }
+    for (i = 0U; i < count; i++)
+    {
+        if (list[i].row == row && list[i].col == col)
+        {
+            return (int32)i;
+        }
+    }
+    return -1;
+}
+
+static void path_remove_position_index(Position *list,
+                                       size_t *count,
+                                       size_t capacity,
+                                       size_t index)
+{
+    size_t i = 0U;
+
+    if (list == NULL || count == NULL || *count > capacity || index >= *count)
+    {
+        return;
+    }
+    for (i = index + 1U; i < *count; i++)
+    {
+        list[i - 1U] = list[i];
+    }
+    (*count)--;
+    if (*count < capacity)
+    {
+        memset(&list[*count], 0, sizeof(Position));
+    }
+}
+
+static uint8 path_snapshot_counts_valid(const path_map_snapshot_t *map)
+{
+    if (map == NULL)
+    {
+        return 0U;
+    }
+    return (map->obstacles_count <= MAX_OBSTACLES &&
+            map->boxes_count <= MAX_BOXES &&
+            map->targets_count <= MAX_TARGETS &&
+            map->bombs_count <= MAX_BOMBS) ? 1U : 0U;
+}
+
+static uint8 path_position_sets_equal(const Position *a,
+                                      size_t a_count,
+                                      const Position *b,
+                                      size_t b_count,
+                                      size_t capacity)
+{
+    size_t i = 0U;
+
+    if (a == NULL || b == NULL || a_count != b_count ||
+        a_count > capacity || b_count > capacity)
+    {
+        return 0U;
+    }
+    for (i = 0U; i < a_count; i++)
+    {
+        if (path_find_position_index(b, b_count, capacity,
+                                     a[i].row, a[i].col) < 0)
+        {
+            return 0U;
+        }
+    }
+    for (i = 0U; i < b_count; i++)
+    {
+        if (path_find_position_index(a, a_count, capacity,
+                                     b[i].row, b[i].col) < 0)
+        {
+            return 0U;
+        }
+    }
+    return 1U;
+}
+
+static void path_apply_bomb_explosion(path_map_snapshot_t *map,
+                                      uint8 bomb_row,
+                                      uint8 bomb_col)
+{
+    size_t read_index = 0U;
+    size_t write_index = 0U;
+    size_t old_count = 0U;
+
+    if (map == NULL || map->obstacles_count > MAX_OBSTACLES)
+    {
+        return;
+    }
+    old_count = map->obstacles_count;
+    for (read_index = 0U; read_index < old_count; read_index++)
+    {
+        int32 d_row = (int32)map->obstacles_buf[read_index].row - (int32)bomb_row;
+        int32 d_col = (int32)map->obstacles_buf[read_index].col - (int32)bomb_col;
+
+        if (path_abs_i32(d_row) <= 1 && path_abs_i32(d_col) <= 1)
+        {
+            continue;
+        }
+        map->obstacles_buf[write_index++] = map->obstacles_buf[read_index];
+    }
+    map->obstacles_count = write_index;
+    while (write_index < old_count)
+    {
+        memset(&map->obstacles_buf[write_index], 0, sizeof(Position));
+        write_index++;
+    }
+}
+
+/**
+ * 按 PUSH_END/BOMB_EXPLOSION 事件从规划前地图重建各阶段占用状态。
+ * 重建失败时返回 0，调用方继续采用规划前后快照并集的保守策略。
+ */
+static uint8 path_build_stage_snapshots(const Position *path,
+                                        size_t count,
+                                        const path_map_snapshot_t *pre_map,
+                                        const path_map_snapshot_t *post_map)
+{
+    path_map_snapshot_t working;
+    size_t i = 0U;
+    size_t stage_count = 1U;
+    uint8 push_active = 0U;
+    uint8 object_type = PATH_DYNAMIC_OBJECT_NONE;
+    uint8 object_row = 0U;
+    uint8 object_col = 0U;
+    int32 last_dir_row = 0;
+    int32 last_dir_col = 0;
+
+    s_stage_model_valid = 0U;
+    memset(s_raw_stage_index, 0, sizeof(s_raw_stage_index));
+    memset(s_stage_maps, 0, sizeof(s_stage_maps));
+
+    if (path == NULL || count == 0U || count > MAX_CAR_PATH ||
+        !path_snapshot_counts_valid(pre_map) ||
+        !path_snapshot_counts_valid(post_map))
+    {
+        return 0U;
+    }
+
+    working = *pre_map;
+    s_stage_maps[0] = working;
+
+    for (i = 0U; i < count; i++)
+    {
+        uint8 events = (uint8)(path[i].id & PATH_ALL_EVENTS);
+
+        s_raw_stage_index[i] = (uint8)(stage_count - 1U);
+
+        /* 先结束上一段推运，再允许同一点开启下一段推运。 */
+        if ((events & PUSH_END_POINT) != 0U)
+        {
+            int32 object_index = -1;
+            int32 final_row = 0;
+            int32 final_col = 0;
+
+            if (!push_active || (last_dir_row == 0 && last_dir_col == 0))
+            {
+                return 0U;
+            }
+            final_row = (int32)path[i].row + last_dir_row;
+            final_col = (int32)path[i].col + last_dir_col;
+            if (final_row < 0 || final_col < 0 ||
+                final_row >= (int32)MAP_ROWS || final_col >= (int32)MAP_COLS)
+            {
+                return 0U;
+            }
+
+            if (object_type == PATH_DYNAMIC_OBJECT_BOX)
+            {
+                int32 target_index = -1;
+
+                object_index = path_find_position_index(working.boxes_buf,
+                                                        working.boxes_count,
+                                                        MAX_BOXES,
+                                                        object_row,
+                                                        object_col);
+                if (object_index < 0 || (events & BOMB_EXPLOSION) != 0U)
+                {
+                    return 0U;
+                }
+                target_index = path_find_position_index(working.targets_buf,
+                                                        working.targets_count,
+                                                        MAX_TARGETS,
+                                                        (uint8)final_row,
+                                                        (uint8)final_col);
+                if (target_index < 0)
+                {
+                    return 0U;
+                }
+                /* 与 Game_logic 一致：送达目标的虚拟箱子和目标点同时退场。 */
+                path_remove_position_index(working.boxes_buf,
+                                           &working.boxes_count,
+                                           MAX_BOXES,
+                                           (size_t)object_index);
+                path_remove_position_index(working.targets_buf,
+                                           &working.targets_count,
+                                           MAX_TARGETS,
+                                           (size_t)target_index);
+            }
+            else if (object_type == PATH_DYNAMIC_OBJECT_BOMB)
+            {
+                object_index = path_find_position_index(working.bombs_buf,
+                                                        working.bombs_count,
+                                                        MAX_BOMBS,
+                                                        object_row,
+                                                        object_col);
+                if (object_index < 0)
+                {
+                    return 0U;
+                }
+                working.bombs_buf[object_index].row = (uint8)final_row;
+                working.bombs_buf[object_index].col = (uint8)final_col;
+                if ((events & BOMB_EXPLOSION) != 0U)
+                {
+                    path_remove_position_index(working.bombs_buf,
+                                               &working.bombs_count,
+                                               MAX_BOMBS,
+                                               (size_t)object_index);
+                    path_apply_bomb_explosion(&working,
+                                              (uint8)final_row,
+                                              (uint8)final_col);
+                }
+            }
+            else
+            {
+                return 0U;
+            }
+
+            if (stage_count >= PATH_STAGE_SNAPSHOT_CAPACITY)
+            {
+                return 0U;
+            }
+            working.car_pose_grid = path[i];
+            s_stage_maps[stage_count] = working;
+            s_raw_stage_index[i] = (uint8)stage_count;
+            stage_count++;
+            push_active = 0U;
+            object_type = PATH_DYNAMIC_OBJECT_NONE;
+            last_dir_row = 0;
+            last_dir_col = 0;
+        }
+        else if ((events & BOMB_EXPLOSION) != 0U)
+        {
+            /* 当前规划协议中爆炸必须与被推炸弹的 PUSH_END 同点。 */
+            return 0U;
+        }
+
+        if ((events & PUSH_START_POINT) != 0U)
+        {
+            int32 d_row = 0;
+            int32 d_col = 0;
+            int32 ahead_row = 0;
+            int32 ahead_col = 0;
+            int32 box_index = -1;
+            int32 bomb_index = -1;
+
+            if (push_active || i + 1U >= count)
+            {
+                return 0U;
+            }
+            d_row = (int32)path[i + 1U].row - (int32)path[i].row;
+            d_col = (int32)path[i + 1U].col - (int32)path[i].col;
+            if (path_abs_i32(d_row) + path_abs_i32(d_col) != 1)
+            {
+                return 0U;
+            }
+            ahead_row = (int32)path[i].row + d_row;
+            ahead_col = (int32)path[i].col + d_col;
+            if (ahead_row < 0 || ahead_col < 0 ||
+                ahead_row >= (int32)MAP_ROWS || ahead_col >= (int32)MAP_COLS)
+            {
+                return 0U;
+            }
+            box_index = path_find_position_index(working.boxes_buf,
+                                                 working.boxes_count,
+                                                 MAX_BOXES,
+                                                 (uint8)ahead_row,
+                                                 (uint8)ahead_col);
+            bomb_index = path_find_position_index(working.bombs_buf,
+                                                  working.bombs_count,
+                                                  MAX_BOMBS,
+                                                  (uint8)ahead_row,
+                                                  (uint8)ahead_col);
+            if ((box_index >= 0) == (bomb_index >= 0))
+            {
+                return 0U;
+            }
+            object_type = (box_index >= 0) ? PATH_DYNAMIC_OBJECT_BOX :
+                                             PATH_DYNAMIC_OBJECT_BOMB;
+            object_row = (uint8)ahead_row;
+            object_col = (uint8)ahead_col;
+            last_dir_row = d_row;
+            last_dir_col = d_col;
+            push_active = 1U;
+        }
+
+        if (push_active && i + 1U < count)
+        {
+            int32 d_row = (int32)path[i + 1U].row - (int32)path[i].row;
+            int32 d_col = (int32)path[i + 1U].col - (int32)path[i].col;
+
+            if (path_abs_i32(d_row) + path_abs_i32(d_col) != 1)
+            {
+                return 0U;
+            }
+            last_dir_row = d_row;
+            last_dir_col = d_col;
+        }
+    }
+
+    if (push_active)
+    {
+        return 0U;
+    }
+
+    /* 全部动态对象的重建结果必须与规划器最终状态一致。 */
+    if (!path_position_sets_equal(working.obstacles_buf,
+                                  working.obstacles_count,
+                                  post_map->obstacles_buf,
+                                  post_map->obstacles_count,
+                                  MAX_OBSTACLES) ||
+        !path_position_sets_equal(working.bombs_buf,
+                                  working.bombs_count,
+                                  post_map->bombs_buf,
+                                  post_map->bombs_count,
+                                  MAX_BOMBS) ||
+        !path_position_sets_equal(working.boxes_buf,
+                                  working.boxes_count,
+                                  post_map->boxes_buf,
+                                  post_map->boxes_count,
+                                  MAX_BOXES) ||
+        !path_position_sets_equal(working.targets_buf,
+                                  working.targets_count,
+                                  post_map->targets_buf,
+                                  post_map->targets_count,
+                                  MAX_TARGETS))
+    {
+        return 0U;
+    }
+
+    s_stage_model_valid = 1U;
+    return 1U;
 }
 
 /**
@@ -635,7 +968,7 @@ static void path_prepare_prefix(const Position *path, size_t count)
             {
                 push_active = 0U;
             }
-            if (path[i].id == PUSH_StART_POINT)
+            if ((path[i].id & PUSH_START_POINT) != 0U)
             {
                 push_active = 1U;
             }
@@ -661,8 +994,8 @@ static uint8 path_segment_skips_required_marker(size_t start_idx, size_t end_idx
     {
         return 0U;
     }
-    return ((s_mandatory_prefix[end_idx] -
-             s_mandatory_prefix[start_idx + 1U]) > 0U) ? 1U : 0U;
+    return (s_mandatory_prefix[end_idx] !=
+            s_mandatory_prefix[start_idx + 1U]) ? 1U : 0U;
 }
 
 static uint8 path_segment_crosses_push_span(size_t start_idx, size_t end_idx)
@@ -671,8 +1004,8 @@ static uint8 path_segment_crosses_push_span(size_t start_idx, size_t end_idx)
     {
         return 0U;
     }
-    return ((s_push_edge_prefix[end_idx] -
-             s_push_edge_prefix[start_idx]) > 0U) ? 1U : 0U;
+    return (s_push_edge_prefix[end_idx] !=
+            s_push_edge_prefix[start_idx]) ? 1U : 0U;
 }
 
 /**
@@ -687,6 +1020,8 @@ static uint8 path_exec_segment_allowed(const Position *path,
 {
     const Position *seg_start = NULL;
     const Position *seg_end = NULL;
+    const path_map_snapshot_t *clearance_map = current_map;
+    const path_map_snapshot_t *clearance_extra_map = extra_map;
     uint8 is_slanted = 0U;
     uint8 crosses_push_span = 0U;
     uint8 follows_raw_axis_run = 0U;
@@ -714,13 +1049,29 @@ static uint8 path_exec_segment_allowed(const Position *path,
         return 0U;
     }
 
+    crosses_push_span = path_segment_crosses_push_span(start_idx, end_idx);
+    follows_raw_axis_run = path_raw_subpath_is_axis_run(path, start_idx, end_idx);
+
+    if (s_stage_model_valid)
+    {
+        if (s_raw_stage_index[start_idx] >= PATH_STAGE_SNAPSHOT_CAPACITY ||
+            s_raw_stage_index[end_idx] >= PATH_STAGE_SNAPSHOT_CAPACITY)
+        {
+            return 0U;
+        }
+        if (!crosses_push_span &&
+            s_raw_stage_index[start_idx] != s_raw_stage_index[end_idx])
+        {
+            return 0U;
+        }
+        clearance_map = &s_stage_maps[s_raw_stage_index[start_idx]];
+        clearance_extra_map = NULL;
+    }
+
     if (end_idx == start_idx + 1U)
     {
         return 1U;
     }
-
-    crosses_push_span = path_segment_crosses_push_span(start_idx, end_idx);
-    follows_raw_axis_run = path_raw_subpath_is_axis_run(path, start_idx, end_idx);
 
     if (crosses_push_span)
     {
@@ -737,10 +1088,16 @@ static uint8 path_exec_segment_allowed(const Position *path,
     }
     if (is_slanted)
     {
-        return path_slanted_segment_has_clearance(current_map, extra_map, seg_start, seg_end);
+        return path_slanted_segment_has_clearance(clearance_map,
+                                                   clearance_extra_map,
+                                                   seg_start,
+                                                   seg_end);
     }
 
-    return path_axis_segment_has_clearance(current_map, extra_map, seg_start, seg_end);
+    return path_axis_segment_has_clearance(clearance_map,
+                                           clearance_extra_map,
+                                           seg_start,
+                                           seg_end);
 }
 
 uint8 path_build_exec_from_planner(const Position *planner_path,
@@ -775,6 +1132,7 @@ uint8 path_build_exec_from_planner(const Position *planner_path,
     memset(s_prev_index, 0, sizeof(s_prev_index));
     memset(s_rebuild_indices, 0, sizeof(s_rebuild_indices));
     memset(s_last_required_before, 0xFF, sizeof(s_last_required_before));
+    s_stage_model_valid = 0U;
 
     /* 第一步：复制原始规划点，并合并连续重复格子的事件 id。 */
     for (i = 0U; i < planner_steps; i++)
@@ -784,6 +1142,21 @@ uint8 path_build_exec_from_planner(const Position *planner_path,
         if (!path_is_map_cell_valid(&raw))
         {
             return 0U;
+        }
+        raw.id &= PATH_ALL_EVENTS;
+
+        if (i > 0U)
+        {
+            int32 d_row = (int32)planner_path[i].row -
+                          (int32)planner_path[i - 1U].row;
+            int32 d_col = (int32)planner_path[i].col -
+                          (int32)planner_path[i - 1U].col;
+
+            /* 原始规划路径只能原地合并事件或移动到四邻接格。 */
+            if (path_abs_i32(d_row) + path_abs_i32(d_col) > 1)
+            {
+                return 0U;
+            }
         }
 
         if (raw_steps == 0U)
@@ -811,6 +1184,12 @@ uint8 path_build_exec_from_planner(const Position *planner_path,
     }
 
     /* 第二步：建立事件点/推箱区间前缀和，供候选线段 O(1) 查询。 */
+    /* 成功时按事件阶段判定捷径；失败时使用规划前/后地图并集安全回退。 */
+    (void)path_build_stage_snapshots(s_raw_path,
+                                     raw_steps,
+                                     extra_map,
+                                     current_map);
+
     path_prepare_prefix(s_raw_path, raw_steps);
 
     /* 第三步：动态规划求最短可执行路径。 */

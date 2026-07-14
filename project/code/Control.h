@@ -21,7 +21,7 @@ typedef enum
     CONTROL_STAGE_IDENTIFY_PLAN_PATH = 22,       /**< 识别-规划态：调用识别路径规划。 */
     CONTROL_STAGE_IDENTIFY_LOAD_PATH = 23,       /**< 识别-下发态：切分识别路径并准备分段执行。 */
     CONTROL_STAGE_IDENTIFY_EXECUTE_PATH = 24,    /**< 识别-执行态：移动、转向并触发识别。 */
-    CONTROL_STAGE_IDENTIFY_RETURN_HEADING = 25,  /**< 识别结束过渡态：先回正发车方向，再进入推箱定位。 */
+    CONTROL_STAGE_IDENTIFY_RETURN_HEADING = 25,  /**< 识别结束过渡态：移动到安全定位格并回正发车方向。 */
 
     /* 推箱子阶段：使用识别结果规划真实推箱路径，并下发给 path_follow 执行。 */
     CONTROL_STAGE_PUSHBOX_LOCALIZE = 30,         /**< 推箱子-定位态：重新采集车位置，降低阶段切换误差。 */

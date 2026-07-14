@@ -68,6 +68,7 @@ float g_control_prestart_depart_compensate_m = -0.025f;
 #define CONTROL_BOMB_EXPLOSION_PAUSE_MS 500U
 /* 回到发车区后，车头回正到发车方向基准的角度容差。 */
 #define CONTROL_RETURN_YAW_ALIGN_TOL_DEG 5.0f
+#define CONTROL_IDENTIFY_SAFE_PATH_CAPACITY (MAP_ROWS * MAP_COLS)
 #define CONTROL_CONTINUOUS_LEVEL_COUNT 3U
 #define CONTROL_CONTINUOUS_STOP_ENCODER_TOL 5
 #define CONTROL_CONTINUOUS_STOP_STABLE_LOOPS 3U
@@ -258,6 +259,13 @@ static size_t g_identify_endpoint_count = 0U;
 static size_t g_identify_endpoint_cursor = 0U;
 static Position g_identify_segment_path[MAX_CAR_PATH] = {{0}};
 static uint8 g_identify_segment_running = 0U;
+static uint8 g_identify_segment_map_event_applied = 0U;
+static uint8 g_identify_safe_move_prepared = 0U;
+static uint8 g_identify_safe_move_running = 0U;
+static uint8 g_identify_return_start_valid = 0U;
+static Position g_identify_return_start_map = {0U, 0U, 0U};
+static Position g_identify_safe_move_path[CONTROL_IDENTIFY_SAFE_PATH_CAPACITY] = {{0}};
+static size_t g_identify_safe_move_steps = 0U;
 
 static control_identify_target_t g_identify_targets[CONTROL_IDENTIFY_MAX_TARGETS_PER_POINT];
 static size_t g_identify_target_count = 0U;
@@ -561,6 +569,7 @@ static void reset_identify_runtime_state(void)
     g_identify_endpoint_cursor = 0U;
     memset(g_identify_segment_path, 0, sizeof(g_identify_segment_path));
     g_identify_segment_running = 0U;
+    g_identify_segment_map_event_applied = 0U;
 
     memset(g_identify_targets, 0, sizeof(g_identify_targets));
     g_identify_target_count = 0U;
@@ -581,8 +590,182 @@ static void inverse_remap_exec_path_point(Position *p)
     path_inverse_remap_exec_point(p);
 }
 
+static uint8 identify_get_exec_axis_direction(size_t from_idx,
+                                              size_t to_idx,
+                                              int32 *d_row,
+                                              int32 *d_col)
+{
+    Position from;
+    Position to;
+    int32 raw_row = 0;
+    int32 raw_col = 0;
+
+    if (d_row == NULL || d_col == NULL ||
+        from_idx >= g_exec_steps || to_idx >= g_exec_steps ||
+        from_idx == to_idx)
+    {
+        return 0U;
+    }
+
+    from = g_exec_path[from_idx];
+    to = g_exec_path[to_idx];
+    inverse_remap_exec_path_point(&from);
+    inverse_remap_exec_path_point(&to);
+    raw_row = (int32)to.row - (int32)from.row;
+    raw_col = (int32)to.col - (int32)from.col;
+    if ((raw_row == 0 && raw_col == 0) ||
+        (raw_row != 0 && raw_col != 0))
+    {
+        return 0U;
+    }
+
+    *d_row = (raw_row > 0) ? 1 : ((raw_row < 0) ? -1 : 0);
+    *d_col = (raw_col > 0) ? 1 : ((raw_col < 0) ? -1 : 0);
+    return 1U;
+}
+
+/**
+ * @brief 在识别执行到达爆炸事件后推进真实运行时地图。
+ *
+ * 路径压缩保证推运区间不会走斜线；因此可由 PUSH_START 后的首段方向
+ * 定位原炸弹，由爆炸端点前的末段方向定位最终爆心。只有实际到达事件点
+ * 后才更新地图，避免提前把尚未炸毁的墙当成空地。
+ */
+static uint8 identify_apply_runtime_map_event(size_t endpoint_idx)
+{
+    size_t push_start_idx = 0U;
+    size_t scan = 0U;
+    size_t bomb_index = 0U;
+    size_t read_index = 0U;
+    size_t write_index = 0U;
+    size_t old_obstacles_count = 0U;
+    Position push_start;
+    Position bomb_endpoint;
+    int32 first_d_row = 0;
+    int32 first_d_col = 0;
+    int32 last_d_row = 0;
+    int32 last_d_col = 0;
+    int32 source_row = 0;
+    int32 source_col = 0;
+    int32 explode_row = 0;
+    int32 explode_col = 0;
+    uint8 found_push_start = 0U;
+    uint8 found_bomb = 0U;
+
+    if (endpoint_idx >= g_exec_steps)
+    {
+        return 0U;
+    }
+    if ((g_exec_path[endpoint_idx].id & BOMB_EXPLOSION) == 0U)
+    {
+        return 1U;
+    }
+    if ((g_exec_path[endpoint_idx].id & PUSH_END_POINT) == 0U ||
+        endpoint_idx == 0U ||
+        Bombs_count > MAX_BOMBS || Obstacles_count > MAX_OBSTACLES)
+    {
+        return 0U;
+    }
+
+    /* 从爆炸点向前找本次推炸弹区间的起点。 */
+    scan = endpoint_idx;
+    while (scan > 0U)
+    {
+        scan--;
+        if ((g_exec_path[scan].id & PUSH_START_POINT) != 0U)
+        {
+            push_start_idx = scan;
+            found_push_start = 1U;
+            break;
+        }
+        if ((g_exec_path[scan].id & PUSH_END_POINT) != 0U)
+        {
+            break;
+        }
+    }
+    if (!found_push_start || push_start_idx + 1U > endpoint_idx)
+    {
+        return 0U;
+    }
+    if (!identify_get_exec_axis_direction(push_start_idx,
+                                          push_start_idx + 1U,
+                                          &first_d_row,
+                                          &first_d_col) ||
+        !identify_get_exec_axis_direction(endpoint_idx - 1U,
+                                          endpoint_idx,
+                                          &last_d_row,
+                                          &last_d_col))
+    {
+        return 0U;
+    }
+
+    push_start = g_exec_path[push_start_idx];
+    bomb_endpoint = g_exec_path[endpoint_idx];
+    inverse_remap_exec_path_point(&push_start);
+    inverse_remap_exec_path_point(&bomb_endpoint);
+    source_row = (int32)push_start.row + first_d_row;
+    source_col = (int32)push_start.col + first_d_col;
+    explode_row = (int32)bomb_endpoint.row + last_d_row;
+    explode_col = (int32)bomb_endpoint.col + last_d_col;
+    if (source_row < 0 || source_col < 0 ||
+        source_row >= (int32)MAP_ROWS || source_col >= (int32)MAP_COLS ||
+        explode_row < 0 || explode_col < 0 ||
+        explode_row >= (int32)MAP_ROWS || explode_col >= (int32)MAP_COLS)
+    {
+        return 0U;
+    }
+
+    for (bomb_index = 0U; bomb_index < Bombs_count; bomb_index++)
+    {
+        if (bombs[bomb_index].row == (uint8)source_row &&
+            bombs[bomb_index].col == (uint8)source_col)
+        {
+            found_bomb = 1U;
+            break;
+        }
+    }
+    if (!found_bomb)
+    {
+        return 0U;
+    }
+    for (read_index = bomb_index + 1U; read_index < Bombs_count; read_index++)
+    {
+        bombs[read_index - 1U] = bombs[read_index];
+    }
+    Bombs_count--;
+    if (Bombs_count < MAX_BOMBS)
+    {
+        memset(&bombs[Bombs_count], 0, sizeof(Position));
+    }
+
+    /* 与规划层 simulate_bomb_explosion() 保持一致：清除爆心 3x3 墙体。 */
+    old_obstacles_count = Obstacles_count;
+    for (read_index = 0U; read_index < old_obstacles_count; read_index++)
+    {
+        int32 d_row = (int32)obstacles[read_index].row - explode_row;
+        int32 d_col = (int32)obstacles[read_index].col - explode_col;
+        int32 abs_row = (d_row < 0) ? -d_row : d_row;
+        int32 abs_col = (d_col < 0) ? -d_col : d_col;
+
+        if (abs_row <= 1 && abs_col <= 1)
+        {
+            continue;
+        }
+        obstacles[write_index++] = obstacles[read_index];
+    }
+    Obstacles_count = write_index;
+    while (write_index < old_obstacles_count)
+    {
+        memset(&obstacles[write_index], 0, sizeof(Position));
+        write_index++;
+    }
+    return 1U;
+}
+
 /* 前向声明：供识别分段和主路径下发时复用炸弹停留配置。 */
-static void configure_bomb_pause_for_path(const Position *path, size_t steps);
+static void configure_bomb_pause_for_path(const Position *path,
+                                          size_t steps,
+                                          size_t first_scan_index);
 static uint8 identify_cell_has_blocker(uint8 row, uint8 col);
 static uint8 identify_cell_blocks_near_half_step(uint8 row, uint8 col);
 static void map_float_grid_to_exec_meter(float map_row_f,
@@ -821,6 +1004,12 @@ static void reset_level_runtime_state_for_launch(void)
     g_exec_steps = 0U;
     g_return_heading_rotate_started = 0U;
     g_pushbox_entry_heading_rotate_started = 0U;
+    g_identify_safe_move_prepared = 0U;
+    g_identify_safe_move_running = 0U;
+    g_identify_return_start_valid = 0U;
+    g_identify_return_start_map = (Position){0U, 0U, 0U};
+    g_identify_safe_move_steps = 0U;
+    memset(g_identify_safe_move_path, 0, sizeof(g_identify_safe_move_path));
     g_continuous_stop_stable_count = 0U;
     memset(g_exec_path, 0, sizeof(g_exec_path));
 
@@ -1632,6 +1821,157 @@ static uint8 identify_cell_blocks_near_half_step(uint8 row, uint8 col)
     return 0U;
 }
 
+static uint8 identify_wall_at(uint8 row, uint8 col)
+{
+    size_t i = 0U;
+
+    for (i = 0U; i < Obstacles_count; i++)
+    {
+        if (obstacles[i].row == row && obstacles[i].col == col)
+            return 1U;
+    }
+    return 0U;
+}
+
+/**
+ * @brief 判断格子自身及四邻域是否没有墙；允许邻近箱子和目标点。
+ */
+static uint8 identify_safe_localization_cell(uint8 row, uint8 col)
+{
+    static const int8 d_row[5] = {0, -1, 0, 1, 0};
+    static const int8 d_col[5] = {0, 0, 1, 0, -1};
+    size_t i = 0U;
+
+    if (row >= MAP_ROWS || col >= MAP_COLS ||
+        identify_cell_has_blocker(row, col))
+    {
+        return 0U;
+    }
+    for (i = 0U; i < 5U; i++)
+    {
+        int32 check_row = (int32)row + (int32)d_row[i];
+        int32 check_col = (int32)col + (int32)d_col[i];
+
+        if (check_row < 0 || check_col < 0 ||
+            check_row >= (int32)MAP_ROWS || check_col >= (int32)MAP_COLS)
+        {
+            continue;
+        }
+        if (identify_wall_at((uint8)check_row, (uint8)check_col))
+        {
+            return 0U;
+        }
+    }
+    return 1U;
+}
+
+/**
+ * @brief 用四邻域 BFS 构建到最近安全定位格的可达路径。
+ */
+static uint8 build_identify_safe_localization_path(Position start_map,
+                                                   Position *out_exec_path,
+                                                   size_t capacity,
+                                                   size_t *out_steps)
+{
+    static int16 prev[CONTROL_IDENTIFY_SAFE_PATH_CAPACITY];
+    static uint16 queue[CONTROL_IDENTIFY_SAFE_PATH_CAPACITY];
+    static uint16 reverse_indices[CONTROL_IDENTIFY_SAFE_PATH_CAPACITY];
+    static const int8 d_row[4] = {0, -1, 0, 1};
+    static const int8 d_col[4] = {1, 0, -1, 0};
+    size_t i = 0U;
+    size_t head = 0U;
+    size_t tail = 0U;
+    size_t reverse_count = 0U;
+    int32 start_index = 0;
+    int32 target_index = -1;
+
+    if (out_steps != NULL)
+    {
+        *out_steps = 0U;
+    }
+    if (out_exec_path == NULL || out_steps == NULL ||
+        capacity < 1U || start_map.row >= MAP_ROWS || start_map.col >= MAP_COLS)
+    {
+        return 0U;
+    }
+
+    for (i = 0U; i < CONTROL_IDENTIFY_SAFE_PATH_CAPACITY; i++)
+    {
+        prev[i] = -2;
+    }
+    start_index = (int32)start_map.row * (int32)MAP_COLS + (int32)start_map.col;
+    prev[start_index] = -1;
+    queue[tail++] = (uint16)start_index;
+
+    while (head < tail)
+    {
+        int32 current = (int32)queue[head++];
+        uint8 row = (uint8)(current / (int32)MAP_COLS);
+        uint8 col = (uint8)(current % (int32)MAP_COLS);
+
+        if (identify_safe_localization_cell(row, col))
+        {
+            target_index = current;
+            break;
+        }
+
+        for (i = 0U; i < 4U; i++)
+        {
+            int32 next_row = (int32)row + (int32)d_row[i];
+            int32 next_col = (int32)col + (int32)d_col[i];
+            int32 next_index = 0;
+
+            if (next_row < 0 || next_col < 0 ||
+                next_row >= (int32)MAP_ROWS || next_col >= (int32)MAP_COLS)
+            {
+                continue;
+            }
+            if (identify_cell_has_blocker((uint8)next_row, (uint8)next_col))
+            {
+                continue;
+            }
+            next_index = next_row * (int32)MAP_COLS + next_col;
+            if (prev[next_index] != -2)
+            {
+                continue;
+            }
+            if (tail >= CONTROL_IDENTIFY_SAFE_PATH_CAPACITY)
+            {
+                return 0U;
+            }
+            prev[next_index] = (int16)current;
+            queue[tail++] = (uint16)next_index;
+        }
+    }
+
+    if (target_index < 0)
+    {
+        return 0U;
+    }
+    while (target_index >= 0 && reverse_count < CONTROL_IDENTIFY_SAFE_PATH_CAPACITY)
+    {
+        reverse_indices[reverse_count++] = (uint16)target_index;
+        target_index = (int32)prev[target_index];
+    }
+    if (reverse_count == 0U || reverse_count > capacity)
+    {
+        return 0U;
+    }
+
+    for (i = 0U; i < reverse_count; i++)
+    {
+        uint16 map_index = reverse_indices[reverse_count - 1U - i];
+        Position point = {0U, 0U, 0U};
+
+        point.row = (uint8)(map_index / MAP_COLS);
+        point.col = (uint8)(map_index % MAP_COLS);
+        path_remap_exec_point(&point);
+        out_exec_path[i] = point;
+    }
+    *out_steps = reverse_count;
+    return 1U;
+}
+
 static void map_float_grid_to_exec_meter(float map_row_f,
                                          float map_col_f,
                                          float *x_m,
@@ -1931,14 +2271,17 @@ static uint8 prepare_identify_endpoints(void)
 
     for (i = 0U; i < g_exec_steps; i++)
     {
-        if (is_identification_marker(g_exec_path[i].id))
+        /* 爆炸事件也必须成为分段端点，确保暂停结束后立即推进运行时地图。 */
+        if (is_identification_marker(g_exec_path[i].id) ||
+            (g_exec_path[i].id & BOMB_EXPLOSION) != 0U)
         {
             if (g_identify_endpoint_count >= MAX_CAR_PATH)
             {
                 return 0U;
             }
             g_identify_endpoint_indices[g_identify_endpoint_count] = i;
-            g_identify_endpoint_need_action[g_identify_endpoint_count] = 1U;
+            g_identify_endpoint_need_action[g_identify_endpoint_count] =
+                is_identification_marker(g_exec_path[i].id);
             g_identify_endpoint_count++;
         }
     }
@@ -2002,7 +2345,10 @@ static uint8 begin_identify_segment_motion(size_t end_idx)
             g_identify_segment_path[seg_steps - 1U] = half_endpoint;
         }
 
-        configure_bomb_pause_for_path(g_identify_segment_path, seg_steps);
+        /* 分段首点是上一事件的已处理端点，不应再次触发爆炸停留。 */
+        configure_bomb_pause_for_path(g_identify_segment_path,
+                                      seg_steps,
+                                      (g_identify_segment_start_idx > 0U) ? 1U : 0U);
         control_hold_yaw_closed_loop();
         if (use_half_grid_path)
         {
@@ -2036,6 +2382,7 @@ static uint8 start_identify_segment(size_t end_idx)
 
     g_identify_rotate_started = 0U;
     g_identify_near_half_step_started = 0U;
+    g_identify_segment_map_event_applied = 0U;
     memset(g_identify_targets, 0, sizeof(g_identify_targets));
     g_identify_target_count = 0U;
     g_identify_target_cursor = 0U;
@@ -2063,6 +2410,18 @@ static uint8 start_identify_segment(size_t end_idx)
 
 static void finish_identify_flow_and_relocalize(void)
 {
+    Position return_start_map = {0U, 0U, 0U};
+    uint8 return_start_valid = 0U;
+
+    if (g_identify_segment_start_idx < g_exec_steps)
+    {
+        return_start_map = g_exec_path[g_identify_segment_start_idx];
+        inverse_remap_exec_path_point(&return_start_map);
+        return_start_map.id = 0U;
+        return_start_valid = (return_start_map.row < MAP_ROWS &&
+                              return_start_map.col < MAP_COLS) ? 1U : 0U;
+    }
+
     /* 识别路径刚结束时仍按行驶中停车处理，避免直接断 PWM 造成滑行。 */
     path_follow_set_path(NULL, 0U);
     path_follow_set_pause_indices(NULL, 0U, 0U);
@@ -2083,6 +2442,12 @@ static void finish_identify_flow_and_relocalize(void)
     car_pose_updated = false;
     reset_localization_accumulator();
     g_pushbox_entry_heading_rotate_started = 0U;
+    g_identify_safe_move_prepared = 0U;
+    g_identify_safe_move_running = 0U;
+    g_identify_return_start_valid = return_start_valid;
+    g_identify_return_start_map = return_start_map;
+    g_identify_safe_move_steps = 0U;
+    memset(g_identify_safe_move_path, 0, sizeof(g_identify_safe_move_path));
     g_control_stage = CONTROL_STAGE_IDENTIFY_RETURN_HEADING;
 }
 
@@ -2118,8 +2483,11 @@ static uint8 advance_identify_endpoint_or_finish(void)
  *
  * @param path 路径点数组。
  * @param steps 路径长度。
+ * @param first_scan_index 开始扫描事件的点下标。
  */
-static void configure_bomb_pause_for_path(const Position *path, size_t steps)
+static void configure_bomb_pause_for_path(const Position *path,
+                                          size_t steps,
+                                          size_t first_scan_index)
 {
     size_t pause_indices[PATH_FOLLOW_MAX_PAUSE_POINTS] = {0U};
     size_t pause_count = 0U;
@@ -2131,7 +2499,11 @@ static void configure_bomb_pause_for_path(const Position *path, size_t steps)
         return;
     }
 
-    for (i = 0U; i < steps; i++)
+    if (first_scan_index > steps)
+    {
+        first_scan_index = steps;
+    }
+    for (i = first_scan_index; i < steps; i++)
     {
         if ((path[i].id & BOMB_EXPLOSION) == 0U)
         {
@@ -2610,14 +2982,53 @@ static void handle_prestart_move(void)
 }
 
 /**
- * @brief 识别结束后的航向回正过渡阶段。
+ * @brief 识别结束后的安全定位点移动与航向回正过渡阶段。
  *
- * 回正完成后才进入 stage30，随后执行停车、CARSTOP、旧帧排空和视觉定位。
+ * 先移动到最近的可达安全格，再回正发车方向。两项都完成后才进入 stage30，
+ * 随后执行停车、CARSTOP、旧帧排空和视觉定位。
  */
 static void handle_identify_return_heading_stage(void)
 {
     path_follow_status_t st = {0};
     float start_base_yaw_deg = map_dir_to_yaw_deg(CONTROL_MAP_DIR_RIGHT);
+
+    if (!g_identify_safe_move_prepared)
+    {
+        g_identify_safe_move_prepared = 1U;
+        g_identify_safe_move_steps = 0U;
+        memset(g_identify_safe_move_path, 0, sizeof(g_identify_safe_move_path));
+
+        if (g_identify_return_start_valid &&
+            build_identify_safe_localization_path(g_identify_return_start_map,
+                                                  g_identify_safe_move_path,
+                                                  CONTROL_IDENTIFY_SAFE_PATH_CAPACITY,
+                                                  &g_identify_safe_move_steps) &&
+            g_identify_safe_move_steps >= 2U)
+        {
+            path_follow_set_pause_indices(NULL, 0U, 0U);
+            control_hold_yaw_closed_loop();
+            path_follow_set_path_pause_enabled(g_identify_safe_move_path,
+                                               g_identify_safe_move_steps,
+                                               0U);
+            car_go_flag = 1U;
+            car_stop_flag = 0U;
+            g_identify_safe_move_running = 1U;
+            return;
+        }
+    }
+
+    if (g_identify_safe_move_running)
+    {
+        path_follow_get_status(&st);
+        if (st.active)
+        {
+            car_go_flag = 1U;
+            car_stop_flag = 0U;
+            return;
+        }
+        g_identify_safe_move_running = 0U;
+        control_hold_yaw_closed_loop();
+    }
 
     if (!g_pushbox_entry_heading_rotate_started)
     {
@@ -2643,6 +3054,8 @@ static void handle_identify_return_heading_stage(void)
      * same launch-relative heading every time.
      */
     g_pushbox_entry_heading_rotate_started = 0U;
+    g_identify_safe_move_prepared = 0U;
+    g_identify_return_start_valid = 0U;
     control_hold_yaw_closed_loop();
     reset_localization_accumulator();
 
@@ -2963,6 +3376,15 @@ static void handle_identify_execute_path(void)
         }
 
         endpoint_idx = g_identify_endpoint_indices[g_identify_endpoint_cursor];
+        if (!g_identify_segment_map_event_applied)
+        {
+            if (!identify_apply_runtime_map_event(endpoint_idx))
+            {
+                g_control_stage = CONTROL_STAGE_ERROR;
+                return;
+            }
+            g_identify_segment_map_event_applied = 1U;
+        }
         if (g_identify_endpoint_need_action[g_identify_endpoint_cursor])
         {
             if (g_identify_target_count > 0U)
@@ -3151,7 +3573,7 @@ static void handle_load_path_stage(void)
         return;
     }
 
-    configure_bomb_pause_for_path(g_exec_path, g_exec_steps);
+    configure_bomb_pause_for_path(g_exec_path, g_exec_steps, 0U);
     control_hold_yaw_closed_loop();
     path_follow_set_path(g_exec_path, g_exec_steps);
 

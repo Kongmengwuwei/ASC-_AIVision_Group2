@@ -146,6 +146,13 @@ int PID_Add_Calculate(tagPID_T *_tPid,float _fCurrValue,float _fExpValue)
 		Delt_Out = -_tPid->fMax_Out;
 	
     _tPid->fCtrl_Out = _tPid->fPre_Out + Delt_Out;                 /* 与前值累加 */
+
+    /* Keep the internal accumulated output consistent with actuator limits. */
+    if(_tPid->fCtrl_Out > _tPid->fMax_Out)
+        _tPid->fCtrl_Out = _tPid->fMax_Out;
+    if(_tPid->fCtrl_Out < -_tPid->fMax_Out)
+        _tPid->fCtrl_Out = -_tPid->fMax_Out;
+
     _tPid->fPre_Out = _tPid->fCtrl_Out;                            /* 记录数值，为下次PID做准备 */
 
 

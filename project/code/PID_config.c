@@ -12,9 +12,9 @@ tagPID_T Gyro_rotate_pid;
 
 PIDInitStruct ULPidInitStruct = 
 {
-	.fKp       = 20.0,    //.fKp
-	.fKi       = 1.3,     //.fKi
-	.fKd       = 32.0,    //.fKd
+	.fKp       = 10.0,    //.fKp
+	.fKi       = 0.8,     //.fKi
+	.fKd       = 25.0,    //.fKd
 	.fMax_Iout = 4000,      //.fMax_Iout
 	.fMax_Out  = 6000,       //.fMax_Out
 	.alpha     = 0.9
@@ -22,9 +22,9 @@ PIDInitStruct ULPidInitStruct =
 
 PIDInitStruct URPidInitStruct = 
 {
-	.fKp       = 18.0,    //.fKp
-	.fKi       = 1.5,     //.fKi
-	.fKd       = 40.0,    //.fKd
+	.fKp       = 14.0,    //.fKp
+	.fKi       = 1.1,     //.fKi
+	.fKd       = 20.0,    //.fKd
 	.fMax_Iout = 4000,      //.fMax_Iout
 	.fMax_Out  = 6000,       //.fMax_Out
 	.alpha     = 0.9
@@ -32,19 +32,19 @@ PIDInitStruct URPidInitStruct =
 
 PIDInitStruct DLPidInitStruct = 
 {
-	.fKp       = 22.0,    //.fKp
-	.fKi       = 1.0,     //.fKi
-	.fKd       = 30.0,    //.fKd
+	.fKp       = 8.0,     //.fKp
+	.fKi       = 1.1,     //.fKi
+	.fKd       = 20.0,    //.fKd
 	.fMax_Iout = 4000,      //.fMax_Iout
 	.fMax_Out  = 6000,       //.fMax_Out
-	.alpha     = 0.9
+	.alpha     = 0.8
 };
 
 PIDInitStruct DRPidInitStruct = 
 {
-	.fKp       = 24.0,    //.fKp
-	.fKi       = 0.9,     //.fKi
-	.fKd       = 30.0,    //.fKd
+	.fKp       = 15.0,    //.fKp
+	.fKi       = 1.4,     //.fKi
+	.fKd       = 25.0,    //.fKd
 	.fMax_Iout = 4000,      //.fMax_Iout
 	.fMax_Out  = 6000,       //.fMax_Out
 	.alpha     = 0.9

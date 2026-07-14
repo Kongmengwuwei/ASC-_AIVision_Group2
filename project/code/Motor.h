@@ -40,7 +40,6 @@
 #define MOTOR_BOARD_REVERSE_ENCODER_ALL_DIR (0)
 #endif
 
-
 #define ENCODER_1                   (QTIMER1_ENCODER2)
 #define ENCODER_1_A                 (QTIMER1_ENCODER2_CH1_C2)
 #define ENCODER_1_B                 (QTIMER1_ENCODER2_CH2_C24)
@@ -69,16 +68,16 @@
 #define LIMIT_PWM_MIN              -6000
 #define LIMIT_PWM_MAX               6000
 
-/* Measured no-load start thresholds, using 85% as conservative feedforward. */
+/* Closed-loop tuned dead-zone feedforward for the final motor driver board. */
 #define MOTOR_DEADZONE_TARGET_MIN_COUNTS  2
-#define MOTOR_UL_DEADZONE_FWD             410
-#define MOTOR_UL_DEADZONE_REV             410
-#define MOTOR_UR_DEADZONE_FWD             490
-#define MOTOR_UR_DEADZONE_REV             510
-#define MOTOR_DL_DEADZONE_FWD             340
-#define MOTOR_DL_DEADZONE_REV             340
-#define MOTOR_DR_DEADZONE_FWD             600
-#define MOTOR_DR_DEADZONE_REV             680
+#define MOTOR_UL_DEADZONE_FWD             420
+#define MOTOR_UL_DEADZONE_REV             390
+#define MOTOR_UR_DEADZONE_FWD             495
+#define MOTOR_UR_DEADZONE_REV             429
+#define MOTOR_DL_DEADZONE_FWD             435
+#define MOTOR_DL_DEADZONE_REV             390
+#define MOTOR_DR_DEADZONE_FWD             550
+#define MOTOR_DR_DEADZONE_REV             637
 
 #define LIMIT_ENCODER_MIN          -500
 #define LIMIT_ENCODER_MAX           500
@@ -116,4 +115,3 @@ void Kinematics_Init(void);
 void Kinematics_Inverse(float* input, int* output);
 
 #endif
-	

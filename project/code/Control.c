@@ -60,7 +60,6 @@ float g_control_prestart_depart_compensate_m = -0.025f;
 #define CONTROL_REQ_CAR_RETRY_TIMEOUT_TICKS 200U
 #define CONTROL_LOCALIZE_STOP_STABLE_TICKS 20U
 #define CONTROL_LOCALIZE_POST_STOP_DRAIN_TICKS 40U
-#define CONTROL_LOCALIZE_CAR_QUIET_BEFORE_MAP_TICKS 20U
 #define CONTROL_LOCALIZE_WHEEL_STOP_ENCODER_TOL 5
 #define CONTROL_LOCALIZE_MAX_SAMPLES 5U
 #define CONTROL_LOCALIZE_TWO_SAMPLE_MATCH_M 0.03f
@@ -250,8 +249,6 @@ static uint8 g_start_yaw_ready = 0U;
 
 static uint8 g_wait_new_map_frame = 0U;
 static uint8 g_wait_map_frame_base = 0U;
-/* 定位取样完成后，等待 CAR 静默窗口并启动地图预取。 */
-static uint8 g_localize_post_pose_wait_started = 0U;
 static volatile uint32 g_control_tick_10ms = 0U;
 
 static size_t g_identify_segment_start_idx = 0U;
@@ -292,11 +289,8 @@ static uint8 g_localize_fresh_pose_request_started = 0U;
 static uint8 g_localize_car_frame_base = 0U;
 static uint8 g_localize_map_prefetch_started = 0U;
 static uint8 g_localize_map_frame_base = 0U;
-static uint8 g_localize_map_prefetch_scheduled = 0U;
-static uint8 g_localize_prefetch_car_frame_base = 0U;
 static uint32 g_localize_stop_stable_start_tick = 0U;
 static uint32 g_localize_post_stop_start_tick = 0U;
-static uint32 g_localize_map_prefetch_quiet_start_tick = 0U;
 
 /**
  * @brief 起步动作是否已经触发�?
@@ -467,14 +461,10 @@ static void reset_localization_accumulator(void)
     g_localize_car_frame_base = 0U;
     g_localize_map_prefetch_started = 0U;
     g_localize_map_frame_base = 0U;
-    g_localize_map_prefetch_scheduled = 0U;
-    g_localize_prefetch_car_frame_base = 0U;
     g_localize_stop_stable_start_tick = 0U;
     g_localize_post_stop_start_tick = 0U;
-    g_localize_map_prefetch_quiet_start_tick = 0U;
     memset(g_localize_samples_x_m, 0, sizeof(g_localize_samples_x_m));
     memset(g_localize_samples_y_m, 0, sizeof(g_localize_samples_y_m));
-    g_localize_post_pose_wait_started = 0U;
 }
 
 static void clear_map_request_wait(void)
@@ -2227,55 +2217,6 @@ static void start_localization_map_prefetch_once(void)
     send_map_request_once();
 }
 
-static void schedule_localization_map_prefetch_after_car(void)
-{
-    if (g_localize_map_prefetch_started || g_localize_map_prefetch_scheduled)
-    {
-        return;
-    }
-
-    if (Algorithm_Test_PresetInput_IsEnabled())
-    {
-        start_localization_map_prefetch_once();
-        return;
-    }
-
-    /*
-     * A timed-out CARPOS can leave an extra response in the camera/UART path.
-     * Wait for a short interval with no new CAR frame before issuing START, so
-     * a late coordinate line cannot be inserted into and invalidate $MAP.
-     */
-    g_localize_map_prefetch_scheduled = 1U;
-    g_localize_prefetch_car_frame_base = car_frame_count;
-    g_localize_map_prefetch_quiet_start_tick = g_control_tick_10ms;
-    car_pose_updated = false;
-}
-
-static void service_localization_map_prefetch(void)
-{
-    if (g_localize_map_prefetch_started || !g_localize_map_prefetch_scheduled)
-    {
-        return;
-    }
-
-    if (car_frame_count != g_localize_prefetch_car_frame_base)
-    {
-        g_localize_prefetch_car_frame_base = car_frame_count;
-        g_localize_map_prefetch_quiet_start_tick = g_control_tick_10ms;
-        car_pose_updated = false;
-        return;
-    }
-
-    if ((uint32)(g_control_tick_10ms - g_localize_map_prefetch_quiet_start_tick) <
-        CONTROL_LOCALIZE_CAR_QUIET_BEFORE_MAP_TICKS)
-    {
-        return;
-    }
-
-    g_localize_map_prefetch_scheduled = 0U;
-    start_localization_map_prefetch_once();
-}
-
 static uint8 localization_prefetched_map_ready(void)
 {
     return (g_localize_map_prefetch_started && map_data_ready &&
@@ -2298,8 +2239,8 @@ static void finish_localization_to_map_or_plan(void)
     }
 
     /*
-     * The request may still be in flight while yaw alignment finishes. Keep
-     * its original frame baseline and retry timer when entering stage 31.
+     * The request may still be in flight while CARPOS localization finishes.
+     * Keep its original frame baseline and retry timer when entering stage 31.
      * Rebasing here could miss a just-arriving response, while clearing the
      * wait state would immediately send a duplicate START to the same camera.
      */
@@ -2319,6 +2260,7 @@ static uint8 settle_camera_before_localization_once(void)
 
     if (Algorithm_Test_PresetInput_IsEnabled())
     {
+        start_localization_map_prefetch_once();
         (void)Algorithm_Test_PresetInput_ProvideCarPoseFrame();
         g_localize_camera_settled = 1U;
         return 1U;
@@ -2340,6 +2282,7 @@ static uint8 settle_camera_before_localization_once(void)
         uart_blob_clear_pending_data();
         g_localize_stop_sequence_started = 1U;
         g_localize_post_stop_start_tick = now_tick;
+        start_localization_map_prefetch_once();
     }
 
     if (!localization_wheels_stopped()) {
@@ -2717,8 +2660,8 @@ static void handle_identify_return_heading_stage(void)
 /**
  * @brief 处理视觉定位阶段。
  *
- * 进入本阶段前航向已经回正；这里只负责停车、CARPOS 多帧采样、写入视觉位置，
- * 以及在 CAR 通道安静后启动地图预取，不再触发原地旋转。
+ * 进入本阶段前航向已经回正；这里只负责停车、并行启动地图预取、CARPOS 多帧采样，
+ * 以及写入视觉位置，不再触发原地旋转。发车定位与推箱前定位共用此流程。
  */
 static void handle_localization_stage(void)
 {
@@ -2740,28 +2683,6 @@ static void handle_localization_stage(void)
         clear_car_request_wait();
         mark_wait_new_map_frame();
         set_control_phase_stage(CONTROL_PHASE_STEP_WAIT_CAMERA_DATA);
-        return;
-    }
-
-    if (g_localize_post_pose_wait_started)
-    {
-        service_localization_map_prefetch();
-
-        /* 视觉位置已写入；当前只等待 CAR 静默窗口结束并发出 START。 */
-        if (!g_localize_map_prefetch_started)
-        {
-            /* Keep the aligned heading while late CAR frames are drained. */
-            control_hold_yaw_closed_loop();
-            return;
-        }
-
-        g_localize_post_pose_wait_started = 0U;
-        control_hold_yaw_closed_loop();
-        g_level_start_localization_required = 0U;
-        if (g_control_flow_phase == CONTROL_FLOW_IDENTIFY)
-        {
-        }
-        finish_localization_to_map_or_plan();
         return;
     }
 
@@ -2836,13 +2757,6 @@ static void handle_localization_stage(void)
     clear_car_request_wait();
 
     /*
-     * START and CARPOS share UART1 and are handled by the same camera. Start
-     * MAP recognition only after all localization CARPOS samples have been
-     * consumed. The map request is issued after the CAR quiet window, so
-     * localization and map acquisition no longer starve each other.
-     */
-    schedule_localization_map_prefetch_after_car();
-    /*
      * 初始定位的关键修正：
      * - 视觉只提供地图位置平均值；
      * - 航向已经在进入 stage30 前回正，这里只同步位置并保持发车方向基准。
@@ -2850,7 +2764,8 @@ static void handle_localization_stage(void)
     path_follow_reset_pose(avg_x_m, avg_y_m, start_base_yaw_deg);
     BlueSerial_ReportPosition();
     control_hold_yaw_closed_loop();
-    g_localize_post_pose_wait_started = 1U;
+    g_level_start_localization_required = 0U;
+    finish_localization_to_map_or_plan();
 }
 
 /**

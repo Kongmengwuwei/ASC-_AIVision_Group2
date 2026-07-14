@@ -47,12 +47,17 @@
 #define BLUESERIAL_PATH_REPORT_PERIOD_TICKS     5U
 #define BLUESERIAL_RX_FRAME_LEN                 80U
 #define BLUESERIAL_RX_QUEUE_LEN                 16U
+#define BLUESERIAL_SEGMENT_REPORT_QUEUE_LEN     8U
 #define BLUESERIAL_MAX_TARGET_SPEED_CMPS        150.0f
 #define BLUESERIAL_MAX_TARGET_POSITION_CM       500.0f
 #define BLUESERIAL_MAX_YAW_KP                   20.0f
 #define BLUESERIAL_MAX_YAW_KI                   10.0f
 #define BLUESERIAL_MAX_YAW_KD                   50.0f
 #define BLUESERIAL_MAX_YAW_FF_DEGPS             120.0f
+#define BLUESERIAL_MAX_Y_CROSSTALK_ABS          0.100f
+#define BLUESERIAL_MAX_POSITION_KP              20.0f
+#define BLUESERIAL_MAX_POSITION_KI              10.0f
+#define BLUESERIAL_MAX_POSITION_KD              50.0f
 #define BLUESERIAL_RELATIVE_GRID_M              0.01f
 #define BLUESERIAL_RELATIVE_CENTER_CELL         127
 #define BLUESERIAL_RELATIVE_MAX_OFFSET_CELL     120
@@ -78,6 +83,17 @@ typedef enum
     BLUESERIAL_MOVE_RIGHT
 } blueserial_move_direction_t;
 
+typedef struct
+{
+    size_t segment_idx;
+    float current_x_m;
+    float current_y_m;
+    float target_x_m;
+    float target_y_m;
+    float current_yaw_deg;
+    float target_yaw_deg;
+} blueserial_segment_report_t;
+
 static volatile uint8 g_rx_collecting = 0U;
 static volatile uint8 g_rx_work_len = 0U;
 static char g_rx_work[BLUESERIAL_RX_FRAME_LEN];
@@ -89,6 +105,9 @@ static char g_last_rx_frame[BLUESERIAL_RX_FRAME_LEN] = "";
 static volatile uint8 g_last_rx_frame_len = 0U;
 
 static volatile uint8 g_blueserial_path_report_pending = 0U;
+static blueserial_segment_report_t g_segment_report_queue[BLUESERIAL_SEGMENT_REPORT_QUEUE_LEN];
+static volatile uint8 g_segment_report_write = 0U;
+static volatile uint8 g_segment_report_read = 0U;
 static volatile blueserial_control_mode_t g_control_mode = BLUESERIAL_MODE_STOP;
 /* 逻辑轮序与 Motor.c 的 motor_pwm() 参数一致：UL, UR, DL, DR。 */
 static volatile int g_raw_pwm[4] = {0, 0, 0, 0};
@@ -98,8 +117,11 @@ static blueserial_move_direction_t g_next_move_direction = BLUESERIAL_MOVE_FORWA
 static blueserial_move_direction_t g_cruise_move_direction = BLUESERIAL_MOVE_FORWARD;
 static uint8 g_turn_quarters_remaining = 0U;
 static float g_turn_step_deg = 90.0f;
+static float g_turn_target_yaw_deg = 0.0f;
 static volatile uint8 g_yaw_hold_enabled = 0U;
-static Position g_blueserial_relative_path[3];
+/* yawhold 开启时只在这里保存一次目标角，普通路径/切段不得重新采当前角。 */
+static float g_yaw_hold_target_deg = 0.0f;
+static Position g_blueserial_relative_path[2];
 static uint8 g_position_request_pending = 0U;
 static uint8 g_position_request_start_frame = 0U;
 static uint8 g_position_request_retry_count = 0U;
@@ -107,7 +129,7 @@ static uint16 g_position_request_wait_loops = 0U;
 static uint8 g_point_target_valid = 0U;
 static float g_point_target_x_m = 0.0f;
 static float g_point_target_y_m = 0.0f;
-static Position g_blueserial_point_target_path[3];
+static Position g_blueserial_point_target_path[2];
 
 static float BlueSerial_ClampFloat(float value, float min_value, float max_value)
 {
@@ -138,6 +160,115 @@ static int BlueSerial_ClampInt(int value, int min_value, int max_value)
 static int BlueSerial_RoundToInt(float value)
 {
     return (int)(value + ((value >= 0.0f) ? 0.5f : -0.5f));
+}
+
+static float BlueSerial_WrapYawDeg(float yaw_deg)
+{
+    while (yaw_deg > 180.0f)
+    {
+        yaw_deg -= 360.0f;
+    }
+    while (yaw_deg <= -180.0f)
+    {
+        yaw_deg += 360.0f;
+    }
+    return yaw_deg;
+}
+
+static float BlueSerial_GetMotionYawTarget(float fallback_yaw_deg)
+{
+    if (g_yaw_hold_enabled)
+    {
+        return g_yaw_hold_target_deg;
+    }
+    return BlueSerial_WrapYawDeg(fallback_yaw_deg);
+}
+
+static void BlueSerial_QueueSegmentReport(const path_follow_status_t *before,
+                                          const path_follow_status_t *after)
+{
+    uint8 next_write;
+    blueserial_segment_report_t *report;
+
+    if (before == NULL || after == NULL)
+    {
+        return;
+    }
+
+    next_write = (uint8)((g_segment_report_write + 1U) %
+                         BLUESERIAL_SEGMENT_REPORT_QUEUE_LEN);
+    if (next_write == g_segment_report_read)
+    {
+        /* Keep the newest segment result if the main loop is temporarily busy. */
+        g_segment_report_read = (uint8)((g_segment_report_read + 1U) %
+                                        BLUESERIAL_SEGMENT_REPORT_QUEUE_LEN);
+    }
+
+    report = &g_segment_report_queue[g_segment_report_write];
+    report->segment_idx = before->target_idx;
+    report->current_x_m = after->x_m;
+    report->current_y_m = after->y_m;
+    report->current_yaw_deg = after->yaw_deg;
+    report->target_yaw_deg = before->target_yaw_deg;
+    if (before->yaw_only_active)
+    {
+        report->target_x_m = after->x_m;
+        report->target_y_m = after->y_m;
+    }
+    else
+    {
+        report->target_x_m = before->target_x_m;
+        report->target_y_m = before->target_y_m;
+    }
+    g_segment_report_write = next_write;
+}
+
+static void BlueSerial_CaptureSegmentCompletion(const path_follow_status_t *before,
+                                                const path_follow_status_t *after)
+{
+    if (before == NULL || after == NULL || !before->active || before->paused)
+    {
+        return;
+    }
+
+    if (after->active && !after->paused &&
+        after->target_idx == before->target_idx)
+    {
+        return;
+    }
+
+    BlueSerial_QueueSegmentReport(before, after);
+}
+
+static void BlueSerial_ServiceSegmentReports(void)
+{
+    uint32 primask;
+    blueserial_segment_report_t report;
+
+    while (1)
+    {
+        primask = interrupt_global_disable();
+        if (g_segment_report_read == g_segment_report_write)
+        {
+            interrupt_global_enable(primask);
+            return;
+        }
+
+        report = g_segment_report_queue[g_segment_report_read];
+        g_segment_report_read = (uint8)((g_segment_report_read + 1U) %
+                                        BLUESERIAL_SEGMENT_REPORT_QUEUE_LEN);
+        interrupt_global_enable(primask);
+
+        BlueSerial_Printf("SEG_DONE idx=%lu APOS=%.3f,%.3f TPOS=%.3f,%.3f "
+                          "AYAW=%.2f TYAW=%.2f\r\n",
+                          (unsigned long)report.segment_idx,
+                          report.current_x_m,
+                          report.current_y_m,
+                          report.target_x_m,
+                          report.target_y_m,
+                          report.current_yaw_deg,
+                          report.target_yaw_deg);
+    }
 }
 
 static void BlueSerial_ClearWheelPid(void)
@@ -222,7 +353,8 @@ static void BlueSerial_ToggleYawHold(void)
     else
     {
         /* 原地航向保持：记录当前 yaw，让 path_follow 只输出角速度，不生成平移速度。 */
-        hold_yaw_deg = eulerAngle.yaw;
+        g_yaw_hold_target_deg = BlueSerial_WrapYawDeg(eulerAngle.yaw);
+        hold_yaw_deg = g_yaw_hold_target_deg;
         path_follow_set_path(NULL, 0U);
         g_control_mode = BLUESERIAL_MODE_STOP;
         g_turn_quarters_remaining = 0U;
@@ -293,10 +425,9 @@ static uint8 BlueSerial_StartSpeedCruise(void)
     }
 
     primask = interrupt_global_disable();
-    hold_yaw_deg = eulerAngle.yaw;
+    hold_yaw_deg = BlueSerial_GetMotionYawTarget(eulerAngle.yaw);
     g_cruise_move_direction = g_next_move_direction;
     g_turn_quarters_remaining = 0U;
-    g_yaw_hold_enabled = 0U;
     path_follow_set_path(NULL, 0U);
     path_follow_set_stationary_yaw_hold_enabled(0U);
     BlueSerial_ZeroSpeedCommand();
@@ -513,12 +644,10 @@ static uint8 BlueSerial_BuildPointTargetPath(float start_x_m,
     float max_coord_m;
     float delta_x_m = target_x_m - start_x_m;
     float delta_y_m = target_y_m - start_y_m;
-    uint8 move_x_first = (fabsf(delta_x_m) >= fabsf(delta_y_m)) ? 1U : 0U;
     int start_row;
     int start_col;
     int target_row;
     int target_col;
-    size_t steps = 1U;
 
     if (start_x_m < 0.0f || start_y_m < 0.0f ||
         target_x_m < 0.0f || target_y_m < 0.0f)
@@ -547,43 +676,12 @@ static uint8 BlueSerial_BuildPointTargetPath(float start_x_m,
     g_blueserial_point_target_path[0].row = (uint8)start_row;
     g_blueserial_point_target_path[0].col = (uint8)start_col;
     g_blueserial_point_target_path[0].id = 0U;
+    g_blueserial_point_target_path[1].row = (uint8)target_row;
+    g_blueserial_point_target_path[1].col = (uint8)target_col;
+    g_blueserial_point_target_path[1].id = 0U;
 
-    if (move_x_first)
-    {
-        if (target_row != start_row)
-        {
-            g_blueserial_point_target_path[steps].row = (uint8)target_row;
-            g_blueserial_point_target_path[steps].col = (uint8)start_col;
-            g_blueserial_point_target_path[steps].id = 0U;
-            steps++;
-        }
-        if (target_col != start_col)
-        {
-            g_blueserial_point_target_path[steps].row = (uint8)target_row;
-            g_blueserial_point_target_path[steps].col = (uint8)target_col;
-            g_blueserial_point_target_path[steps].id = 0U;
-            steps++;
-        }
-    }
-    else
-    {
-        if (target_col != start_col)
-        {
-            g_blueserial_point_target_path[steps].row = (uint8)start_row;
-            g_blueserial_point_target_path[steps].col = (uint8)target_col;
-            g_blueserial_point_target_path[steps].id = 0U;
-            steps++;
-        }
-        if (target_row != start_row)
-        {
-            g_blueserial_point_target_path[steps].row = (uint8)target_row;
-            g_blueserial_point_target_path[steps].col = (uint8)target_col;
-            g_blueserial_point_target_path[steps].id = 0U;
-            steps++;
-        }
-    }
-
-    path_follow_set_path_with_grid(g_blueserial_point_target_path, steps, grid_m, 0U);
+    /* One Bluetooth coordinate command is one straight segment. */
+    path_follow_set_path_with_grid(g_blueserial_point_target_path, 2U, grid_m, 0U);
     return 1U;
 }
 
@@ -615,7 +713,7 @@ static uint8 BlueSerial_StartPointTargetMove(void)
         g_turn_quarters_remaining = 0U;
         BlueSerial_ApplyConfiguredPathSpeedLocked();
         BlueSerial_EnterPathMode();
-        path_follow_set_target_yaw(status.yaw_deg);
+        path_follow_set_target_yaw(BlueSerial_GetMotionYawTarget(status.yaw_deg));
     }
     interrupt_global_enable(primask);
 
@@ -635,11 +733,9 @@ static void BlueSerial_StartCenteredRelativeMove(float delta_x_m, float delta_y_
     const float eps_m = 0.001f;
     float grid_m = BLUESERIAL_RELATIVE_GRID_M;
     float max_delta_m = fmaxf(fabsf(delta_x_m), fabsf(delta_y_m));
-    uint8 move_x_first = (fabsf(delta_x_m) >= fabsf(delta_y_m)) ? 1U : 0U;
     int center_cell = BLUESERIAL_RELATIVE_CENTER_CELL;
     int target_row;
     int target_col;
-    size_t steps = 1U;
 
     if (max_delta_m <= eps_m)
     {
@@ -664,45 +760,13 @@ static void BlueSerial_StartCenteredRelativeMove(float delta_x_m, float delta_y_
     g_blueserial_relative_path[0].row = (uint8)center_cell;
     g_blueserial_relative_path[0].col = (uint8)center_cell;
     g_blueserial_relative_path[0].id = 0U;
-
-    if (move_x_first)
-    {
-        if (target_row != center_cell)
-        {
-            g_blueserial_relative_path[steps].row = (uint8)target_row;
-            g_blueserial_relative_path[steps].col = (uint8)center_cell;
-            g_blueserial_relative_path[steps].id = 0U;
-            steps++;
-        }
-        if (target_col != center_cell)
-        {
-            g_blueserial_relative_path[steps].row = (uint8)target_row;
-            g_blueserial_relative_path[steps].col = (uint8)target_col;
-            g_blueserial_relative_path[steps].id = 0U;
-            steps++;
-        }
-    }
-    else
-    {
-        if (target_col != center_cell)
-        {
-            g_blueserial_relative_path[steps].row = (uint8)center_cell;
-            g_blueserial_relative_path[steps].col = (uint8)target_col;
-            g_blueserial_relative_path[steps].id = 0U;
-            steps++;
-        }
-        if (target_row != center_cell)
-        {
-            g_blueserial_relative_path[steps].row = (uint8)target_row;
-            g_blueserial_relative_path[steps].col = (uint8)target_col;
-            g_blueserial_relative_path[steps].id = 0U;
-            steps++;
-        }
-    }
+    g_blueserial_relative_path[1].row = (uint8)target_row;
+    g_blueserial_relative_path[1].col = (uint8)target_col;
+    g_blueserial_relative_path[1].id = 0U;
 
     path_follow_reset_pose((float)center_cell * grid_m, (float)center_cell * grid_m, yaw_deg);
-    path_follow_set_target_yaw(yaw_deg);
-    path_follow_set_path_with_grid(g_blueserial_relative_path, steps, grid_m, 0U);
+    path_follow_set_target_yaw(BlueSerial_GetMotionYawTarget(yaw_deg));
+    path_follow_set_path_with_grid(g_blueserial_relative_path, 2U, grid_m, 0U);
 }
 
 static uint8 BlueSerial_StartConfiguredMove(void)
@@ -711,6 +775,7 @@ static uint8 BlueSerial_StartConfiguredMove(void)
     blueserial_move_direction_t direction;
     path_follow_status_t status = {0};
     float yaw_rad;
+    float motion_yaw_deg;
     float position_m;
     float delta_x_m = 0.0f;
     float delta_y_m = 0.0f;
@@ -723,7 +788,8 @@ static uint8 BlueSerial_StartConfiguredMove(void)
     primask = interrupt_global_disable();
     direction = g_next_move_direction;
     path_follow_get_status(&status);
-    yaw_rad = status.yaw_deg * ((float)M_PI / 180.0f);
+    motion_yaw_deg = BlueSerial_GetMotionYawTarget(status.yaw_deg);
+    yaw_rad = motion_yaw_deg * ((float)M_PI / 180.0f);
     position_m = g_target_position_cm * 0.01f;
 
     /*
@@ -767,15 +833,19 @@ static uint8 BlueSerial_StartConfiguredMove(void)
 
 static void BlueSerial_StartNextQuarterTurn(void)
 {
-    path_follow_status_t status = {0};
-
-    path_follow_get_status(&status);
-    path_follow_start_rotate_to_yaw(status.yaw_deg + g_turn_step_deg);
+    g_turn_target_yaw_deg = BlueSerial_WrapYawDeg(g_turn_target_yaw_deg + g_turn_step_deg);
+    if (g_yaw_hold_enabled)
+    {
+        /* 明确的转向命令是唯一允许修改 yawhold 锁定目标的入口。 */
+        g_yaw_hold_target_deg = g_turn_target_yaw_deg;
+    }
+    path_follow_start_rotate_to_yaw(g_turn_target_yaw_deg);
 }
 
 static uint8 BlueSerial_StartTurn(uint8 quarter_count, float step_deg)
 {
     uint32 primask;
+    path_follow_status_t status = {0};
 
     if (quarter_count == 0U)
     {
@@ -783,8 +853,10 @@ static uint8 BlueSerial_StartTurn(uint8 quarter_count, float step_deg)
     }
 
     primask = interrupt_global_disable();
+    path_follow_get_status(&status);
     g_turn_quarters_remaining = quarter_count;
     g_turn_step_deg = step_deg;
+    g_turn_target_yaw_deg = BlueSerial_GetMotionYawTarget(status.yaw_deg);
     BlueSerial_EnterPathMode();
     BlueSerial_StartNextQuarterTurn();
     interrupt_global_enable(primask);
@@ -865,6 +937,10 @@ void Blue_Serial_Init(void)
     g_last_rx_frame[0] = '\0';
     g_last_rx_frame_len = 0U;
     g_blueserial_path_report_pending = 0U;
+    g_segment_report_write = 0U;
+    g_segment_report_read = 0U;
+    g_turn_target_yaw_deg = 0.0f;
+    g_yaw_hold_target_deg = 0.0f;
     uart_init(BLUESERIAL_UART, BLUESERIAL_BAUDRATE, BLUESERIAL_TX_PIN, BLUESERIAL_RX_PIN);
     interrupt_set_priority(BLUESERIAL_IRQN, BLUESERIAL_IRQ_PRIORITY);
     uart_rx_interrupt(BLUESERIAL_UART, ZF_ENABLE);
@@ -1191,6 +1267,55 @@ static uint8 BlueSerial_SetSlider(const char *name, float value)
         BlueSerial_Printf("OK next_position=%.1fcm\r\n", applied_value);
         return 1U;
     }
+    if (strcmp(name, "cross.left") == 0 || strcmp(name, "ycross.left") == 0)
+    {
+        applied_value = BlueSerial_ClampFloat(value,
+                                              -BLUESERIAL_MAX_Y_CROSSTALK_ABS,
+                                              BLUESERIAL_MAX_Y_CROSSTALK_ABS);
+        primask = interrupt_global_disable();
+        path_y_crosstalk_left_x_comp_k = applied_value;
+        interrupt_global_enable(primask);
+        BlueSerial_Printf("OK cross.left=%.4f\r\n", applied_value);
+        return 1U;
+    }
+    if (strcmp(name, "cross.right") == 0 || strcmp(name, "ycross.right") == 0)
+    {
+        applied_value = BlueSerial_ClampFloat(value,
+                                              -BLUESERIAL_MAX_Y_CROSSTALK_ABS,
+                                              BLUESERIAL_MAX_Y_CROSSTALK_ABS);
+        primask = interrupt_global_disable();
+        path_y_crosstalk_right_x_comp_k = applied_value;
+        interrupt_global_enable(primask);
+        BlueSerial_Printf("OK cross.right=%.4f\r\n", applied_value);
+        return 1U;
+    }
+    if (strcmp(name, "pos.kp") == 0 || strcmp(name, "position.kp") == 0)
+    {
+        applied_value = BlueSerial_ClampFloat(value, 0.0f, BLUESERIAL_MAX_POSITION_KP);
+        primask = interrupt_global_disable();
+        path_follow_set_position_pid_gains(applied_value, pid_stay.fKi, pid_stay.fKd);
+        interrupt_global_enable(primask);
+        BlueSerial_Printf("OK pos.kp=%.4f\r\n", applied_value);
+        return 1U;
+    }
+    if (strcmp(name, "pos.ki") == 0 || strcmp(name, "position.ki") == 0)
+    {
+        applied_value = BlueSerial_ClampFloat(value, 0.0f, BLUESERIAL_MAX_POSITION_KI);
+        primask = interrupt_global_disable();
+        path_follow_set_position_pid_gains(pid_stay.fKp, applied_value, pid_stay.fKd);
+        interrupt_global_enable(primask);
+        BlueSerial_Printf("OK pos.ki=%.4f\r\n", applied_value);
+        return 1U;
+    }
+    if (strcmp(name, "pos.kd") == 0 || strcmp(name, "position.kd") == 0)
+    {
+        applied_value = BlueSerial_ClampFloat(value, 0.0f, BLUESERIAL_MAX_POSITION_KD);
+        primask = interrupt_global_disable();
+        path_follow_set_position_pid_gains(pid_stay.fKp, pid_stay.fKi, applied_value);
+        interrupt_global_enable(primask);
+        BlueSerial_Printf("OK pos.kd=%.4f\r\n", applied_value);
+        return 1U;
+    }
     if (strcmp(name, "yaw.kp") == 0)
     {
         applied_value = BlueSerial_ClampFloat(value, 0.0f, BLUESERIAL_MAX_YAW_KP);
@@ -1241,6 +1366,7 @@ static void BlueSerial_PrintStatus(void)
     blueserial_move_direction_t direction;
     unsigned int mode;
     unsigned int yaw_hold;
+    float yaw_hold_target;
     int pwm[4];
     float speed_cmps;
     float position_cm;
@@ -1248,6 +1374,11 @@ static void BlueSerial_PrintStatus(void)
     float yaw_ki;
     float yaw_kd;
     float yaw_ff;
+    float cross_left;
+    float cross_right;
+    float position_kp;
+    float position_ki;
+    float position_kd;
     uint8 point_target_valid;
     float point_target_x_m;
     float point_target_y_m;
@@ -1255,6 +1386,7 @@ static void BlueSerial_PrintStatus(void)
     primask = interrupt_global_disable();
     mode = (unsigned int)g_control_mode;
     yaw_hold = (unsigned int)g_yaw_hold_enabled;
+    yaw_hold_target = g_yaw_hold_target_deg;
     direction = g_next_move_direction;
     speed_cmps = g_target_speed_cmps;
     position_cm = g_target_position_cm;
@@ -1266,17 +1398,23 @@ static void BlueSerial_PrintStatus(void)
     yaw_ki = pid_yaw.fKi;
     yaw_kd = pid_yaw.fKd;
     yaw_ff = path_yaw_feedforward_min_degps;
+    cross_left = path_y_crosstalk_left_x_comp_k;
+    cross_right = path_y_crosstalk_right_x_comp_k;
+    position_kp = pid_stay.fKp;
+    position_ki = pid_stay.fKi;
+    position_kd = pid_stay.fKd;
     point_target_valid = g_point_target_valid;
     point_target_x_m = g_point_target_x_m;
     point_target_y_m = g_point_target_y_m;
     drop_count = g_rx_drop_count;
     interrupt_global_enable(primask);
 
-    BlueSerial_Printf("STATUS mode=%u yawhold=%u direction=%s next_speed=%.1fcmps next_position=%.1fcm "
+    BlueSerial_Printf("STATUS mode=%u yawhold=%u hold_target=%.2fdeg direction=%s next_speed=%.1fcmps next_position=%.1fcm "
                       "pwm.ulurdlr=%d,%d,%d,%d "
                       "yawpid=%.4f,%.4f,%.4f ff=%.2f drop=%lu\r\n",
                       mode,
                       yaw_hold,
+                      yaw_hold_target,
                       BlueSerial_MoveDirectionName(direction),
                       speed_cmps,
                       position_cm,
@@ -1284,6 +1422,12 @@ static void BlueSerial_PrintStatus(void)
                       yaw_kp, yaw_ki, yaw_kd,
                       yaw_ff,
                       (unsigned long)drop_count);
+    BlueSerial_Printf("TUNE cross.left=%.4f cross.right=%.4f pospid=%.4f,%.4f,%.4f\r\n",
+                      cross_left,
+                      cross_right,
+                      position_kp,
+                      position_ki,
+                      position_kd);
     if (point_target_valid)
     {
         BlueSerial_Printf("TARGET pending=1 target_m=%.3f,%.3f\r\n",
@@ -1486,7 +1630,13 @@ void BlueSerial_ControlTick10ms(void)
 
     if (g_control_mode == BLUESERIAL_MODE_PATH_MOTION)
     {
+        path_follow_status_t before = {0};
+        path_follow_status_t after = {0};
+
+        path_follow_get_status(&before);
         distance_speed_strategy();
+        path_follow_get_status(&after);
+        BlueSerial_CaptureSegmentCompletion(&before, &after);
         motor_control(speed_encoder);
         return;
     }
@@ -1588,6 +1738,7 @@ void BlueSerial_PathDebugReport(void)
 {
     /* 即使关闭周期遥测，也必须持续服务命令队列和动作完成检测。 */
     BlueSerial_CommandTask();
+    BlueSerial_ServiceSegmentReports();
     BlueSerial_ServiceMotionCompletion();
     BlueSerial_ServicePositionRequest();
 

@@ -49,6 +49,7 @@ typedef struct
 } path_follow_status_t;
 
 void path_follow_init(float grid_size_m, float pulses_per_meter);
+void path_follow_set_position_pid_gains(float kp, float ki, float kd);
 void path_follow_set_path(const Position *path, size_t steps);
 void path_follow_set_path_pause_enabled(const Position *path, size_t steps, uint8 pause_events_enabled);
 void path_follow_set_path_with_grid(const Position *path, size_t steps, float grid_m, uint8 pause_events_enabled);
@@ -93,6 +94,8 @@ extern float path_line_guide_kp;
 extern float path_line_guide_min_cmps;
 extern float path_yaw_feedforward_min_degps;
 extern float path_yaw_feedforward_deadband_deg;
+extern float path_y_crosstalk_left_x_comp_k;
+extern float path_y_crosstalk_right_x_comp_k;
 extern float path_yaw_target_base_comp_deg;
 extern float path_yaw_target_error_comp_k;
 extern float path_rotate_center_offset_x_cm;

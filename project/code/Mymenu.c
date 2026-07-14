@@ -903,7 +903,7 @@ void State_Show(void)
     ips200_show_string(168, 216, "State:");
     /*
      * 状态编号约定：
-     * 0/1 为全局状态；20~24 为识别阶段；30~35 为推箱子阶段�?9 为错误重试�?
+     * 0/1 为全局状态；20~24 为识别阶段；25 为识别结束回正；30~35 为推箱子阶段；99 为错误重试。
      * 这样现场调车时只看两位数字，就能先判断当前属于哪条流程�?
      */
     switch (g_control_stage)
@@ -928,6 +928,9 @@ void State_Show(void)
         break;
     case CONTROL_STAGE_IDENTIFY_EXECUTE_PATH:
         ips200_show_uint(216, 216, 24, 2);
+        break;
+    case CONTROL_STAGE_IDENTIFY_RETURN_HEADING:
+        ips200_show_uint(216, 216, 25, 2);
         break;
     case CONTROL_STAGE_PUSHBOX_LOCALIZE:
         ips200_show_uint(216, 216, 30, 2);

@@ -244,13 +244,14 @@ static uint8 g_continuous_stop_stable_count = 0U;
 static uint8 g_level_start_localization_required = 0U;
 static uint8 g_continuous_preset_base_index = 0U;
 static uint8 g_return_heading_rotate_started = 0U;
+static uint8 g_pushbox_entry_heading_rotate_started = 0U;
 static float g_start_yaw_deg = 0.0f;
 static uint8 g_start_yaw_ready = 0U;
 
 static uint8 g_wait_new_map_frame = 0U;
 static uint8 g_wait_map_frame_base = 0U;
-/* 定位取样完成后，先用 IMU 闭环把车头转回发车方向基准，再允许进入取图/规划。 */
-static uint8 g_localize_yaw_align_started = 0U;
+/* 定位取样完成后，等待 CAR 静默窗口并启动地图预取。 */
+static uint8 g_localize_post_pose_wait_started = 0U;
 static volatile uint32 g_control_tick_10ms = 0U;
 
 static size_t g_identify_segment_start_idx = 0U;
@@ -473,7 +474,7 @@ static void reset_localization_accumulator(void)
     g_localize_map_prefetch_quiet_start_tick = 0U;
     memset(g_localize_samples_x_m, 0, sizeof(g_localize_samples_x_m));
     memset(g_localize_samples_y_m, 0, sizeof(g_localize_samples_y_m));
-    g_localize_yaw_align_started = 0U;
+    g_localize_post_pose_wait_started = 0U;
 }
 
 static void clear_map_request_wait(void)
@@ -829,6 +830,7 @@ static void reset_level_runtime_state_for_launch(void)
     g_plan_ready = 0U;
     g_exec_steps = 0U;
     g_return_heading_rotate_started = 0U;
+    g_pushbox_entry_heading_rotate_started = 0U;
     g_continuous_stop_stable_count = 0U;
     memset(g_exec_path, 0, sizeof(g_exec_path));
 
@@ -2090,16 +2092,8 @@ static void finish_identify_flow_and_relocalize(void)
     map_data_updated = false;
     car_pose_updated = false;
     reset_localization_accumulator();
-
-    if (should_enter_vision_localization_stage())
-    {
-        set_control_phase_stage(CONTROL_PHASE_STEP_LOCALIZE);
-    }
-    else
-    {
-        mark_wait_new_map_frame();
-        set_control_phase_stage(CONTROL_PHASE_STEP_WAIT_CAMERA_DATA);
-    }
+    g_pushbox_entry_heading_rotate_started = 0U;
+    g_control_stage = CONTROL_STAGE_IDENTIFY_RETURN_HEADING;
 }
 
 static uint8 advance_identify_endpoint_or_finish(void)
@@ -2673,18 +2667,61 @@ static void handle_prestart_move(void)
 }
 
 /**
- * @brief 处理“初始定位”阶段�?
+ * @brief 识别结束后的航向回正过渡阶段。
  *
- * 核心逻辑�?
- * - 按需请求视觉车位�?
- * - 仅采集停车后主动请求到的新位置帧
- * - 采集多帧位置后取坐标中值，抑制单帧异常值
- * - 将里程计位置重置到视觉中值位置
- * - 航向不采用视觉 yaw，而是先原地转向校正回发车方向基准
+ * 回正完成后才进入 stage30，随后执行停车、CARSTOP、旧帧排空和视觉定位。
+ */
+static void handle_identify_return_heading_stage(void)
+{
+    path_follow_status_t st = {0};
+    float start_base_yaw_deg = map_dir_to_yaw_deg(CONTROL_MAP_DIR_RIGHT);
+
+    if (!g_pushbox_entry_heading_rotate_started)
+    {
+        car_go_flag = 1U;
+        car_stop_flag = 0U;
+        path_follow_start_rotate_to_yaw(start_base_yaw_deg);
+        control_enable_yaw_closed_loop();
+        g_pushbox_entry_heading_rotate_started = 1U;
+        return;
+    }
+
+    path_follow_get_status(&st);
+    if (st.active)
+    {
+        car_go_flag = 1U;
+        car_stop_flag = 0U;
+        return;
+    }
+
+    /*
+     * Heading alignment is complete before stage 30. Only now start the
+     * stop/CARSTOP/drain/localization sequence, so CARPOS is sampled with the
+     * same launch-relative heading every time.
+     */
+    g_pushbox_entry_heading_rotate_started = 0U;
+    control_hold_yaw_closed_loop();
+    reset_localization_accumulator();
+
+    if (should_enter_vision_localization_stage())
+    {
+        set_control_phase_stage(CONTROL_PHASE_STEP_LOCALIZE);
+    }
+    else
+    {
+        mark_wait_new_map_frame();
+        set_control_phase_stage(CONTROL_PHASE_STEP_WAIT_CAMERA_DATA);
+    }
+}
+
+/**
+ * @brief 处理视觉定位阶段。
+ *
+ * 进入本阶段前航向已经回正；这里只负责停车、CARPOS 多帧采样、写入视觉位置，
+ * 以及在 CAR 通道安静后启动地图预取，不再触发原地旋转。
  */
 static void handle_localization_stage(void)
 {
-    path_follow_status_t st = {0};
     uint8 accept_sample = 0U;
     uint8 min_samples = CONTROL_LOCALIZE_MIN_SAMPLES;
     float cam_x_m = 0.0f;
@@ -2706,30 +2743,19 @@ static void handle_localization_stage(void)
         return;
     }
 
-    if (g_localize_yaw_align_started)
+    if (g_localize_post_pose_wait_started)
     {
         service_localization_map_prefetch();
 
-        /*
-         * 视觉位置已经写入 path_follow，当前只等待“车头回正到发车方向基准”结束。
-         * 这里用 path_follow 的 active 标志做握手，避免在原地转向尚未完成时提前取图规划。
-         */
-        path_follow_get_status(&st);
-        if (st.active)
-        {
-            car_go_flag = 1U;
-            car_stop_flag = 0U;
-            return;
-        }
-
+        /* 视觉位置已写入；当前只等待 CAR 静默窗口结束并发出 START。 */
         if (!g_localize_map_prefetch_started)
         {
-            /* Yaw is ready; remain stopped until the CAR quiet window expires. */
+            /* Keep the aligned heading while late CAR frames are drained. */
             control_hold_yaw_closed_loop();
             return;
         }
 
-        g_localize_yaw_align_started = 0U;
+        g_localize_post_pose_wait_started = 0U;
         control_hold_yaw_closed_loop();
         g_level_start_localization_required = 0U;
         if (g_control_flow_phase == CONTROL_FLOW_IDENTIFY)
@@ -2812,23 +2838,19 @@ static void handle_localization_stage(void)
     /*
      * START and CARPOS share UART1 and are handled by the same camera. Start
      * MAP recognition only after all localization CARPOS samples have been
-     * consumed. The map is then prefetched while the chassis aligns its yaw,
-     * so localization and map acquisition no longer starve each other.
+     * consumed. The map request is issued after the CAR quiet window, so
+     * localization and map acquisition no longer starve each other.
      */
     schedule_localization_map_prefetch_after_car();
     /*
      * 初始定位的关键修正：
      * - 视觉只提供地图位置平均值；
-     * - 航向目标强制采用发车时记录的方向基准；
-     * - 下发原地转向，让 IMU yaw 闭环把车头实际纠正回发车方向。
+     * - 航向已经在进入 stage30 前回正，这里只同步位置并保持发车方向基准。
      */
     path_follow_reset_pose(avg_x_m, avg_y_m, start_base_yaw_deg);
     BlueSerial_ReportPosition();
-    path_follow_start_rotate_to_yaw(start_base_yaw_deg);
-    control_enable_yaw_closed_loop();
-    car_go_flag = 1U;
-    car_stop_flag = 0U;
-    g_localize_yaw_align_started = 1U;
+    control_hold_yaw_closed_loop();
+    g_localize_post_pose_wait_started = 1U;
 }
 
 /**
@@ -3413,6 +3435,10 @@ void control_process(void)
     {
     case CONTROL_STAGE_PRESTART_MOVE:
         handle_prestart_move();
+        break;
+
+    case CONTROL_STAGE_IDENTIFY_RETURN_HEADING:
+        handle_identify_return_heading_stage();
         break;
 
     case CONTROL_STAGE_IDENTIFY_LOCALIZE:

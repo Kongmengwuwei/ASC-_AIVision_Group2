@@ -585,21 +585,6 @@
               <FilePath>..\code\path.h</FilePath>
             </File>
             <File>
-              <FileName>程序文件说明.txt</FileName>
-              <FileType>5</FileType>
-              <FilePath>..\code\程序文件说明.txt</FilePath>
-            </File>
-            <File>
-              <FileName>串口数据处理使用说明.txt</FileName>
-              <FileType>5</FileType>
-              <FilePath>..\code\串口数据处理使用说明.txt</FilePath>
-            </File>
-            <File>
-              <FileName>姿态解算使用说明.txt</FileName>
-              <FileType>5</FileType>
-              <FilePath>..\code\姿态解算使用说明.txt</FilePath>
-            </File>
-            <File>
               <FileName>Control.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\code\Control.c</FilePath>

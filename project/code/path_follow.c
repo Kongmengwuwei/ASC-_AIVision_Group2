@@ -53,9 +53,9 @@
 #define PF_LINE_GUIDE_MAX_CMPS           12.0f   /* 法向纠偏速度上限，单位 cm/s。 */
 #define PF_LINE_GUIDE_DEADBAND_M         0.0025f /* 法向偏差死区，单位 m。 */
 
-#define PF_YAW_KP                        6.0f    /* 航向环比例系数。 */
+#define PF_YAW_KP                        7.0f    /* 高加速度平移保持环：提高负载扰动抑制。 */
 #define PF_YAW_KI                        0.020f  /* 平移保持环积分：抵消持续横移负载转矩。 */
-#define PF_YAW_KD                        14.0f   /* 平移保持环微分：200 ms 终点收尾实测兼顾阻尼与速度。 */
+#define PF_YAW_KD                        16.0f   /* 抑制高速横移偏航，避免更高增益下的末段反摆。 */
 #define PF_YAW_FILTER_ALPHA              0.9f    /* 航向环微分滤波系数。 */
 #define PF_YAW_FEEDFORWARD_MIN_DEGPS     8.0f    /* 克服低速转向死区的最小角速度，单位 deg/s。 */
 #define PF_ROTATE_YAW_KP                 6.0f    /* 原地旋转专用比例系数。 */

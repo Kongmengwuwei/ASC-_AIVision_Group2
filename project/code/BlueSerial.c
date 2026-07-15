@@ -58,6 +58,7 @@
 #define BLUESERIAL_POINT_TARGET_GRID_M          0.01f
 #define BLUESERIAL_POINT_TARGET_MAX_CELL        250
 #define BLUESERIAL_POINT_TARGET_MAX_M           20.0f
+#define BLUESERIAL_TELEMETRY_PERIOD_TICKS       10U
 
 typedef enum
 {
@@ -104,6 +105,8 @@ static uint8 g_point_target_valid = 0U;
 static float g_point_target_x_m = 0.0f;
 static float g_point_target_y_m = 0.0f;
 static Position g_blueserial_point_target_path[3];
+static volatile uint8 g_telemetry_tick_count = 0U;
+static volatile uint8 g_telemetry_report_pending = 0U;
 
 static float BlueSerial_ClampFloat(float value, float min_value, float max_value)
 {
@@ -870,6 +873,8 @@ void Blue_Serial_Init(void)
     g_rx_drop_count = 0U;
     g_last_rx_frame[0] = '\0';
     g_last_rx_frame_len = 0U;
+    g_telemetry_tick_count = 0U;
+    g_telemetry_report_pending = 0U;
     uart_init(BLUESERIAL_UART, BLUESERIAL_BAUDRATE, BLUESERIAL_TX_PIN, BLUESERIAL_RX_PIN);
     interrupt_set_priority(BLUESERIAL_IRQN, BLUESERIAL_IRQ_PRIORITY);
     uart_rx_interrupt(BLUESERIAL_UART, ZF_ENABLE);
@@ -1474,6 +1479,63 @@ static void BlueSerial_CommandTask(void)
     }
 }
 
+void BlueSerial_TelemetryTick10ms(void)
+{
+    g_telemetry_tick_count++;
+    if (g_telemetry_tick_count >= BLUESERIAL_TELEMETRY_PERIOD_TICKS)
+    {
+        g_telemetry_tick_count = 0U;
+        g_telemetry_report_pending = 1U;
+    }
+}
+
+static void BlueSerial_ServiceTelemetryReport(void)
+{
+    uint32 primask;
+    uint8 report_pending;
+    blueserial_control_mode_t mode;
+    path_follow_status_t status = {0};
+    float target_speed_cmps;
+    float actual_yaw_deg = 0.0f;
+
+    primask = interrupt_global_disable();
+    report_pending = g_telemetry_report_pending;
+    if (report_pending)
+    {
+        g_telemetry_report_pending = 0U;
+        mode = g_control_mode;
+        path_follow_get_status(&status);
+        actual_yaw_deg = eulerAngle.yaw;
+    }
+    interrupt_global_enable(primask);
+
+    if (!report_pending)
+    {
+        return;
+    }
+
+    target_speed_cmps = status.speed_ref_cmps;
+    if (mode == BLUESERIAL_MODE_SPEED_CRUISE)
+    {
+        target_speed_cmps = g_target_speed_cmps;
+    }
+    else if (mode == BLUESERIAL_MODE_RAW_PWM)
+    {
+        target_speed_cmps = 0.0f;
+    }
+
+    BlueSerial_Printf("TPOS=%.3f,%.3f APOS=%.3f,%.3f "
+                      "TVEL=%.2f AVEL=%.2f TYAW=%.2f AYAW=%.2f\r\n",
+                      status.target_x_m,
+                      status.target_y_m,
+                      status.x_m,
+                      status.y_m,
+                      target_speed_cmps,
+                      status.actual_speed_cmps,
+                      status.target_yaw_deg,
+                      actual_yaw_deg);
+}
+
 void BlueSerial_ControlTick10ms(void)
 {
     if (g_control_mode == BLUESERIAL_MODE_RAW_PWM)
@@ -1545,4 +1607,5 @@ void BlueSerial_Task(void)
     BlueSerial_CommandTask();
     BlueSerial_ServiceMotionCompletion();
     BlueSerial_ServicePositionRequest();
+    BlueSerial_ServiceTelemetryReport();
 }

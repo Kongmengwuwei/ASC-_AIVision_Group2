@@ -38,6 +38,7 @@ typedef struct
     float dir_x;
     float dir_y;
     float speed_ref_cmps;
+    float actual_speed_cmps;
     float target_yaw_deg;
     uint8 active;
     uint8 reached;

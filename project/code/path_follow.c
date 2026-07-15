@@ -14,7 +14,7 @@
 #endif
 
 #define PF_POSITION_TOLERANCE_M          0.015f  /* 到点位置容差，单位 m。 */
-#define PF_YAW_TOLERANCE_DEG             0.5f    /* 航向到点容差，单位 deg。 */
+#define PF_YAW_TOLERANCE_DEG             0.30f   /* 航向到点容差，单位 deg。 */
 #define PF_MAX_LINEAR_SPEED_MPS          3.0f    /* 模块允许的最大平移速度，单位 m/s。 */
 #define PF_MAX_ANGULAR_SPEED_DEGPS       300.0f  /* 模块允许的最大角速度，单位 deg/s。 */
 #define PF_TEMP_PATH_GRID_M              0.01f   /* 临时点路径的栅格尺寸，单位 m。 */
@@ -25,6 +25,10 @@
 #define PF_SEGMENT_END_SPEED_CMPS        0.0f    /* 目标中心处的规划终速度，单位 cm/s。 */
 #define PF_POSITION_LOOP_RELEASE_M       0.22f   /* 近点接管距离，覆盖高速档实测制动距离，单位 m。 */
 #define PF_ARRIVAL_MAX_SPEED_CMPS        3.0f    /* 完成目标允许的最大实测平移速度，单位 cm/s。 */
+#define PF_FINAL_YAW_SETTLE_CYCLES        5U     /* 满足误差和角速度条件连续 50 ms 即完成。 */
+#define PF_FINAL_YAW_MAX_STEP_DEG        0.04f   /* 10 ms 内最大航向变化，约 4 deg/s。 */
+#define PF_FINAL_YAW_TIMEOUT_CYCLES      20U     /* 终点原地调姿最长 200 ms，禁止微小误差拖慢路径。 */
+#define PF_YAW_FEEDFORWARD_DEADBAND_DEG  0.25f   /* 克服 0.25~0.5 deg 残差死区，极小误差再由浮点 PID 细调。 */
 #define PF_APPROACH_DECEL_CMPS2          105.0f  /* S 曲线参数无效时的接近减速度，单位 cm/s^2。 */
 #define PF_POSITION_SPEED_FACTOR_MIN     0.10f   /* 手动制动速度包络系数下限。 */
 #define PF_POSITION_SPEED_FACTOR_MAX     1.00f   /* 制动速度包络系数上限。 */
@@ -49,10 +53,14 @@
 #define PF_LINE_GUIDE_DEADBAND_M         0.0025f /* 法向偏差死区，单位 m。 */
 
 #define PF_YAW_KP                        6.0f    /* 航向环比例系数。 */
-#define PF_YAW_KI                        0.0f    /* 航向环积分系数。 */
-#define PF_YAW_KD                        8.5f    /* 航向环微分系数。 */
+#define PF_YAW_KI                        0.020f  /* 平移保持环积分：抵消持续横移负载转矩。 */
+#define PF_YAW_KD                        14.0f   /* 平移保持环微分：200 ms 终点收尾实测兼顾阻尼与速度。 */
 #define PF_YAW_FILTER_ALPHA              0.9f    /* 航向环微分滤波系数。 */
 #define PF_YAW_FEEDFORWARD_MIN_DEGPS     8.0f    /* 克服低速转向死区的最小角速度，单位 deg/s。 */
+#define PF_ROTATE_YAW_KP                 6.0f    /* 原地旋转专用比例系数。 */
+#define PF_ROTATE_YAW_KI                 0.0f    /* 原地旋转专用积分系数。 */
+#define PF_ROTATE_YAW_KD                 8.5f    /* 原地旋转专用微分系数。 */
+#define PF_ROTATE_YAW_FEEDFORWARD_DEGPS  8.0f    /* 原地旋转低速前馈，单位 deg/s。 */
 
 typedef struct
 {
@@ -164,6 +172,11 @@ typedef struct
     size_t pause_cursor;
     uint32 pause_cycles_cfg;
     uint32 pause_cycles_left;
+    uint32 final_yaw_settle_cycles;
+    uint32 final_yaw_wait_cycles;
+    float final_yaw_previous_error_deg;
+    uint8 final_yaw_error_valid;
+    uint8 final_yaw_settling;
 
     uint8 active;
     uint8 paused;
@@ -186,6 +199,7 @@ tagPID_T pid_world_y;
 tagPID_T pid_stay;
 static tagPID_T pid_stay_y;
 tagPID_T pid_yaw;
+static tagPID_T pid_yaw_rotate;
 tagPID_T pid_accel_yaw;
 
 uint8 car_direction = 0U;
@@ -205,7 +219,7 @@ float path_line_guide_kp = PF_LINE_GUIDE_KP;
 float path_line_guide_min_cmps = PF_LINE_GUIDE_MIN_CMPS;
 static float path_position_speed_limit_factor = PF_POSITION_SPEED_FACTOR_DEFAULT;
 float path_yaw_feedforward_min_degps = PF_YAW_FEEDFORWARD_MIN_DEGPS;
-float path_yaw_feedforward_deadband_deg = PF_YAW_TOLERANCE_DEG;
+float path_yaw_feedforward_deadband_deg = PF_YAW_FEEDFORWARD_DEADBAND_DEG;
 
 /* Runtime copies of the boot defaults; BlueSerial sliders tune these. */
 float path_y_crosstalk_left_x_comp_k = PF_Y_CROSSTALK_LEFT_X_COMP_K;
@@ -331,6 +345,11 @@ static void pf_reset_motion_state(void)
     PID_Clear(&pid_world_y);
     PID_Clear(&pid_stay);
     PID_Clear(&pid_stay_y);
+    g_pf.final_yaw_settle_cycles = 0U;
+    g_pf.final_yaw_wait_cycles = 0U;
+    g_pf.final_yaw_previous_error_deg = 0.0f;
+    g_pf.final_yaw_error_valid = 0U;
+    g_pf.final_yaw_settling = 0U;
     car_direction = 0U;
 }
 
@@ -1323,27 +1342,32 @@ static void pf_limit_world_speed(float *vx_world_cmps,
     *vy_world_cmps *= scale;
 }
 
-static float pf_yaw_command_radps(float yaw_deg)
+static float pf_yaw_command_radps(float yaw_deg,
+                                  tagPID_T *controller,
+                                  float feedforward_min_degps)
 {
     float error_deg = pf_yaw_error_deg(yaw_deg, g_pf.target_yaw_deg);
     float output_degps;
     float feedforward_deadband_deg;
 
-    if (fabsf(error_deg) <= g_pf.yaw_tolerance_deg)
+    if (controller == NULL || fabsf(error_deg) <= g_pf.yaw_tolerance_deg)
     {
         return 0.0f;
     }
 
-    output_degps = (float)PID_Location_Calculate(&pid_yaw, 0.0f, error_deg);
+    /* Keep sub-degree control resolution instead of truncating the generic
+     * PID helper's historical int return value. */
+    (void)PID_Location_Calculate(controller, 0.0f, error_deg);
+    output_degps = controller->fCtrl_Out;
     feedforward_deadband_deg = fmaxf(path_yaw_feedforward_deadband_deg,
                                     g_pf.yaw_tolerance_deg);
-    if (path_yaw_feedforward_min_degps > 0.0f &&
+    if (feedforward_min_degps > 0.0f &&
         fabsf(error_deg) > feedforward_deadband_deg &&
-        fabsf(output_degps) < path_yaw_feedforward_min_degps)
+        fabsf(output_degps) < feedforward_min_degps)
     {
         output_degps = (error_deg > 0.0f) ?
-                       path_yaw_feedforward_min_degps :
-                       -path_yaw_feedforward_min_degps;
+                       feedforward_min_degps :
+                       -feedforward_min_degps;
     }
     output_degps = pf_clamp(output_degps,
                             -g_pf.max_angular_speed_degps,
@@ -1472,7 +1496,27 @@ static void pf_output_yaw_hold(float yaw_deg, path_follow_output_t *out)
         out->reached = 0U;
         out->vx_cmd = 0.0f;
         out->vy_cmd = 0.0f;
-        out->omega_cmd = pf_yaw_command_radps(yaw_deg);
+        out->omega_cmd = pf_yaw_command_radps(yaw_deg,
+                                              &pid_yaw,
+                                              path_yaw_feedforward_min_degps);
+        out->target_idx = g_pf.target_idx;
+    }
+}
+
+static void pf_output_rotate(float yaw_deg, path_follow_output_t *out)
+{
+    pf_clear_debug();
+    car_direction = 0U;
+
+    if (out != NULL)
+    {
+        out->active = 1U;
+        out->reached = 0U;
+        out->vx_cmd = 0.0f;
+        out->vy_cmd = 0.0f;
+        out->omega_cmd = pf_yaw_command_radps(yaw_deg,
+                                              &pid_yaw_rotate,
+                                              PF_ROTATE_YAW_FEEDFORWARD_DEGPS);
         out->target_idx = g_pf.target_idx;
     }
 }
@@ -1551,6 +1595,9 @@ static uint8 pf_prepare_geometry(pf_geometry_t *geometry, path_follow_output_t *
         float segment_dir_x = 0.0f;
         float segment_dir_y = 0.0f;
         uint8 target_plane_crossed = 0U;
+        uint8 final_target;
+        uint8 position_ready;
+        uint8 final_yaw_settled = 1U;
 
         pf_sync_pause_cursor();
         pf_point_to_world(target,
@@ -1593,9 +1640,52 @@ static uint8 pf_prepare_geometry(pf_geometry_t *geometry, path_follow_output_t *
 
         geometry->within_tolerance =
             (geometry->distance_m <= g_pf.position_tolerance_m) ? 1U : 0U;
+        final_target = ((g_pf.target_idx + 1U) >= g_pf.steps) ? 1U : 0U;
+        position_ready =
+            ((geometry->within_tolerance || target_plane_crossed) &&
+             g_pf.linear_speed_cmps <= PF_ARRIVAL_MAX_SPEED_CMPS) ? 1U : 0U;
+        g_pf.final_yaw_settling = 0U;
 
-        if ((geometry->within_tolerance || target_plane_crossed) &&
-            g_pf.linear_speed_cmps <= PF_ARRIVAL_MAX_SPEED_CMPS)
+        if (final_target && position_ready)
+        {
+            float yaw_error_deg = pf_yaw_error_deg(g_pf.pose.yaw_deg,
+                                                   g_pf.target_yaw_deg);
+            float yaw_step_deg = g_pf.final_yaw_error_valid ?
+                                 fabsf(yaw_error_deg -
+                                       g_pf.final_yaw_previous_error_deg) :
+                                 (PF_FINAL_YAW_MAX_STEP_DEG + 1.0f);
+
+            g_pf.final_yaw_previous_error_deg = yaw_error_deg;
+            g_pf.final_yaw_error_valid = 1U;
+            if (g_pf.final_yaw_wait_cycles < PF_FINAL_YAW_TIMEOUT_CYCLES)
+            {
+                ++g_pf.final_yaw_wait_cycles;
+            }
+            if (fabsf(yaw_error_deg) <= g_pf.yaw_tolerance_deg &&
+                yaw_step_deg <= PF_FINAL_YAW_MAX_STEP_DEG)
+            {
+                if (g_pf.final_yaw_settle_cycles < PF_FINAL_YAW_SETTLE_CYCLES)
+                {
+                    ++g_pf.final_yaw_settle_cycles;
+                }
+            }
+            else
+            {
+                g_pf.final_yaw_settle_cycles = 0U;
+            }
+            final_yaw_settled =
+                (g_pf.final_yaw_settle_cycles >= PF_FINAL_YAW_SETTLE_CYCLES ||
+                 g_pf.final_yaw_wait_cycles >= PF_FINAL_YAW_TIMEOUT_CYCLES) ? 1U : 0U;
+        }
+        else
+        {
+            g_pf.final_yaw_settle_cycles = 0U;
+            g_pf.final_yaw_wait_cycles = 0U;
+            g_pf.final_yaw_error_valid = 0U;
+        }
+
+        if (position_ready &&
+            final_yaw_settled)
         {
             /* Competitive path: accept immediately when speed is safe.  A
              * crossed target plane is also accepted even if lateral error
@@ -1610,6 +1700,19 @@ static uint8 pf_prepare_geometry(pf_geometry_t *geometry, path_follow_output_t *
                 return 0U;
             }
             continue;
+        }
+
+        if (final_target && position_ready)
+        {
+            /* Position is complete, but yaw is still moving or outside its
+             * final tolerance. Freeze translation and keep only yaw closed
+             * loop active so the settling phase cannot creep past target. */
+            g_pf.final_yaw_settling = 1U;
+            geometry->dir_x = 0.0f;
+            geometry->dir_y = 0.0f;
+            geometry->segment_axis = 0U;
+            car_direction = 0U;
+            return 1U;
         }
 
         if (g_pf.approach_braking)
@@ -1705,6 +1808,7 @@ static void pf_apply_path(const Position *path,
     pf_reset_pause_runtime();
     pf_reset_motion_state();
     PID_Clear(&pid_yaw);
+    PID_Clear(&pid_yaw_rotate);
 
     /* A normal planned path usually includes the current cell as point zero. */
     if (g_pf.active && steps > 1U)
@@ -1788,6 +1892,12 @@ void path_follow_init(float grid_size_m, float pulses_per_meter)
                        PF_YAW_KD,
                        PF_MAX_ANGULAR_SPEED_DEGPS,
                        PF_YAW_FILTER_ALPHA);
+    pf_init_pid_object(&pid_yaw_rotate,
+                       PF_ROTATE_YAW_KP,
+                       PF_ROTATE_YAW_KI,
+                       PF_ROTATE_YAW_KD,
+                       PF_MAX_ANGULAR_SPEED_DEGPS,
+                       PF_YAW_FILTER_ALPHA);
 
     /* Near-target X/Y position loop restored from the original controller. */
     pf_init_pid_object(&pid_stay,
@@ -1818,6 +1928,7 @@ void path_follow_reset_pose(float x_m, float y_m, float yaw_deg)
     g_pf.pose.yaw_deg = pf_wrap_deg(yaw_deg);
     pf_reset_motion_state();
     PID_Clear(&pid_yaw);
+    PID_Clear(&pid_yaw_rotate);
 }
 
 void path_follow_set_external_position(float x_m, float y_m, uint8 valid)
@@ -1906,7 +2017,7 @@ void path_follow_start_rotate_to_yaw(float target_yaw_deg)
 {
     pf_apply_path(NULL, 0U, g_pf.default_grid_m, 0U);
     path_follow_set_target_yaw(target_yaw_deg);
-    PID_Clear(&pid_yaw);
+    PID_Clear(&pid_yaw_rotate);
     g_pf.rotate_only_active = 1U;
 }
 
@@ -1948,7 +2059,7 @@ void path_follow_update(float yaw_deg, path_follow_output_t *out)
         if (fabsf(yaw_error_deg) <= g_pf.yaw_tolerance_deg)
         {
             g_pf.rotate_only_active = 0U;
-            PID_Clear(&pid_yaw);
+            PID_Clear(&pid_yaw_rotate);
             if (out != NULL)
             {
                 out->reached = 1U;
@@ -1956,7 +2067,7 @@ void path_follow_update(float yaw_deg, path_follow_output_t *out)
             return;
         }
 
-        pf_output_yaw_hold(yaw_deg, out);
+        pf_output_rotate(yaw_deg, out);
         return;
     }
 
@@ -1985,6 +2096,12 @@ void path_follow_update(float yaw_deg, path_follow_output_t *out)
         {
             (void)pf_handle_pause(yaw_deg, out);
         }
+        return;
+    }
+
+    if (g_pf.final_yaw_settling)
+    {
+        pf_output_yaw_hold(yaw_deg, out);
         return;
     }
 
@@ -2058,7 +2175,9 @@ void path_follow_update(float yaw_deg, path_follow_output_t *out)
                          &out->vx_cmd,
                          &out->vy_cmd);
         out->vx_cmd += pf_y_crosstalk_x_comp(out->vy_cmd);
-        out->omega_cmd = pf_yaw_command_radps(yaw_deg);
+        out->omega_cmd = pf_yaw_command_radps(yaw_deg,
+                                              &pid_yaw,
+                                              path_yaw_feedforward_min_degps);
         out->active = 1U;
         out->reached = 0U;
         out->target_idx = g_pf.target_idx;

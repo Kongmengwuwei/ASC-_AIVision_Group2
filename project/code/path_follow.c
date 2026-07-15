@@ -28,7 +28,8 @@
 #define PF_APPROACH_DECEL_CMPS2          105.0f  /* S 曲线参数无效时的接近减速度，单位 cm/s^2。 */
 #define PF_POSITION_SPEED_FACTOR_MIN     0.10f   /* 手动制动速度包络系数下限。 */
 #define PF_POSITION_SPEED_FACTOR_MAX     1.00f   /* 制动速度包络系数上限。 */
-#define PF_POSITION_SPEED_FACTOR_DEFAULT 0.55f   /* 近点超速制动包络系数；不缩放正常 S 曲线。 */
+#define PF_POSITION_SPEED_FACTOR_DEFAULT 0.35f   /* 近点超速制动包络系数；双向实测可降低终点超调。 */
+#define PF_POSITION_RELEASE_MARGIN_M     0.12f   /* 制动距离外的滑移、执行及低速接近余量。 */
 
 /* Y-to-X crosstalk feedforward boot defaults.
  * Unit: X correction / absolute Y command. The gains are signed and
@@ -36,7 +37,7 @@
 #define PF_Y_CROSSTALK_LEFT_X_COMP_K      0.009f /* +Y 运动时的 X 串轴补偿系数。 */
 #define PF_Y_CROSSTALK_RIGHT_X_COMP_K    -0.007f /* -Y 运动时的 X 串轴补偿系数。 */
 
-#define PF_POSITION_KP                   0.10f   /* 仅补偿负载导致的近目标欠程，避免放大正常超程。 */
+#define PF_POSITION_KP                   0.20f   /* 配合 0.35 制动包络补偿近目标残差。 */
 #define PF_POSITION_KI                   0.0f    /* 近目标位置环积分系数。 */
 #define PF_POSITION_KD                   0.0f    /* 近目标位置环微分系数。 */
 #define PF_POSITION_MAX_IOUT_CMPS        200.0f  /* 位置环积分输出上限，单位 cm/s。 */
@@ -1107,9 +1108,44 @@ static void pf_sync_position_pid_gains(void)
     pid_stay_y.alpha = pid_stay.alpha;
 }
 
-static float pf_position_loop_blend(float distance_m)
+static float pf_position_loop_release_m(const pf_geometry_t *geometry)
 {
-    float release_m = path_hold_trim_release_distance;
+    float max_speed_cmps;
+    float decel_cmpss;
+    float braking_distance_m;
+    float release_m;
+
+    if (geometry == NULL)
+    {
+        return path_hold_trim_release_distance;
+    }
+
+    max_speed_cmps = fmaxf(g_pf.active_scurve_cfg.max_speed_cmps, 0.0f);
+    decel_cmpss = (g_pf.active_scurve_cfg.accel_cmpss > 0.0f) ?
+                  g_pf.active_scurve_cfg.accel_cmpss :
+                  PF_APPROACH_DECEL_CMPS2;
+    braking_distance_m = (max_speed_cmps * max_speed_cmps) /
+                         (2.0f * decel_cmpss) * 0.01f;
+    release_m = braking_distance_m + PF_POSITION_RELEASE_MARGIN_M;
+    release_m = fminf(release_m, path_hold_trim_release_distance);
+    if (geometry->planned_distance_m > PF_MIN_VALID_GRID_M)
+    {
+        release_m = fminf(release_m, geometry->planned_distance_m);
+    }
+    return fmaxf(release_m, g_pf.position_tolerance_m);
+}
+
+static float pf_position_loop_blend(const pf_geometry_t *geometry)
+{
+    float distance_m;
+    float release_m;
+
+    if (geometry == NULL)
+    {
+        return 0.0f;
+    }
+    distance_m = geometry->distance_m;
+    release_m = pf_position_loop_release_m(geometry);
 
     if (distance_m >= release_m)
     {
@@ -1140,20 +1176,26 @@ static void pf_apply_position_loop(const pf_geometry_t *geometry,
         return;
     }
 
-    blend = pf_position_loop_blend(geometry->distance_m);
+    blend = pf_position_loop_blend(geometry);
     if (blend <= 0.0f)
     {
         return;
     }
 
-    position_vx_cmps =
-        (float)PID_Location_Calculate(&pid_stay,
-                                      g_pf.pose.x_m * 100.0f,
-                                      geometry->target_x_m * 100.0f);
-    position_vy_cmps =
-        (float)PID_Location_Calculate(&pid_stay_y,
-                                      g_pf.pose.y_m * 100.0f,
-                                      geometry->target_y_m * 100.0f);
+    /* PID_Location_Calculate() keeps its historical int return type for
+     * compatibility with the rest of the project.  Its internal controller
+     * output is float, however, and the near-target position loop needs that
+     * resolution: truncating here used to discard every correction below
+     * 1 cm/s and produced a measurable final-position quantisation. */
+    (void)PID_Location_Calculate(&pid_stay,
+                                 g_pf.pose.x_m * 100.0f,
+                                 geometry->target_x_m * 100.0f);
+    position_vx_cmps = pid_stay.fCtrl_Out;
+
+    (void)PID_Location_Calculate(&pid_stay_y,
+                                 g_pf.pose.y_m * 100.0f,
+                                 geometry->target_y_m * 100.0f);
+    position_vy_cmps = pid_stay_y.fCtrl_Out;
 
     /* The S-curve owns the main longitudinal motion.  This loop only adds a
      * gradually introduced residual-position correction, so normal S-curve
@@ -1947,7 +1989,7 @@ void path_follow_update(float yaw_deg, path_follow_output_t *out)
     }
 
     pf_sync_position_pid_gains();
-    position_blend = pf_position_loop_blend(geometry.distance_m);
+    position_blend = pf_position_loop_blend(&geometry);
     position_speed_threshold_cmps = pf_position_speed_threshold_cmps(
         fmaxf(geometry.along_track_remaining_m, 0.0f));
 

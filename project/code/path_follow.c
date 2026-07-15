@@ -25,9 +25,6 @@
 #define PF_SEGMENT_END_SPEED_CMPS        0.0f    /* 目标中心处的规划终速度，单位 cm/s。 */
 #define PF_POSITION_LOOP_RELEASE_M       0.22f   /* 近点接管距离，覆盖高速档实测制动距离，单位 m。 */
 #define PF_ARRIVAL_MAX_SPEED_CMPS        3.0f    /* 完成目标允许的最大实测平移速度，单位 cm/s。 */
-#define PF_FINAL_YAW_SETTLE_CYCLES        5U     /* 满足误差和角速度条件连续 50 ms 即完成。 */
-#define PF_FINAL_YAW_MAX_STEP_DEG        0.04f   /* 10 ms 内最大航向变化，约 4 deg/s。 */
-#define PF_FINAL_YAW_TIMEOUT_CYCLES      20U     /* 终点原地调姿最长 200 ms，禁止微小误差拖慢路径。 */
 #define PF_YAW_FEEDFORWARD_DEADBAND_DEG  0.25f   /* 克服 0.25~0.5 deg 残差死区，极小误差再由浮点 PID 细调。 */
 #define PF_APPROACH_DECEL_CMPS2          105.0f  /* S 曲线参数无效时的接近减速度，单位 cm/s^2。 */
 #define PF_POSITION_SPEED_FACTOR_MIN     0.10f   /* 手动制动速度包络系数下限。 */
@@ -173,12 +170,6 @@ typedef struct
     size_t pause_cursor;
     uint32 pause_cycles_cfg;
     uint32 pause_cycles_left;
-    uint32 final_yaw_settle_cycles;
-    uint32 final_yaw_wait_cycles;
-    float final_yaw_previous_error_deg;
-    uint8 final_yaw_error_valid;
-    uint8 final_yaw_settling;
-
     uint8 active;
     uint8 paused;
     uint8 pause_events_enabled;
@@ -346,11 +337,6 @@ static void pf_reset_motion_state(void)
     PID_Clear(&pid_world_y);
     PID_Clear(&pid_stay);
     PID_Clear(&pid_stay_y);
-    g_pf.final_yaw_settle_cycles = 0U;
-    g_pf.final_yaw_wait_cycles = 0U;
-    g_pf.final_yaw_previous_error_deg = 0.0f;
-    g_pf.final_yaw_error_valid = 0U;
-    g_pf.final_yaw_settling = 0U;
     car_direction = 0U;
 }
 
@@ -1609,9 +1595,7 @@ static uint8 pf_prepare_geometry(pf_geometry_t *geometry, path_follow_output_t *
         float segment_dir_x = 0.0f;
         float segment_dir_y = 0.0f;
         uint8 target_plane_crossed = 0U;
-        uint8 final_target;
         uint8 position_ready;
-        uint8 final_yaw_settled = 1U;
 
         pf_sync_pause_cursor();
         pf_point_to_world(target,
@@ -1654,52 +1638,11 @@ static uint8 pf_prepare_geometry(pf_geometry_t *geometry, path_follow_output_t *
 
         geometry->within_tolerance =
             (geometry->distance_m <= g_pf.position_tolerance_m) ? 1U : 0U;
-        final_target = ((g_pf.target_idx + 1U) >= g_pf.steps) ? 1U : 0U;
         position_ready =
             ((geometry->within_tolerance || target_plane_crossed) &&
              g_pf.linear_speed_cmps <= PF_ARRIVAL_MAX_SPEED_CMPS) ? 1U : 0U;
-        g_pf.final_yaw_settling = 0U;
 
-        if (final_target && position_ready)
-        {
-            float yaw_error_deg = pf_yaw_error_deg(g_pf.pose.yaw_deg,
-                                                   g_pf.target_yaw_deg);
-            float yaw_step_deg = g_pf.final_yaw_error_valid ?
-                                 fabsf(yaw_error_deg -
-                                       g_pf.final_yaw_previous_error_deg) :
-                                 (PF_FINAL_YAW_MAX_STEP_DEG + 1.0f);
-
-            g_pf.final_yaw_previous_error_deg = yaw_error_deg;
-            g_pf.final_yaw_error_valid = 1U;
-            if (g_pf.final_yaw_wait_cycles < PF_FINAL_YAW_TIMEOUT_CYCLES)
-            {
-                ++g_pf.final_yaw_wait_cycles;
-            }
-            if (fabsf(yaw_error_deg) <= g_pf.yaw_tolerance_deg &&
-                yaw_step_deg <= PF_FINAL_YAW_MAX_STEP_DEG)
-            {
-                if (g_pf.final_yaw_settle_cycles < PF_FINAL_YAW_SETTLE_CYCLES)
-                {
-                    ++g_pf.final_yaw_settle_cycles;
-                }
-            }
-            else
-            {
-                g_pf.final_yaw_settle_cycles = 0U;
-            }
-            final_yaw_settled =
-                (g_pf.final_yaw_settle_cycles >= PF_FINAL_YAW_SETTLE_CYCLES ||
-                 g_pf.final_yaw_wait_cycles >= PF_FINAL_YAW_TIMEOUT_CYCLES) ? 1U : 0U;
-        }
-        else
-        {
-            g_pf.final_yaw_settle_cycles = 0U;
-            g_pf.final_yaw_wait_cycles = 0U;
-            g_pf.final_yaw_error_valid = 0U;
-        }
-
-        if (position_ready &&
-            final_yaw_settled)
+        if (position_ready)
         {
             /* Competitive path: accept immediately when speed is safe.  A
              * crossed target plane is also accepted even if lateral error
@@ -1714,19 +1657,6 @@ static uint8 pf_prepare_geometry(pf_geometry_t *geometry, path_follow_output_t *
                 return 0U;
             }
             continue;
-        }
-
-        if (final_target && position_ready)
-        {
-            /* Position is complete, but yaw is still moving or outside its
-             * final tolerance. Freeze translation and keep only yaw closed
-             * loop active so the settling phase cannot creep past target. */
-            g_pf.final_yaw_settling = 1U;
-            geometry->dir_x = 0.0f;
-            geometry->dir_y = 0.0f;
-            geometry->segment_axis = 0U;
-            car_direction = 0U;
-            return 1U;
         }
 
         if (g_pf.approach_braking)
@@ -2110,12 +2040,6 @@ void path_follow_update(float yaw_deg, path_follow_output_t *out)
         {
             (void)pf_handle_pause(yaw_deg, out);
         }
-        return;
-    }
-
-    if (g_pf.final_yaw_settling)
-    {
-        pf_output_yaw_hold(yaw_deg, out);
         return;
     }
 

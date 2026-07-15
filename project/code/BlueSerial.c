@@ -614,12 +614,10 @@ static uint8 BlueSerial_BuildPointTargetPath(float start_x_m,
     float max_coord_m;
     float delta_x_m = target_x_m - start_x_m;
     float delta_y_m = target_y_m - start_y_m;
-    uint8 move_x_first = (fabsf(delta_x_m) >= fabsf(delta_y_m)) ? 1U : 0U;
     int start_row;
     int start_col;
     int target_row;
     int target_col;
-    size_t steps = 1U;
 
     if (start_x_m < 0.0f || start_y_m < 0.0f ||
         target_x_m < 0.0f || target_y_m < 0.0f)
@@ -648,43 +646,14 @@ static uint8 BlueSerial_BuildPointTargetPath(float start_x_m,
     g_blueserial_point_target_path[0].row = (uint8)start_row;
     g_blueserial_point_target_path[0].col = (uint8)start_col;
     g_blueserial_point_target_path[0].id = 0U;
+    /* A point relocation is one world-frame straight segment.  Splitting it
+     * into X/Y legs introduces an artificial stop and restart, and a small
+     * coordinate/yaw mismatch then appears as a visible tail segment. */
+    g_blueserial_point_target_path[1].row = (uint8)target_row;
+    g_blueserial_point_target_path[1].col = (uint8)target_col;
+    g_blueserial_point_target_path[1].id = 0U;
 
-    if (move_x_first)
-    {
-        if (target_row != start_row)
-        {
-            g_blueserial_point_target_path[steps].row = (uint8)target_row;
-            g_blueserial_point_target_path[steps].col = (uint8)start_col;
-            g_blueserial_point_target_path[steps].id = 0U;
-            steps++;
-        }
-        if (target_col != start_col)
-        {
-            g_blueserial_point_target_path[steps].row = (uint8)target_row;
-            g_blueserial_point_target_path[steps].col = (uint8)target_col;
-            g_blueserial_point_target_path[steps].id = 0U;
-            steps++;
-        }
-    }
-    else
-    {
-        if (target_col != start_col)
-        {
-            g_blueserial_point_target_path[steps].row = (uint8)start_row;
-            g_blueserial_point_target_path[steps].col = (uint8)target_col;
-            g_blueserial_point_target_path[steps].id = 0U;
-            steps++;
-        }
-        if (target_row != start_row)
-        {
-            g_blueserial_point_target_path[steps].row = (uint8)target_row;
-            g_blueserial_point_target_path[steps].col = (uint8)target_col;
-            g_blueserial_point_target_path[steps].id = 0U;
-            steps++;
-        }
-    }
-
-    path_follow_set_path_with_grid(g_blueserial_point_target_path, steps, grid_m, 0U);
+    path_follow_set_path_with_grid(g_blueserial_point_target_path, 2U, grid_m, 0U);
     return 1U;
 }
 

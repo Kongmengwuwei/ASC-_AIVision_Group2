@@ -42,6 +42,7 @@
 #define PF_POSITION_KP                   0.20f   /* 配合 0.35 制动包络补偿近目标残差。 */
 #define PF_POSITION_KI                   0.0f    /* 近目标位置环积分系数。 */
 #define PF_POSITION_KD                   0.0f    /* 近目标位置环微分系数。 */
+#define PF_POSITION_MIN_COMMAND_CMPS     2.5f    /* 容差外最小可执行修正，确保轮速目标越过死区量化阈值。 */
 #define PF_POSITION_MAX_IOUT_CMPS        200.0f  /* 位置环积分输出上限，单位 cm/s。 */
 #define PF_POSITION_MAX_OUT_CMPS         200.0f  /* 位置环总输出上限，单位 cm/s。 */
 #define PF_POSITION_FILTER_ALPHA         0.9f    /* 位置环微分滤波系数。 */
@@ -1185,6 +1186,10 @@ static void pf_apply_position_loop(const pf_geometry_t *geometry,
     float blend;
     float position_vx_cmps;
     float position_vy_cmps;
+    float correction_vx_cmps;
+    float correction_vy_cmps;
+    float command_norm_cmps;
+    float command_scale;
 
     if (geometry == NULL || vx_world_cmps == NULL || vy_world_cmps == NULL)
     {
@@ -1212,13 +1217,34 @@ static void pf_apply_position_loop(const pf_geometry_t *geometry,
                                  geometry->target_y_m * 100.0f);
     position_vy_cmps = pid_stay_y.fCtrl_Out;
 
+    correction_vx_cmps = blend * position_vx_cmps;
+    correction_vy_cmps = blend * position_vy_cmps;
+
     /* The S-curve owns the main longitudinal motion.  This loop only adds a
      * gradually introduced residual-position correction, so normal S-curve
      * deceleration is allowed to finish and any shortfall is pulled to the
      * target center.  Line guidance is disabled while this correction owns
      * the near-target stage. */
-    *vx_world_cmps += blend * position_vx_cmps;
-    *vy_world_cmps += blend * position_vy_cmps;
+    *vx_world_cmps += correction_vx_cmps;
+    *vy_world_cmps += correction_vy_cmps;
+
+    /* Close the gap between the continuous position controller and the
+     * integer wheel-speed interface.  Just outside the 1.5 cm tolerance,
+     * Kp=0.2 produces only about 0.3 cm/s, which truncates to zero encoder
+     * counts and never enables motor dead-zone feedforward.  Limit the final
+     * S-curve-plus-position command, not the correction term alone, so the
+     * blend entry remains continuous.  One-way target-plane completion still
+     * prevents reverse hunting after the target has been crossed. */
+    command_norm_cmps = sqrtf(*vx_world_cmps * *vx_world_cmps +
+                              *vy_world_cmps * *vy_world_cmps);
+    if (!geometry->within_tolerance &&
+        command_norm_cmps > 0.0f &&
+        command_norm_cmps < PF_POSITION_MIN_COMMAND_CMPS)
+    {
+        command_scale = PF_POSITION_MIN_COMMAND_CMPS / command_norm_cmps;
+        *vx_world_cmps *= command_scale;
+        *vy_world_cmps *= command_scale;
+    }
 }
 
 static uint8 pf_apply_line_guidance(const pf_geometry_t *geometry,

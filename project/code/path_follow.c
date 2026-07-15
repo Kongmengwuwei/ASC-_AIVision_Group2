@@ -1083,13 +1083,22 @@ static void pf_plan_approach_deceleration(const pf_geometry_t *geometry,
 
     /* The approach reference is latched to this target and follows the
      * distance envelope instead of counting down to zero by time alone.
-     * While the reference is above the envelope, slew toward it without
-     * crossing below it, so an early trigger cannot stop the car short. */
+     * Slew toward the envelope from either side: the entry reference can be
+     * below the envelope when the measured speed or S-curve reference has
+     * already fallen.  Leaving it there permanently can stop the car short
+     * while the latched braking state prevents position-loop takeover. */
     if (remaining_m > 0.0f &&
         g_pf.approach_ref_speed_cmps > envelope_speed_cmps)
     {
         g_pf.approach_ref_speed_cmps =
             fmaxf(g_pf.approach_ref_speed_cmps - decel_step_cmps,
+                  envelope_speed_cmps);
+    }
+    else if (remaining_m > 0.0f &&
+             g_pf.approach_ref_speed_cmps < envelope_speed_cmps)
+    {
+        g_pf.approach_ref_speed_cmps =
+            fminf(g_pf.approach_ref_speed_cmps + decel_step_cmps,
                   envelope_speed_cmps);
     }
 

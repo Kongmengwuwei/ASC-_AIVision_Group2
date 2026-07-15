@@ -105,7 +105,6 @@ void pit_1_handler(void)
   // Sample encoders before either autonomous or Bluetooth motor control.
   encoder_get();
   control_tick_10ms();
-  BlueSerial_TelemetryTick10ms();
   // Bluetooth takeover: when active, let BlueSerial own this 10ms motor-control tick.
   if (BlueSerial_IsControlActive())
   {

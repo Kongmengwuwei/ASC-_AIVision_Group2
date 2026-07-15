@@ -11,10 +11,6 @@
  *   [slider,speed,value] 和 [slider,position,value] 设置速度和距离；
  *   [start]（也兼容 run/apply/move）提交一次按目标位置停止的 S 曲线相对位移动作；
  *   [speed]（也兼容 cruise/speed.start）按所选方向和目标速度持续匀速行驶，直到 stop。
- * 位置接近段调参：
- *   [slider,pos.kp,value] / pos.ki / pos.kd 调整位置环；
- *   [slider,pos.speed.factor,value] 调整到目标中心减到零的速度包络系数。
- *
  * 中断适配原则：
  *   UART8 ISR 只负责收字节、拼帧、入队；字符串解析、printf、路径控制、电机状态切换
  *   都在主循环或 10ms 控制任务里完成，避免串口中断阻塞 PIT 控制中断。
@@ -29,6 +25,7 @@
 #include "PID_config.h"
 #include "Mymenu.h"
 #include "Attitude.h"
+#include "Control.h"
 #include <math.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -54,21 +51,15 @@
 #define BLUESERIAL_MAX_YAW_KD                   50.0f
 #define BLUESERIAL_MAX_YAW_FF_DEGPS             120.0f
 #define BLUESERIAL_MAX_Y_CROSSTALK_ABS          0.100f
-#define BLUESERIAL_MAX_POSITION_KP              20.0f
-#define BLUESERIAL_MAX_POSITION_KI              10.0f
-#define BLUESERIAL_MAX_POSITION_KD              50.0f
-#define BLUESERIAL_MIN_POSITION_SPEED_FACTOR    0.10f
-#define BLUESERIAL_MAX_POSITION_SPEED_FACTOR    1.00f
 #define BLUESERIAL_RELATIVE_GRID_M              0.01f
 #define BLUESERIAL_RELATIVE_CENTER_CELL         127
 #define BLUESERIAL_RELATIVE_MAX_OFFSET_CELL     120
 #define BLUESERIAL_POSITION_RETRY_LOOPS         200U
 #define BLUESERIAL_POSITION_MAX_RETRY           3U
+#define BLUESERIAL_VISION_TIMEOUT_LOOPS          1000U
 #define BLUESERIAL_POINT_TARGET_GRID_M          0.01f
 #define BLUESERIAL_POINT_TARGET_MAX_CELL        250
 #define BLUESERIAL_POINT_TARGET_MAX_M           20.0f
-#define BLUESERIAL_PERIODIC_TELEMETRY_ENABLE    1U//关闭100ms打印
-#define BLUESERIAL_TELEMETRY_PERIOD_TICKS       10U
 
 typedef enum
 {
@@ -111,12 +102,13 @@ static uint8 g_position_request_pending = 0U;
 static uint8 g_position_request_start_frame = 0U;
 static uint8 g_position_request_retry_count = 0U;
 static uint16 g_position_request_wait_loops = 0U;
+static uint8 g_vision_request_pending = 0U;
+static uint16 g_vision_request_wait_loops = 0U;
+static VisionRecognitionType g_vision_request_type = VISION_RECOGNITION_NONE;
 static uint8 g_point_target_valid = 0U;
 static float g_point_target_x_m = 0.0f;
 static float g_point_target_y_m = 0.0f;
 static Position g_blueserial_point_target_path[3];
-static volatile uint8 g_telemetry_tick_count = 0U;
-static volatile uint8 g_telemetry_report_pending = 0U;
 
 static float BlueSerial_ClampFloat(float value, float min_value, float max_value)
 {
@@ -480,6 +472,96 @@ static void BlueSerial_ServicePositionRequest(void)
     g_position_request_pending = 0U;
     BlueSerial_Printf("ERR position_timeout\r\n");
     BlueSerial_PrintPositionReport(0U);
+}
+
+static const char *BlueSerial_VisionTypeName(VisionRecognitionType type)
+{
+    return (type == VISION_RECOGNITION_NUM) ? "NUM" : "IMG";
+}
+
+static uint8 BlueSerial_VisionDistanceGridCount(VisionRecognitionDistance distance)
+{
+    return (distance == VISION_RECOGNITION_DISTANCE_TWO_GRID) ? 2U : 1U;
+}
+
+static void BlueSerial_PrintVisionResult(VisionRecognitionType type,
+                                         const VisionRecognitionResult *result)
+{
+    if (result == NULL)
+    {
+        BlueSerial_Printf("VISION type=%s success=0 label=? score=-1 mode=0\r\n",
+                          BlueSerial_VisionTypeName(type));
+        return;
+    }
+
+    BlueSerial_Printf("VISION type=%s success=%u label=%s score=%d mode=%u\r\n",
+                      BlueSerial_VisionTypeName(type),
+                      result->success ? 1U : 0U,
+                      result->label,
+                      (int)result->score,
+                      result->mode_marker ? 1U : 0U);
+}
+
+static void BlueSerial_StartVisionRequest(VisionRecognitionType type,
+                                          VisionRecognitionDistance distance)
+{
+    if (g_vision_request_pending)
+    {
+        BlueSerial_Printf("ERR vision_busy\r\n");
+        return;
+    }
+
+    if (control_get_stage() == CONTROL_STAGE_IDENTIFY_EXECUTE_PATH)
+    {
+        BlueSerial_Printf("ERR vision_busy_auto\r\n");
+        return;
+    }
+
+    if (!uart_send_vision_request(type, distance))
+    {
+        BlueSerial_Printf("ERR vision_request_failed\r\n");
+        return;
+    }
+
+    g_vision_request_pending = 1U;
+    g_vision_request_wait_loops = 0U;
+    g_vision_request_type = type;
+    BlueSerial_Printf("OK vision_request type=%s distance=%ugrid\r\n",
+                      BlueSerial_VisionTypeName(type),
+                      (unsigned int)BlueSerial_VisionDistanceGridCount(distance));
+}
+
+static void BlueSerial_ServiceVisionRequest(void)
+{
+    VisionRecognitionResult result = {0};
+
+    if (!g_vision_request_pending)
+    {
+        return;
+    }
+
+    process_vision_data();
+    if ((g_vision_request_type == VISION_RECOGNITION_IMG &&
+         vision_take_img_result(&result)) ||
+        (g_vision_request_type == VISION_RECOGNITION_NUM &&
+         vision_take_num_result(&result)))
+    {
+        g_vision_request_pending = 0U;
+        BlueSerial_PrintVisionResult(g_vision_request_type, &result);
+        g_vision_request_type = VISION_RECOGNITION_NONE;
+        return;
+    }
+
+    if (g_vision_request_wait_loops < BLUESERIAL_VISION_TIMEOUT_LOOPS)
+    {
+        g_vision_request_wait_loops++;
+        return;
+    }
+
+    g_vision_request_pending = 0U;
+    BlueSerial_Printf("ERR vision_timeout type=%s\r\n",
+                      BlueSerial_VisionTypeName(g_vision_request_type));
+    g_vision_request_type = VISION_RECOGNITION_NONE;
 }
 
 static uint8 BlueSerial_HasPointTarget(void)
@@ -854,8 +936,6 @@ void Blue_Serial_Init(void)
     g_rx_drop_count = 0U;
     g_last_rx_frame[0] = '\0';
     g_last_rx_frame_len = 0U;
-    g_telemetry_tick_count = 0U;
-    g_telemetry_report_pending = 0U;
     uart_init(BLUESERIAL_UART, BLUESERIAL_BAUDRATE, BLUESERIAL_TX_PIN, BLUESERIAL_RX_PIN);
     interrupt_set_priority(BLUESERIAL_IRQN, BLUESERIAL_IRQ_PRIORITY);
     uart_rx_interrupt(BLUESERIAL_UART, ZF_ENABLE);
@@ -1204,47 +1284,6 @@ static uint8 BlueSerial_SetSlider(const char *name, float value)
         BlueSerial_Printf("OK cross.right=%.4f\r\n", applied_value);
         return 1U;
     }
-    if (strcmp(name, "pos.kp") == 0 || strcmp(name, "position.kp") == 0)
-    {
-        applied_value = BlueSerial_ClampFloat(value, 0.0f, BLUESERIAL_MAX_POSITION_KP);
-        primask = interrupt_global_disable();
-        path_follow_set_position_pid_gains(applied_value, pid_stay.fKi, pid_stay.fKd);
-        interrupt_global_enable(primask);
-        BlueSerial_Printf("OK pos.kp=%.4f\r\n", applied_value);
-        return 1U;
-    }
-    if (strcmp(name, "pos.ki") == 0 || strcmp(name, "position.ki") == 0)
-    {
-        applied_value = BlueSerial_ClampFloat(value, 0.0f, BLUESERIAL_MAX_POSITION_KI);
-        primask = interrupt_global_disable();
-        path_follow_set_position_pid_gains(pid_stay.fKp, applied_value, pid_stay.fKd);
-        interrupt_global_enable(primask);
-        BlueSerial_Printf("OK pos.ki=%.4f\r\n", applied_value);
-        return 1U;
-    }
-    if (strcmp(name, "pos.kd") == 0 || strcmp(name, "position.kd") == 0)
-    {
-        applied_value = BlueSerial_ClampFloat(value, 0.0f, BLUESERIAL_MAX_POSITION_KD);
-        primask = interrupt_global_disable();
-        path_follow_set_position_pid_gains(pid_stay.fKp, pid_stay.fKi, applied_value);
-        interrupt_global_enable(primask);
-        BlueSerial_Printf("OK pos.kd=%.4f\r\n", applied_value);
-        return 1U;
-    }
-    if (strcmp(name, "pos.speed.factor") == 0 ||
-        strcmp(name, "position.speed.factor") == 0 ||
-        strcmp(name, "pos.speed_factor") == 0)
-    {
-        applied_value = BlueSerial_ClampFloat(
-            value,
-            BLUESERIAL_MIN_POSITION_SPEED_FACTOR,
-            BLUESERIAL_MAX_POSITION_SPEED_FACTOR);
-        primask = interrupt_global_disable();
-        path_position_speed_limit_factor = applied_value;
-        interrupt_global_enable(primask);
-        BlueSerial_Printf("OK pos.speed.factor=%.3f\r\n", applied_value);
-        return 1U;
-    }
     if (strcmp(name, "yaw.kp") == 0)
     {
         applied_value = BlueSerial_ClampFloat(value, 0.0f, BLUESERIAL_MAX_YAW_KP);
@@ -1304,10 +1343,6 @@ static void BlueSerial_PrintStatus(void)
     float yaw_ff;
     float cross_left;
     float cross_right;
-    float position_kp;
-    float position_ki;
-    float position_kd;
-    float position_speed_factor;
     uint8 point_target_valid;
     float point_target_x_m;
     float point_target_y_m;
@@ -1328,10 +1363,6 @@ static void BlueSerial_PrintStatus(void)
     yaw_ff = path_yaw_feedforward_min_degps;
     cross_left = path_y_crosstalk_left_x_comp_k;
     cross_right = path_y_crosstalk_right_x_comp_k;
-    position_kp = pid_stay.fKp;
-    position_ki = pid_stay.fKi;
-    position_kd = pid_stay.fKd;
-    position_speed_factor = path_position_speed_limit_factor;
     point_target_valid = g_point_target_valid;
     point_target_x_m = g_point_target_x_m;
     point_target_y_m = g_point_target_y_m;
@@ -1350,14 +1381,9 @@ static void BlueSerial_PrintStatus(void)
                       yaw_kp, yaw_ki, yaw_kd,
                       yaw_ff,
                       (unsigned long)drop_count);
-    BlueSerial_Printf("TUNE cross.left=%.4f cross.right=%.4f "
-                      "pospid=%.4f,%.4f,%.4f pos.speed.factor=%.3f\r\n",
+    BlueSerial_Printf("TUNE cross.left=%.4f cross.right=%.4f\r\n",
                       cross_left,
-                      cross_right,
-                      position_kp,
-                      position_ki,
-                      position_kd,
-                      position_speed_factor);
+                      cross_right);
     if (point_target_valid)
     {
         BlueSerial_Printf("TARGET pending=1 target_m=%.3f,%.3f\r\n",
@@ -1468,6 +1494,30 @@ static uint8 BlueSerial_RunButton(const char *command)
         BlueSerial_StartPositionRequest();
         return 1U;
     }
+    if (strcmp(command, "IMG1") == 0 || strcmp(command, "img1") == 0)
+    {
+        BlueSerial_StartVisionRequest(VISION_RECOGNITION_IMG,
+                                      VISION_RECOGNITION_DISTANCE_ONE_GRID);
+        return 1U;
+    }
+    if (strcmp(command, "IMG2") == 0 || strcmp(command, "img2") == 0)
+    {
+        BlueSerial_StartVisionRequest(VISION_RECOGNITION_IMG,
+                                      VISION_RECOGNITION_DISTANCE_TWO_GRID);
+        return 1U;
+    }
+    if (strcmp(command, "NUM1") == 0 || strcmp(command, "num1") == 0)
+    {
+        BlueSerial_StartVisionRequest(VISION_RECOGNITION_NUM,
+                                      VISION_RECOGNITION_DISTANCE_ONE_GRID);
+        return 1U;
+    }
+    if (strcmp(command, "NUM2") == 0 || strcmp(command, "num2") == 0)
+    {
+        BlueSerial_StartVisionRequest(VISION_RECOGNITION_NUM,
+                                      VISION_RECOGNITION_DISTANCE_TWO_GRID);
+        return 1U;
+    }
 
     return 0U;
 }
@@ -1543,80 +1593,6 @@ static void BlueSerial_CommandTask(void)
     }
 }
 
-void BlueSerial_TelemetryTick10ms(void)
-{
-    if (!BLUESERIAL_PERIODIC_TELEMETRY_ENABLE)
-    {
-        return;
-    }
-
-    g_telemetry_tick_count++;
-    if (g_telemetry_tick_count >= BLUESERIAL_TELEMETRY_PERIOD_TICKS)
-    {
-        g_telemetry_tick_count = 0U;
-        g_telemetry_report_pending = 1U;
-    }
-}
-
-static void BlueSerial_ServiceTelemetryReport(void)
-{
-    uint32 primask;
-    uint8 report_pending;
-    blueserial_control_mode_t mode;
-    path_follow_status_t status = {0};
-    float target_speed_cmps;
-    float actual_yaw_deg = 0.0f;
-
-    if (!BLUESERIAL_PERIODIC_TELEMETRY_ENABLE)
-    {
-        return;
-    }
-
-    primask = interrupt_global_disable();
-    report_pending = g_telemetry_report_pending;
-    if (report_pending)
-    {
-        g_telemetry_report_pending = 0U;
-        mode = g_control_mode;
-        path_follow_get_status(&status);
-        actual_yaw_deg = eulerAngle.yaw;
-    }
-    interrupt_global_enable(primask);
-
-    if (!report_pending)
-    {
-        return;
-    }
-
-    target_speed_cmps = status.speed_ref_cmps;
-    if (mode == BLUESERIAL_MODE_SPEED_CRUISE)
-    {
-        target_speed_cmps = g_target_speed_cmps;
-    }
-    else if (mode == BLUESERIAL_MODE_RAW_PWM)
-    {
-        target_speed_cmps = 0.0f;
-    }
-
-    BlueSerial_Printf("TPOS=%.3f,%.3f APOS=%.3f,%.3f "
-                      "TVEL=%.2f AVEL=%.2f VCAP=%.2f PSLIM=%.2f "
-                      "BRK=%u POS=%u LINE=%u "
-                      "TYAW=%.2f AYAW=%.2f\r\n",
-                      status.target_x_m,
-                      status.target_y_m,
-                      status.x_m,
-                      status.y_m,
-                      target_speed_cmps,
-                      status.actual_speed_cmps,
-                      status.speed_cap_cmps,
-                      status.position_speed_limit_cmps,
-                      status.approach_braking_active,
-                      status.position_loop_active,
-                      status.line_guidance_active,
-                      status.target_yaw_deg,
-                      actual_yaw_deg);
-}
-
 void BlueSerial_ControlTick10ms(void)
 {
     if (g_control_mode == BLUESERIAL_MODE_RAW_PWM)
@@ -1688,5 +1664,5 @@ void BlueSerial_Task(void)
     BlueSerial_CommandTask();
     BlueSerial_ServiceMotionCompletion();
     BlueSerial_ServicePositionRequest();
-    BlueSerial_ServiceTelemetryReport();
+    BlueSerial_ServiceVisionRequest();
 }

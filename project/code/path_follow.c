@@ -202,7 +202,7 @@ float path_hold_trim_release_distance = PF_POSITION_LOOP_RELEASE_M;
 /* Runtime-tunable line guidance and yaw low-speed feedforward. */
 float path_line_guide_kp = PF_LINE_GUIDE_KP;
 float path_line_guide_min_cmps = PF_LINE_GUIDE_MIN_CMPS;
-float path_position_speed_limit_factor = PF_POSITION_SPEED_FACTOR_DEFAULT;
+static float path_position_speed_limit_factor = PF_POSITION_SPEED_FACTOR_DEFAULT;
 float path_yaw_feedforward_min_degps = PF_YAW_FEEDFORWARD_MIN_DEGPS;
 float path_yaw_feedforward_deadband_deg = PF_YAW_TOLERANCE_DEG;
 
@@ -1767,16 +1767,6 @@ void path_follow_init(float grid_size_m, float pulses_per_meter)
     pf_init_pid_object(&pid_world_x, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f);
     pf_init_pid_object(&pid_world_y, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f);
     pf_init_pid_object(&pid_accel_yaw, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f);
-}
-
-void path_follow_set_position_pid_gains(float kp, float ki, float kd)
-{
-    pid_stay.fKp = kp;
-    pid_stay.fKi = ki;
-    pid_stay.fKd = kd;
-    pf_sync_position_pid_gains();
-    PID_Clear(&pid_stay);
-    PID_Clear(&pid_stay_y);
 }
 
 void path_follow_reset_pose(float x_m, float y_m, float yaw_deg)

@@ -23,9 +23,6 @@ uint8 BlueSerial_IsControlActive(void);
  */
 void BlueSerial_ControlTick10ms(void);
 
-/* 10 ms timebase for the non-blocking 100 ms Bluetooth telemetry report. */
-void BlueSerial_TelemetryTick10ms(void);
-
 /* 主循环调用：处理蓝牙命令及异步动作完成状态。 */
 void BlueSerial_Task(void);
 

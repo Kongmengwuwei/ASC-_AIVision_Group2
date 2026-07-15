@@ -38,8 +38,9 @@
 /* Y-to-X crosstalk feedforward boot defaults.
  * Unit: X correction / absolute Y command. The gains are signed and
  * independent: +Y is left, -Y is right. X-only commands are unaffected. */
-#define PF_Y_CROSSTALK_LEFT_X_COMP_K      0.009f /* +Y 运动时的 X 串轴补偿系数。 */
-#define PF_Y_CROSSTALK_RIGHT_X_COMP_K    -0.007f /* -Y 运动时的 X 串轴补偿系数。 */
+#define PF_Y_CROSSTALK_LEFT_X_COMP_K      0.028f /* +Y 左移的 X 串轴补偿：80 cm 双速往返标定。 */
+#define PF_Y_CROSSTALK_RIGHT_X_COMP_K    -0.035f /* -Y 右移的 X 串轴补偿：80 cm 双速往返标定。 */
+#define PF_LATERAL_LEFT_ODOMETRY_SCALE    1.0090f /* 三地图区域五组往返均值：左移里程约多 0.9%。 */
 
 #define PF_POSITION_KP                   0.20f   /* 配合 0.35 制动包络补偿近目标残差。 */
 #define PF_POSITION_KI                   0.0f    /* 近目标位置环积分系数。 */
@@ -1406,6 +1407,10 @@ static void pf_update_odometry(float yaw_deg)
     vy_body_mps = 0.25f * (-wheel_ul_mps + wheel_ur_mps +
                            wheel_dl_mps - wheel_dr_mps) *
                   LATERAL_CORRECTION_FACTOR;
+    if (vy_body_mps > 0.0f)
+    {
+        vy_body_mps *= PF_LATERAL_LEFT_ODOMETRY_SCALE;
+    }
     /* Remove the deliberate Y-to-X feedforward from encoder odometry. */
     vx_body_mps -= pf_y_crosstalk_x_comp(vy_body_mps);
     g_pf.linear_speed_cmps =

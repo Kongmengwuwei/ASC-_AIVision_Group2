@@ -43,7 +43,7 @@
 #define PF_POSITION_MAX_IOUT_CMPS        200.0f  /* 位置环积分输出上限，单位 cm/s。 */
 #define PF_POSITION_MAX_OUT_CMPS         200.0f  /* 位置环总输出上限，单位 cm/s。 */
 #define PF_POSITION_FILTER_ALPHA         0.9f    /* 位置环微分滤波系数。 */
-#define PF_LINE_GUIDE_KP                 4.0f    /* 法向偏差到纠偏速度的比例系数。 */
+#define PF_LINE_GUIDE_KP                 2.0f    /* 双向高速实测可降低峰值横偏且避免过纠。 */
 #define PF_LINE_GUIDE_MIN_CMPS           0.0f    /* 法向纠偏非零时的最小附加速度，单位 cm/s。 */
 #define PF_LINE_GUIDE_MAX_CMPS           12.0f   /* 法向纠偏速度上限，单位 cm/s。 */
 #define PF_LINE_GUIDE_DEADBAND_M         0.0025f /* 法向偏差死区，单位 m。 */

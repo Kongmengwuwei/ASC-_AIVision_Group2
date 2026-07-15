@@ -11,6 +11,9 @@
  *   [slider,speed,value] 和 [slider,position,value] 设置速度和距离；
  *   [start]（也兼容 run/apply/move）提交一次按目标位置停止的 S 曲线相对位移动作；
  *   [speed]（也兼容 cruise/speed.start）按所选方向和目标速度持续匀速行驶，直到 stop。
+ * 位置接近段调参：
+ *   [slider,pos.kp,value] / pos.ki / pos.kd 调整位置环；
+ *   [slider,pos.speed.factor,value] 调整到目标中心减到零的速度包络系数。
  *
  * 中断适配原则：
  *   UART8 ISR 只负责收字节、拼帧、入队；字符串解析、printf、路径控制、电机状态切换
@@ -50,6 +53,12 @@
 #define BLUESERIAL_MAX_YAW_KI                   10.0f
 #define BLUESERIAL_MAX_YAW_KD                   50.0f
 #define BLUESERIAL_MAX_YAW_FF_DEGPS             120.0f
+#define BLUESERIAL_MAX_Y_CROSSTALK_ABS          0.100f
+#define BLUESERIAL_MAX_POSITION_KP              20.0f
+#define BLUESERIAL_MAX_POSITION_KI              10.0f
+#define BLUESERIAL_MAX_POSITION_KD              50.0f
+#define BLUESERIAL_MIN_POSITION_SPEED_FACTOR    0.10f
+#define BLUESERIAL_MAX_POSITION_SPEED_FACTOR    1.00f
 #define BLUESERIAL_RELATIVE_GRID_M              0.01f
 #define BLUESERIAL_RELATIVE_CENTER_CELL         127
 #define BLUESERIAL_RELATIVE_MAX_OFFSET_CELL     120
@@ -58,6 +67,7 @@
 #define BLUESERIAL_POINT_TARGET_GRID_M          0.01f
 #define BLUESERIAL_POINT_TARGET_MAX_CELL        250
 #define BLUESERIAL_POINT_TARGET_MAX_M           20.0f
+#define BLUESERIAL_PERIODIC_TELEMETRY_ENABLE    1U//关闭100ms打印
 #define BLUESERIAL_TELEMETRY_PERIOD_TICKS       10U
 
 typedef enum
@@ -644,11 +654,9 @@ static void BlueSerial_StartCenteredRelativeMove(float delta_x_m, float delta_y_
     const float eps_m = 0.001f;
     float grid_m = BLUESERIAL_RELATIVE_GRID_M;
     float max_delta_m = fmaxf(fabsf(delta_x_m), fabsf(delta_y_m));
-    uint8 move_x_first = (fabsf(delta_x_m) >= fabsf(delta_y_m)) ? 1U : 0U;
     int center_cell = BLUESERIAL_RELATIVE_CENTER_CELL;
     int target_row;
     int target_col;
-    size_t steps = 1U;
 
     if (max_delta_m <= eps_m)
     {
@@ -674,44 +682,17 @@ static void BlueSerial_StartCenteredRelativeMove(float delta_x_m, float delta_y_
     g_blueserial_relative_path[0].col = (uint8)center_cell;
     g_blueserial_relative_path[0].id = 0U;
 
-    if (move_x_first)
-    {
-        if (target_row != center_cell)
-        {
-            g_blueserial_relative_path[steps].row = (uint8)target_row;
-            g_blueserial_relative_path[steps].col = (uint8)center_cell;
-            g_blueserial_relative_path[steps].id = 0U;
-            steps++;
-        }
-        if (target_col != center_cell)
-        {
-            g_blueserial_relative_path[steps].row = (uint8)target_row;
-            g_blueserial_relative_path[steps].col = (uint8)target_col;
-            g_blueserial_relative_path[steps].id = 0U;
-            steps++;
-        }
-    }
-    else
-    {
-        if (target_col != center_cell)
-        {
-            g_blueserial_relative_path[steps].row = (uint8)center_cell;
-            g_blueserial_relative_path[steps].col = (uint8)target_col;
-            g_blueserial_relative_path[steps].id = 0U;
-            steps++;
-        }
-        if (target_row != center_cell)
-        {
-            g_blueserial_relative_path[steps].row = (uint8)target_row;
-            g_blueserial_relative_path[steps].col = (uint8)target_col;
-            g_blueserial_relative_path[steps].id = 0U;
-            steps++;
-        }
-    }
+    /* Keep Bluetooth relative motion as one world-frame straight segment.
+     * Splitting the yaw-induced sub-centimetre lateral component into a
+     * second axis leg caused a visible stop, restart and TPOS jump after the
+     * main leg had already crossed its target plane. */
+    g_blueserial_relative_path[1].row = (uint8)target_row;
+    g_blueserial_relative_path[1].col = (uint8)target_col;
+    g_blueserial_relative_path[1].id = 0U;
 
     path_follow_reset_pose((float)center_cell * grid_m, (float)center_cell * grid_m, yaw_deg);
     path_follow_set_target_yaw(yaw_deg);
-    path_follow_set_path_with_grid(g_blueserial_relative_path, steps, grid_m, 0U);
+    path_follow_set_path_with_grid(g_blueserial_relative_path, 2U, grid_m, 0U);
 }
 
 static uint8 BlueSerial_StartConfiguredMove(void)
@@ -1201,6 +1182,69 @@ static uint8 BlueSerial_SetSlider(const char *name, float value)
         BlueSerial_Printf("OK next_position=%.1fcm\r\n", applied_value);
         return 1U;
     }
+    if (strcmp(name, "cross.left") == 0 || strcmp(name, "ycross.left") == 0)
+    {
+        applied_value = BlueSerial_ClampFloat(value,
+                                              -BLUESERIAL_MAX_Y_CROSSTALK_ABS,
+                                              BLUESERIAL_MAX_Y_CROSSTALK_ABS);
+        primask = interrupt_global_disable();
+        path_y_crosstalk_left_x_comp_k = applied_value;
+        interrupt_global_enable(primask);
+        BlueSerial_Printf("OK cross.left=%.4f\r\n", applied_value);
+        return 1U;
+    }
+    if (strcmp(name, "cross.right") == 0 || strcmp(name, "ycross.right") == 0)
+    {
+        applied_value = BlueSerial_ClampFloat(value,
+                                              -BLUESERIAL_MAX_Y_CROSSTALK_ABS,
+                                              BLUESERIAL_MAX_Y_CROSSTALK_ABS);
+        primask = interrupt_global_disable();
+        path_y_crosstalk_right_x_comp_k = applied_value;
+        interrupt_global_enable(primask);
+        BlueSerial_Printf("OK cross.right=%.4f\r\n", applied_value);
+        return 1U;
+    }
+    if (strcmp(name, "pos.kp") == 0 || strcmp(name, "position.kp") == 0)
+    {
+        applied_value = BlueSerial_ClampFloat(value, 0.0f, BLUESERIAL_MAX_POSITION_KP);
+        primask = interrupt_global_disable();
+        path_follow_set_position_pid_gains(applied_value, pid_stay.fKi, pid_stay.fKd);
+        interrupt_global_enable(primask);
+        BlueSerial_Printf("OK pos.kp=%.4f\r\n", applied_value);
+        return 1U;
+    }
+    if (strcmp(name, "pos.ki") == 0 || strcmp(name, "position.ki") == 0)
+    {
+        applied_value = BlueSerial_ClampFloat(value, 0.0f, BLUESERIAL_MAX_POSITION_KI);
+        primask = interrupt_global_disable();
+        path_follow_set_position_pid_gains(pid_stay.fKp, applied_value, pid_stay.fKd);
+        interrupt_global_enable(primask);
+        BlueSerial_Printf("OK pos.ki=%.4f\r\n", applied_value);
+        return 1U;
+    }
+    if (strcmp(name, "pos.kd") == 0 || strcmp(name, "position.kd") == 0)
+    {
+        applied_value = BlueSerial_ClampFloat(value, 0.0f, BLUESERIAL_MAX_POSITION_KD);
+        primask = interrupt_global_disable();
+        path_follow_set_position_pid_gains(pid_stay.fKp, pid_stay.fKi, applied_value);
+        interrupt_global_enable(primask);
+        BlueSerial_Printf("OK pos.kd=%.4f\r\n", applied_value);
+        return 1U;
+    }
+    if (strcmp(name, "pos.speed.factor") == 0 ||
+        strcmp(name, "position.speed.factor") == 0 ||
+        strcmp(name, "pos.speed_factor") == 0)
+    {
+        applied_value = BlueSerial_ClampFloat(
+            value,
+            BLUESERIAL_MIN_POSITION_SPEED_FACTOR,
+            BLUESERIAL_MAX_POSITION_SPEED_FACTOR);
+        primask = interrupt_global_disable();
+        path_position_speed_limit_factor = applied_value;
+        interrupt_global_enable(primask);
+        BlueSerial_Printf("OK pos.speed.factor=%.3f\r\n", applied_value);
+        return 1U;
+    }
     if (strcmp(name, "yaw.kp") == 0)
     {
         applied_value = BlueSerial_ClampFloat(value, 0.0f, BLUESERIAL_MAX_YAW_KP);
@@ -1258,6 +1302,12 @@ static void BlueSerial_PrintStatus(void)
     float yaw_ki;
     float yaw_kd;
     float yaw_ff;
+    float cross_left;
+    float cross_right;
+    float position_kp;
+    float position_ki;
+    float position_kd;
+    float position_speed_factor;
     uint8 point_target_valid;
     float point_target_x_m;
     float point_target_y_m;
@@ -1276,6 +1326,12 @@ static void BlueSerial_PrintStatus(void)
     yaw_ki = pid_yaw.fKi;
     yaw_kd = pid_yaw.fKd;
     yaw_ff = path_yaw_feedforward_min_degps;
+    cross_left = path_y_crosstalk_left_x_comp_k;
+    cross_right = path_y_crosstalk_right_x_comp_k;
+    position_kp = pid_stay.fKp;
+    position_ki = pid_stay.fKi;
+    position_kd = pid_stay.fKd;
+    position_speed_factor = path_position_speed_limit_factor;
     point_target_valid = g_point_target_valid;
     point_target_x_m = g_point_target_x_m;
     point_target_y_m = g_point_target_y_m;
@@ -1294,6 +1350,14 @@ static void BlueSerial_PrintStatus(void)
                       yaw_kp, yaw_ki, yaw_kd,
                       yaw_ff,
                       (unsigned long)drop_count);
+    BlueSerial_Printf("TUNE cross.left=%.4f cross.right=%.4f "
+                      "pospid=%.4f,%.4f,%.4f pos.speed.factor=%.3f\r\n",
+                      cross_left,
+                      cross_right,
+                      position_kp,
+                      position_ki,
+                      position_kd,
+                      position_speed_factor);
     if (point_target_valid)
     {
         BlueSerial_Printf("TARGET pending=1 target_m=%.3f,%.3f\r\n",
@@ -1481,6 +1545,11 @@ static void BlueSerial_CommandTask(void)
 
 void BlueSerial_TelemetryTick10ms(void)
 {
+    if (!BLUESERIAL_PERIODIC_TELEMETRY_ENABLE)
+    {
+        return;
+    }
+
     g_telemetry_tick_count++;
     if (g_telemetry_tick_count >= BLUESERIAL_TELEMETRY_PERIOD_TICKS)
     {
@@ -1497,6 +1566,11 @@ static void BlueSerial_ServiceTelemetryReport(void)
     path_follow_status_t status = {0};
     float target_speed_cmps;
     float actual_yaw_deg = 0.0f;
+
+    if (!BLUESERIAL_PERIODIC_TELEMETRY_ENABLE)
+    {
+        return;
+    }
 
     primask = interrupt_global_disable();
     report_pending = g_telemetry_report_pending;
@@ -1525,13 +1599,20 @@ static void BlueSerial_ServiceTelemetryReport(void)
     }
 
     BlueSerial_Printf("TPOS=%.3f,%.3f APOS=%.3f,%.3f "
-                      "TVEL=%.2f AVEL=%.2f TYAW=%.2f AYAW=%.2f\r\n",
+                      "TVEL=%.2f AVEL=%.2f VCAP=%.2f PSLIM=%.2f "
+                      "BRK=%u POS=%u LINE=%u "
+                      "TYAW=%.2f AYAW=%.2f\r\n",
                       status.target_x_m,
                       status.target_y_m,
                       status.x_m,
                       status.y_m,
                       target_speed_cmps,
                       status.actual_speed_cmps,
+                      status.speed_cap_cmps,
+                      status.position_speed_limit_cmps,
+                      status.approach_braking_active,
+                      status.position_loop_active,
+                      status.line_guidance_active,
                       status.target_yaw_deg,
                       actual_yaw_deg);
 }

@@ -10,44 +10,48 @@
 #include <string.h>
 
 #ifndef M_PI
-#define M_PI 3.14159265358979323846
+#define M_PI 3.14159265358979323846 /* math.h 未提供时使用的圆周率常量。 */
 #endif
 
-#define PF_POSITION_TOLERANCE_M          0.015f//容差
-#define PF_YAW_TOLERANCE_DEG             0.5f//容差
-#define PF_MAX_LINEAR_SPEED_MPS          3.0f//最大线速度
-#define PF_MAX_ANGULAR_SPEED_DEGPS       300.0f//最大角速度
-#define PF_TEMP_PATH_GRID_M              0.01f
-#define PF_MIN_VALID_GRID_M              0.0001f
-#define PF_INVALID_INDEX                 ((size_t)-1)
-#define PF_INVALID_BAND                  0xFFU
-#define PF_DT_S                          (1.0f / (float)PID_RATE)
-#define PF_PROFILE_DONE_MIN_SPEED_CMPS   0.0f//
-#define PF_SEGMENT_END_SPEED_CMPS        0.0f
-#define PF_POSITION_LOOP_RELEASE_M       0.20f//位置环释放距离
-#define PF_ARRIVAL_MAX_SPEED_CMPS        3.0f//到点速度判断
-#define PF_ARRIVAL_DECEL_CMPS2           105.0f//到点加速度
+#define PF_POSITION_TOLERANCE_M          0.015f  /* 到点位置容差，单位 m。 */
+#define PF_YAW_TOLERANCE_DEG             0.5f    /* 航向到点容差，单位 deg。 */
+#define PF_MAX_LINEAR_SPEED_MPS          3.0f    /* 模块允许的最大平移速度，单位 m/s。 */
+#define PF_MAX_ANGULAR_SPEED_DEGPS       300.0f  /* 模块允许的最大角速度，单位 deg/s。 */
+#define PF_TEMP_PATH_GRID_M              0.01f   /* 临时点路径的栅格尺寸，单位 m。 */
+#define PF_MIN_VALID_GRID_M              0.0001f /* 有效距离/栅格的最小值，单位 m。 */
+#define PF_INVALID_INDEX                 ((size_t)-1) /* 无效路径下标。 */
+#define PF_INVALID_BAND                  0xFFU   /* 无效 S 曲线速度档位。 */
+#define PF_DT_S                          (1.0f / (float)PID_RATE) /* 单次控制周期，单位 s。 */
+#define PF_SEGMENT_END_SPEED_CMPS        0.0f    /* 目标中心处的规划终速度，单位 cm/s。 */
+#define PF_POSITION_LOOP_RELEASE_M       0.22f   /* 近点接管距离，覆盖高速档实测制动距离，单位 m。 */
+#define PF_ARRIVAL_MAX_SPEED_CMPS        3.0f    /* 完成目标允许的最大实测平移速度，单位 cm/s。 */
+#define PF_APPROACH_DECEL_CMPS2          105.0f  /* S 曲线参数无效时的接近减速度，单位 cm/s^2。 */
+#define PF_POSITION_SPEED_FACTOR_MIN     0.10f   /* 手动制动速度包络系数下限。 */
+#define PF_POSITION_SPEED_FACTOR_MAX     1.00f   /* 制动速度包络系数上限。 */
+#define PF_POSITION_SPEED_FACTOR_DEFAULT 0.55f   /* 近点超速制动包络系数；不缩放正常 S 曲线。 */
 
 /* Y-to-X crosstalk feedforward boot defaults.
  * Unit: X correction / absolute Y command. The gains are signed and
  * independent: +Y is left, -Y is right. X-only commands are unaffected. */
-#define PF_Y_CROSSTALK_LEFT_X_COMP_K      0.009f//+0.011
-#define PF_Y_CROSSTALK_RIGHT_X_COMP_K    -0.007f//-0.020
+#define PF_Y_CROSSTALK_LEFT_X_COMP_K      0.009f /* +Y 运动时的 X 串轴补偿系数。 */
+#define PF_Y_CROSSTALK_RIGHT_X_COMP_K    -0.007f /* -Y 运动时的 X 串轴补偿系数。 */
 
-#define PF_POSITION_KP                   1.15f
-#define PF_POSITION_KI                   0.0f
-#define PF_POSITION_KD                   0.25f
-#define PF_POSITION_MAX_IOUT_CMPS        200.0f
-#define PF_POSITION_MAX_OUT_CMPS         200.0f
-#define PF_POSITION_FILTER_ALPHA         0.9f
-#define PF_LINE_GUIDE_MAX_CMPS           12.0f
-#define PF_LINE_GUIDE_DEADBAND_M         0.0025f
+#define PF_POSITION_KP                   0.10f   /* 仅补偿负载导致的近目标欠程，避免放大正常超程。 */
+#define PF_POSITION_KI                   0.0f    /* 近目标位置环积分系数。 */
+#define PF_POSITION_KD                   0.0f    /* 近目标位置环微分系数。 */
+#define PF_POSITION_MAX_IOUT_CMPS        200.0f  /* 位置环积分输出上限，单位 cm/s。 */
+#define PF_POSITION_MAX_OUT_CMPS         200.0f  /* 位置环总输出上限，单位 cm/s。 */
+#define PF_POSITION_FILTER_ALPHA         0.9f    /* 位置环微分滤波系数。 */
+#define PF_LINE_GUIDE_KP                 4.0f    /* 法向偏差到纠偏速度的比例系数。 */
+#define PF_LINE_GUIDE_MIN_CMPS           0.0f    /* 法向纠偏非零时的最小附加速度，单位 cm/s。 */
+#define PF_LINE_GUIDE_MAX_CMPS           12.0f   /* 法向纠偏速度上限，单位 cm/s。 */
+#define PF_LINE_GUIDE_DEADBAND_M         0.0025f /* 法向偏差死区，单位 m。 */
 
-#define PF_YAW_KP                        6.0f
-#define PF_YAW_KI                        0.0f
-#define PF_YAW_KD                        8.5f
-#define PF_YAW_FILTER_ALPHA              0.9f
-#define PF_YAW_FEEDFORWARD_MIN_DEGPS     8.0f
+#define PF_YAW_KP                        6.0f    /* 航向环比例系数。 */
+#define PF_YAW_KI                        0.0f    /* 航向环积分系数。 */
+#define PF_YAW_KD                        8.5f    /* 航向环微分系数。 */
+#define PF_YAW_FILTER_ALPHA              0.9f    /* 航向环微分滤波系数。 */
+#define PF_YAW_FEEDFORWARD_MIN_DEGPS     8.0f    /* 克服低速转向死区的最小角速度，单位 deg/s。 */
 
 typedef struct
 {
@@ -66,6 +70,8 @@ typedef struct
     float dir_x;
     float dir_y;
     float planned_distance_m;
+    float along_track_remaining_m;
+    uint8 within_tolerance;
     uint8 segment_axis;
 } pf_geometry_t;
 
@@ -75,8 +81,13 @@ typedef struct
     float dir_x;
     float dir_y;
     float speed_ref_cmps;
+    float speed_cap_cmps;
     float target_x_m;
     float target_y_m;
+    float position_speed_limit_cmps;
+    uint8 approach_braking_active;
+    uint8 position_loop_active;
+    uint8 line_guidance_active;
     uint8 segment_axis;
 } pf_debug_t;
 
@@ -142,9 +153,10 @@ typedef struct
     float profile_time_s;
     float last_ref_speed_cmps;
     size_t profile_target_idx;
-    float arrival_ref_speed_cmps;
-    float arrival_dir_x;
-    float arrival_dir_y;
+
+    float approach_ref_speed_cmps;
+    float approach_dir_x;
+    float approach_dir_y;
 
     size_t pause_indices[PATH_FOLLOW_MAX_PAUSE_POINTS];
     size_t pause_count;
@@ -157,7 +169,7 @@ typedef struct
     uint8 pause_events_enabled;
     uint8 rotate_only_active;
     uint8 profile_active;
-    uint8 arrival_braking;
+    uint8 approach_braking;
 } pf_context_t;
 
 static pf_context_t g_pf;
@@ -188,8 +200,9 @@ float path_corner_commit_lateral_gate_min_m = PF_POSITION_TOLERANCE_M;
 float path_hold_trim_release_distance = PF_POSITION_LOOP_RELEASE_M;
 
 /* Runtime-tunable line guidance and yaw low-speed feedforward. */
-float path_line_guide_kp = 0.0f;
-float path_line_guide_min_cmps = 0.0f;
+float path_line_guide_kp = PF_LINE_GUIDE_KP;
+float path_line_guide_min_cmps = PF_LINE_GUIDE_MIN_CMPS;
+float path_position_speed_limit_factor = PF_POSITION_SPEED_FACTOR_DEFAULT;
 float path_yaw_feedforward_min_degps = PF_YAW_FEEDFORWARD_MIN_DEGPS;
 float path_yaw_feedforward_deadband_deg = PF_YAW_TOLERANCE_DEG;
 
@@ -281,12 +294,12 @@ static void pf_clear_debug(void)
     memset(&g_pf.debug, 0, sizeof(g_pf.debug));
 }
 
-static void pf_reset_arrival_brake(void)
+static void pf_reset_approach_brake(void)
 {
-    g_pf.arrival_ref_speed_cmps = 0.0f;
-    g_pf.arrival_dir_x = 0.0f;
-    g_pf.arrival_dir_y = 0.0f;
-    g_pf.arrival_braking = 0U;
+    g_pf.approach_ref_speed_cmps = 0.0f;
+    g_pf.approach_dir_x = 0.0f;
+    g_pf.approach_dir_y = 0.0f;
+    g_pf.approach_braking = 0U;
 }
 
 static void pf_reset_speed(void)
@@ -298,7 +311,7 @@ static void pf_reset_speed(void)
     g_pf.last_ref_speed_cmps = 0.0f;
     g_pf.profile_target_idx = PF_INVALID_INDEX;
     g_pf.profile_active = 0U;
-    pf_reset_arrival_brake();
+    pf_reset_approach_brake();
 }
 
 static void pf_invalidate_active_profile(void)
@@ -900,7 +913,168 @@ static void pf_plan_scurve_speed(const pf_geometry_t *geometry,
     if (geometry->distance_m <= g_pf.position_tolerance_m)
     {
         speed_plan->ref_speed_cmps = 0.0f;
+        /* Keep a low cap so the position loop can still aim at the target
+         * center during the settle window. */
+        speed_plan->safety_cap_cmps = PF_ARRIVAL_MAX_SPEED_CMPS;
     }
+    g_pf.last_ref_speed_cmps = speed_plan->ref_speed_cmps;
+}
+
+static float pf_position_speed_limit_cmps(float distance_m)
+{
+    float decel_cmpss;
+    float braking_distance_cm;
+    float speed_limit_cmps;
+    float max_speed_cmps;
+
+    decel_cmpss = (g_pf.active_scurve_cfg.accel_cmpss > 0.0f) ?
+                  g_pf.active_scurve_cfg.accel_cmpss :
+                  PF_APPROACH_DECEL_CMPS2;
+    /* The speed envelope ends at the target center.  Position tolerance is
+     * only the final acceptance margin; it must not shorten braking distance. */
+    braking_distance_cm = fmaxf(distance_m, 0.0f) * 100.0f;
+    /* This is the speed that can decelerate to exactly zero at the target
+     * center.  The 3 cm/s arrival criterion is deliberately not part of this
+     * envelope; the tunable factor supplies the braking safety margin. */
+    speed_limit_cmps = sqrtf(2.0f * fmaxf(decel_cmpss, 1.0f) *
+                             braking_distance_cm);
+
+    max_speed_cmps = (g_pf.active_scurve_cfg.max_speed_cmps > 0.0f) ?
+                     g_pf.active_scurve_cfg.max_speed_cmps :
+                     g_pf.max_linear_speed_mps * 100.0f;
+    return fminf(speed_limit_cmps, fmaxf(max_speed_cmps, 0.0f));
+}
+
+static float pf_position_speed_factor(void)
+{
+    return pf_clamp(path_position_speed_limit_factor,
+                    PF_POSITION_SPEED_FACTOR_MIN,
+                    PF_POSITION_SPEED_FACTOR_MAX);
+}
+
+static float pf_position_speed_threshold_cmps(float distance_m)
+{
+    float factor = pf_position_speed_factor();
+    return pf_position_speed_limit_cmps(distance_m) * factor;
+}
+
+static float pf_approach_remaining_m(const pf_geometry_t *geometry)
+{
+    if (geometry == NULL)
+    {
+        return 0.0f;
+    }
+
+    return geometry->dx_m * g_pf.approach_dir_x +
+           geometry->dy_m * g_pf.approach_dir_y;
+}
+
+static void pf_begin_approach_braking(const pf_geometry_t *geometry)
+{
+    float segment_start_x_m;
+    float segment_start_y_m;
+    float segment_dx_m;
+    float segment_dy_m;
+    float segment_length_m;
+    float max_speed_cmps;
+
+    if (geometry == NULL || g_pf.approach_braking)
+    {
+        return;
+    }
+
+    segment_start_x_m = g_pf.pose.x_m;
+    segment_start_y_m = g_pf.pose.y_m;
+    if (g_pf.path != NULL && g_pf.target_idx > 0U &&
+        g_pf.target_idx < g_pf.steps)
+    {
+        pf_point_to_world(g_pf.path[g_pf.target_idx - 1U],
+                          g_pf.path_grid_m,
+                          &segment_start_x_m,
+                          &segment_start_y_m);
+    }
+
+    segment_dx_m = geometry->target_x_m - segment_start_x_m;
+    segment_dy_m = geometry->target_y_m - segment_start_y_m;
+    segment_length_m = sqrtf(segment_dx_m * segment_dx_m +
+                             segment_dy_m * segment_dy_m);
+    if (segment_length_m > PF_MIN_VALID_GRID_M)
+    {
+        g_pf.approach_dir_x = segment_dx_m / segment_length_m;
+        g_pf.approach_dir_y = segment_dy_m / segment_length_m;
+    }
+    else if (geometry->distance_m > PF_MIN_VALID_GRID_M)
+    {
+        g_pf.approach_dir_x = geometry->dx_m / geometry->distance_m;
+        g_pf.approach_dir_y = geometry->dy_m / geometry->distance_m;
+    }
+    else
+    {
+        g_pf.approach_dir_x = 0.0f;
+        g_pf.approach_dir_y = 0.0f;
+    }
+
+    max_speed_cmps = (g_pf.active_scurve_cfg.max_speed_cmps > 0.0f) ?
+                     g_pf.active_scurve_cfg.max_speed_cmps :
+                     g_pf.max_linear_speed_mps * 100.0f;
+    /* Enter braking from the lower of the existing S-curve command and the
+     * measured speed.  Using the larger value raised an already-decreasing
+     * S-curve reference toward wheel speed exactly when extra deceleration
+     * was required, producing a repeatable 4-5 cm overshoot. */
+    g_pf.approach_ref_speed_cmps =
+        pf_clamp(fminf(g_pf.last_ref_speed_cmps, g_pf.linear_speed_cmps),
+                 0.0f,
+                 fmaxf(max_speed_cmps, PF_ARRIVAL_MAX_SPEED_CMPS));
+    g_pf.approach_braking = 1U;
+    pf_invalidate_active_profile();
+    PID_Clear(&pid_stay);
+    PID_Clear(&pid_stay_y);
+}
+
+static void pf_plan_approach_deceleration(const pf_geometry_t *geometry,
+                                          pf_speed_plan_t *speed_plan)
+{
+    float decel_cmpss;
+    float decel_step_cmps;
+    float envelope_speed_cmps;
+    float remaining_m;
+
+    if (geometry == NULL || speed_plan == NULL)
+    {
+        return;
+    }
+
+    decel_cmpss = (g_pf.active_scurve_cfg.accel_cmpss > 0.0f) ?
+                  g_pf.active_scurve_cfg.accel_cmpss :
+                  PF_APPROACH_DECEL_CMPS2;
+    decel_step_cmps = fmaxf(decel_cmpss, 1.0f) * PF_DT_S;
+    remaining_m = pf_approach_remaining_m(geometry);
+    envelope_speed_cmps = (remaining_m > 0.0f) ?
+        pf_position_speed_threshold_cmps(remaining_m) : 0.0f;
+
+    if (remaining_m <= 0.0f)
+    {
+        /* Euclidean distance grows again after crossing the target line.
+         * Signed remaining distance prevents that growth from sustaining an
+         * old forward command: stop commanding the original direction now. */
+        g_pf.approach_ref_speed_cmps = 0.0f;
+    }
+
+    /* The approach reference is latched to this target and follows the
+     * distance envelope instead of counting down to zero by time alone.
+     * While the reference is above the envelope, slew toward it without
+     * crossing below it, so an early trigger cannot stop the car short. */
+    if (remaining_m > 0.0f &&
+        g_pf.approach_ref_speed_cmps > envelope_speed_cmps)
+    {
+        g_pf.approach_ref_speed_cmps =
+            fmaxf(g_pf.approach_ref_speed_cmps - decel_step_cmps,
+                  envelope_speed_cmps);
+    }
+
+    memset(speed_plan, 0, sizeof(*speed_plan));
+    speed_plan->ref_speed_cmps = g_pf.approach_ref_speed_cmps;
+    speed_plan->safety_cap_cmps = g_pf.approach_ref_speed_cmps;
     g_pf.last_ref_speed_cmps = speed_plan->ref_speed_cmps;
 }
 
@@ -958,6 +1132,8 @@ static void pf_apply_position_loop(const pf_geometry_t *geometry,
                                    float *vy_world_cmps)
 {
     float blend;
+    float position_vx_cmps;
+    float position_vy_cmps;
 
     if (geometry == NULL || vx_world_cmps == NULL || vy_world_cmps == NULL)
     {
@@ -970,18 +1146,25 @@ static void pf_apply_position_loop(const pf_geometry_t *geometry,
         return;
     }
 
-    *vx_world_cmps += blend *
+    position_vx_cmps =
         (float)PID_Location_Calculate(&pid_stay,
                                       g_pf.pose.x_m * 100.0f,
                                       geometry->target_x_m * 100.0f);
-    *vy_world_cmps += blend *
+    position_vy_cmps =
         (float)PID_Location_Calculate(&pid_stay_y,
                                       g_pf.pose.y_m * 100.0f,
                                       geometry->target_y_m * 100.0f);
+
+    /* The S-curve owns the main longitudinal motion.  This loop only adds a
+     * gradually introduced residual-position correction, so normal S-curve
+     * deceleration is allowed to finish and any shortfall is pulled to the
+     * target center.  Line guidance is disabled while this correction owns
+     * the near-target stage. */
+    *vx_world_cmps += blend * position_vx_cmps;
+    *vy_world_cmps += blend * position_vy_cmps;
 }
 
 static uint8 pf_apply_line_guidance(const pf_geometry_t *geometry,
-                                    float ref_speed_cmps,
                                     float *vx_world_cmps,
                                     float *vy_world_cmps)
 {
@@ -1053,14 +1236,18 @@ static uint8 pf_apply_line_guidance(const pf_geometry_t *geometry,
         trim_cmps = -trim_cmps;
     }
 
-    *vx_world_cmps = ref_speed_cmps * tangent_x + trim_cmps * normal_x;
-    *vy_world_cmps = ref_speed_cmps * tangent_y + trim_cmps * normal_y;
+    /* Only add the cross-track correction.  The fixed segment tangent owns
+     * longitudinal motion; line guidance must not add a second longitudinal
+     * command or change the one-way arrival direction. */
+    *vx_world_cmps += trim_cmps * normal_x;
+    *vy_world_cmps += trim_cmps * normal_y;
     return 1U;
 }
 
-static void pf_limit_world_speed(float *vx_world_cmps, float *vy_world_cmps)
+static void pf_limit_world_speed(float *vx_world_cmps,
+                                 float *vy_world_cmps,
+                                 float max_speed_cmps)
 {
-    float max_speed_cmps;
     float speed_norm_cmps;
     float scale;
 
@@ -1069,8 +1256,7 @@ static void pf_limit_world_speed(float *vx_world_cmps, float *vy_world_cmps)
         return;
     }
 
-    max_speed_cmps = g_pf.active_scurve_cfg.max_speed_cmps;
-    if (max_speed_cmps <= 0.0f)
+    if (max_speed_cmps < 0.0f)
     {
         max_speed_cmps =
             g_default_speed_bands[PATH_FOLLOW_SCURVE_BAND_COUNT - 1U].vmax_mps * 100.0f;
@@ -1080,6 +1266,13 @@ static void pf_limit_world_speed(float *vx_world_cmps, float *vy_world_cmps)
                             *vy_world_cmps * *vy_world_cmps);
     if (speed_norm_cmps <= max_speed_cmps || speed_norm_cmps <= 0.0f)
     {
+        return;
+    }
+
+    if (max_speed_cmps <= 0.0f)
+    {
+        *vx_world_cmps = 0.0f;
+        *vy_world_cmps = 0.0f;
         return;
     }
 
@@ -1280,7 +1473,7 @@ static uint8 pf_handle_pause(float yaw_deg, path_follow_output_t *out)
 
 static uint8 pf_advance_reached_target(path_follow_output_t *out)
 {
-    pf_reset_arrival_brake();
+    pf_reset_approach_brake();
 
     if (pf_target_needs_pause())
     {
@@ -1299,85 +1492,6 @@ static uint8 pf_advance_reached_target(path_follow_output_t *out)
     return 0U;
 }
 
-static void pf_begin_arrival_deceleration(const pf_geometry_t *geometry)
-{
-    float segment_start_x_m;
-    float segment_start_y_m;
-    float segment_dx_m;
-    float segment_dy_m;
-    float segment_length_m;
-    float max_speed_cmps;
-
-    if (geometry == NULL)
-    {
-        return;
-    }
-
-    segment_start_x_m = g_pf.pose.x_m;
-    segment_start_y_m = g_pf.pose.y_m;
-    if (g_pf.path != NULL && g_pf.target_idx > 0U &&
-        g_pf.target_idx < g_pf.steps)
-    {
-        pf_point_to_world(g_pf.path[g_pf.target_idx - 1U],
-                          g_pf.path_grid_m,
-                          &segment_start_x_m,
-                          &segment_start_y_m);
-    }
-
-    segment_dx_m = geometry->target_x_m - segment_start_x_m;
-    segment_dy_m = geometry->target_y_m - segment_start_y_m;
-    segment_length_m = sqrtf(segment_dx_m * segment_dx_m +
-                             segment_dy_m * segment_dy_m);
-    if (segment_length_m > PF_MIN_VALID_GRID_M)
-    {
-        g_pf.arrival_dir_x = segment_dx_m / segment_length_m;
-        g_pf.arrival_dir_y = segment_dy_m / segment_length_m;
-    }
-    else if (geometry->distance_m > PF_MIN_VALID_GRID_M)
-    {
-        g_pf.arrival_dir_x = geometry->dx_m / geometry->distance_m;
-        g_pf.arrival_dir_y = geometry->dy_m / geometry->distance_m;
-    }
-    else
-    {
-        g_pf.arrival_dir_x = 0.0f;
-        g_pf.arrival_dir_y = 0.0f;
-    }
-
-    max_speed_cmps = fmaxf(g_pf.max_linear_speed_mps * 100.0f,
-                            PF_ARRIVAL_MAX_SPEED_CMPS);
-    g_pf.arrival_ref_speed_cmps =
-        pf_clamp(fmaxf(g_pf.last_ref_speed_cmps, g_pf.linear_speed_cmps),
-                 0.0f,
-                 max_speed_cmps);
-    g_pf.arrival_braking = 1U;
-    pf_invalidate_active_profile();
-    PID_Clear(&pid_stay);
-    PID_Clear(&pid_stay_y);
-}
-
-static void pf_plan_arrival_deceleration(pf_speed_plan_t *speed_plan)
-{
-    float decel_cmpss;
-    float decel_step_cmps;
-
-    if (speed_plan == NULL)
-    {
-        return;
-    }
-
-    decel_cmpss = (g_pf.active_scurve_cfg.accel_cmpss > 0.0f) ?
-                  g_pf.active_scurve_cfg.accel_cmpss :
-                  PF_ARRIVAL_DECEL_CMPS2;
-    decel_step_cmps = fmaxf(decel_cmpss, 1.0f) * PF_DT_S;
-    g_pf.arrival_ref_speed_cmps =
-        fmaxf(g_pf.arrival_ref_speed_cmps - decel_step_cmps, 0.0f);
-
-    memset(speed_plan, 0, sizeof(*speed_plan));
-    speed_plan->ref_speed_cmps = g_pf.arrival_ref_speed_cmps;
-    g_pf.last_ref_speed_cmps = speed_plan->ref_speed_cmps;
-}
-
 static uint8 pf_prepare_geometry(pf_geometry_t *geometry, path_follow_output_t *out)
 {
     if (geometry == NULL)
@@ -1390,6 +1504,11 @@ static uint8 pf_prepare_geometry(pf_geometry_t *geometry, path_follow_output_t *
         Position target = g_pf.path[g_pf.target_idx];
         float segment_start_x_m = g_pf.pose.x_m;
         float segment_start_y_m = g_pf.pose.y_m;
+        float segment_dx_m;
+        float segment_dy_m;
+        float segment_dir_x = 0.0f;
+        float segment_dir_y = 0.0f;
+        uint8 target_plane_crossed = 0U;
 
         pf_sync_pause_cursor();
         pf_point_to_world(target,
@@ -1409,47 +1528,86 @@ static uint8 pf_prepare_geometry(pf_geometry_t *geometry, path_follow_output_t *
                               &segment_start_x_m,
                               &segment_start_y_m);
         }
-        geometry->planned_distance_m =
-            sqrtf((geometry->target_x_m - segment_start_x_m) *
-                  (geometry->target_x_m - segment_start_x_m) +
-                  (geometry->target_y_m - segment_start_y_m) *
-                  (geometry->target_y_m - segment_start_y_m));
+        segment_dx_m = geometry->target_x_m - segment_start_x_m;
+        segment_dy_m = geometry->target_y_m - segment_start_y_m;
+        geometry->planned_distance_m = sqrtf(segment_dx_m * segment_dx_m +
+                                             segment_dy_m * segment_dy_m);
+        geometry->along_track_remaining_m = geometry->distance_m;
 
-        if (g_pf.arrival_braking)
+        /* Always use the fixed path-segment direction to decide whether the
+         * target plane has been crossed.  The current-position-to-target
+         * direction reverses after an overshoot, so it cannot be used for a
+         * one-way arrival decision. */
+        if (geometry->planned_distance_m > PF_MIN_VALID_GRID_M)
         {
-            if (g_pf.linear_speed_cmps >= PF_ARRIVAL_MAX_SPEED_CMPS)
-            {
-                geometry->dir_x = g_pf.arrival_dir_x;
-                geometry->dir_y = g_pf.arrival_dir_y;
-                geometry->segment_axis = pf_segment_axis(geometry->dx_m,
-                                                          geometry->dy_m);
-                car_direction = geometry->segment_axis;
-                return 1U;
-            }
-            pf_reset_arrival_brake();
+            segment_dir_x = segment_dx_m / geometry->planned_distance_m;
+            segment_dir_y = segment_dy_m / geometry->planned_distance_m;
+            geometry->along_track_remaining_m =
+                geometry->dx_m * segment_dir_x +
+                geometry->dy_m * segment_dir_y;
+            target_plane_crossed =
+                (geometry->along_track_remaining_m <= 0.0f) ? 1U : 0U;
         }
 
-        if (geometry->distance_m <= g_pf.position_tolerance_m)
-        {
-            if (g_pf.linear_speed_cmps < PF_ARRIVAL_MAX_SPEED_CMPS)
-            {
-                if (!pf_advance_reached_target(out))
-                {
-                    return 0U;
-                }
-                continue;
-            }
+        geometry->within_tolerance =
+            (geometry->distance_m <= g_pf.position_tolerance_m) ? 1U : 0U;
 
-            pf_begin_arrival_deceleration(geometry);
-            geometry->dir_x = g_pf.arrival_dir_x;
-            geometry->dir_y = g_pf.arrival_dir_y;
-            geometry->segment_axis = pf_segment_axis(geometry->dx_m,
-                                                      geometry->dy_m);
+        if ((geometry->within_tolerance || target_plane_crossed) &&
+            g_pf.linear_speed_cmps <= PF_ARRIVAL_MAX_SPEED_CMPS)
+        {
+            /* Competitive path: accept immediately when speed is safe.  A
+             * crossed target plane is also accepted even if lateral error
+             * leaves the car outside the radial tolerance, because reverse
+             * correction toward the old target is explicitly forbidden. */
+            if (!pf_advance_reached_target(out))
+            {
+                return 0U;
+            }
+            if (!g_pf.active || g_pf.target_idx >= g_pf.steps)
+            {
+                return 0U;
+            }
+            continue;
+        }
+
+        if (g_pf.approach_braking)
+        {
+            /* Once triggered, keep this state latched until this target is
+             * accepted.  Falling below 3 cm/s before the tolerance boundary
+             * must not re-enable the position loop. */
+            geometry->dir_x = g_pf.approach_dir_x;
+            geometry->dir_y = g_pf.approach_dir_y;
+            geometry->segment_axis =
+                pf_segment_axis(geometry->dir_x, geometry->dir_y);
             car_direction = geometry->segment_axis;
             return 1U;
         }
 
-        if (geometry->distance_m > PF_MIN_VALID_GRID_M)
+        if (geometry->within_tolerance || target_plane_crossed)
+        {
+            /* Inside tolerance or beyond the target plane while still too
+             * fast: enter the latched one-way brake state.  Its signed
+             * remaining distance clamps the forward reference to zero after
+             * crossing; no reverse reference can be generated. */
+            pf_begin_approach_braking(geometry);
+            geometry->dir_x = g_pf.approach_dir_x;
+            geometry->dir_y = g_pf.approach_dir_y;
+            geometry->segment_axis =
+                pf_segment_axis(geometry->dir_x, geometry->dir_y);
+            car_direction = geometry->segment_axis;
+            return 1U;
+        }
+
+        if (geometry->planned_distance_m > PF_MIN_VALID_GRID_M)
+        {
+            /* During line-guidance mode the base velocity follows only the
+             * fixed segment tangent.  Cross-track motion is exclusively
+             * supplied by pf_apply_line_guidance(); near-target position
+             * motion is exclusively supplied by the position loop. */
+            geometry->dir_x = segment_dir_x;
+            geometry->dir_y = segment_dir_y;
+        }
+        else if (geometry->distance_m > PF_MIN_VALID_GRID_M)
         {
             geometry->dir_x = geometry->dx_m / geometry->distance_m;
             geometry->dir_y = geometry->dy_m / geometry->distance_m;
@@ -1459,7 +1617,7 @@ static uint8 pf_prepare_geometry(pf_geometry_t *geometry, path_follow_output_t *
             geometry->dir_x = 0.0f;
             geometry->dir_y = 0.0f;
         }
-        geometry->segment_axis = pf_segment_axis(geometry->dx_m, geometry->dy_m);
+        geometry->segment_axis = pf_segment_axis(geometry->dir_x, geometry->dir_y);
         car_direction = geometry->segment_axis;
         return 1U;
     }
@@ -1528,10 +1686,8 @@ static void pf_start_axis_move(float target_x_m,
                                max_delta_m / local_half_span);
     int target_row;
     int target_col;
-    uint8 x_first = (fabsf(dx_m) >= fabsf(dy_m)) ? 1U : 0U;
-    size_t count = 1U;
 
-    if (buffer == NULL || capacity < 3U)
+    if (buffer == NULL || capacity < 2U)
     {
         return;
     }
@@ -1552,38 +1708,14 @@ static void pf_start_axis_move(float target_x_m,
     target_row = (int)pf_clamp((float)target_row, 0.0f, 255.0f);
     target_col = (int)pf_clamp((float)target_col, 0.0f, 255.0f);
 
-    if (x_first)
-    {
-        if (fabsf(dx_m) > epsilon_m)
-        {
-            buffer[count].row = (uint8)target_row;
-            buffer[count].col = buffer[0].col;
-            ++count;
-        }
-        if (fabsf(dy_m) > epsilon_m)
-        {
-            buffer[count].row = (uint8)target_row;
-            buffer[count].col = (uint8)target_col;
-            ++count;
-        }
-    }
-    else
-    {
-        if (fabsf(dy_m) > epsilon_m)
-        {
-            buffer[count].row = buffer[0].row;
-            buffer[count].col = (uint8)target_col;
-            ++count;
-        }
-        if (fabsf(dx_m) > epsilon_m)
-        {
-            buffer[count].row = (uint8)target_row;
-            buffer[count].col = (uint8)target_col;
-            ++count;
-        }
-    }
+    /* A relative/point move is one straight segment in world coordinates.
+     * Splitting a slightly diagonal command into X then Y created a false
+     * arrival between the two axes: the car stopped after the long leg and
+     * restarted for a tiny yaw-induced tail segment. */
+    buffer[1].row = (uint8)target_row;
+    buffer[1].col = (uint8)target_col;
 
-    pf_apply_path(buffer, count, local_grid_m, 0U);
+    pf_apply_path(buffer, 2U, local_grid_m, 0U);
     g_pf.path_origin_x_m = g_pf.pose.x_m - local_center * local_grid_m;
     g_pf.path_origin_y_m = g_pf.pose.y_m - local_center * local_grid_m;
 }
@@ -1770,6 +1902,10 @@ void path_follow_update(float yaw_deg, path_follow_output_t *out)
     float vx_world_cmps;
     float vy_world_cmps;
     float yaw_error_deg;
+    float position_blend;
+    float position_speed_threshold_cmps;
+    uint8 use_position_loop;
+    uint8 use_line_guidance;
 
     pf_clear_output(out);
     pf_update_odometry(yaw_deg);
@@ -1821,36 +1957,65 @@ void path_follow_update(float yaw_deg, path_follow_output_t *out)
     }
 
     pf_sync_position_pid_gains();
-    if (g_pf.arrival_braking)
+    position_blend = pf_position_loop_blend(geometry.distance_m);
+    position_speed_threshold_cmps = pf_position_speed_threshold_cmps(
+        fmaxf(geometry.along_track_remaining_m, 0.0f));
+
+    if (g_pf.approach_braking)
     {
-        pf_plan_arrival_deceleration(&speed_plan);
+        pf_plan_approach_deceleration(&geometry, &speed_plan);
+        geometry.dir_x = g_pf.approach_dir_x;
+        geometry.dir_y = g_pf.approach_dir_y;
     }
     else
     {
         pf_plan_scurve_speed(&geometry, &speed_plan);
+        /* The normal S-curve must run unchanged.  Only after entering the
+         * near-target position-loop zone may excessive actual speed switch
+         * ownership to the one-way braking state.  The factor is therefore a
+         * guard threshold, never an S-curve speed multiplier. */
+        if (position_blend > 0.0f &&
+            g_pf.linear_speed_cmps > position_speed_threshold_cmps &&
+            (!geometry.within_tolerance ||
+             g_pf.linear_speed_cmps > PF_ARRIVAL_MAX_SPEED_CMPS))
+        {
+            pf_begin_approach_braking(&geometry);
+            geometry.dir_x = g_pf.approach_dir_x;
+            geometry.dir_y = g_pf.approach_dir_y;
+            pf_plan_approach_deceleration(&geometry, &speed_plan);
+        }
     }
+
     vx_world_cmps = speed_plan.ref_speed_cmps * geometry.dir_x;
     vy_world_cmps = speed_plan.ref_speed_cmps * geometry.dir_y;
-    if (!g_pf.arrival_braking &&
-        pf_position_loop_blend(geometry.distance_m) <= 0.0f)
-    {
-        (void)pf_apply_line_guidance(&geometry,
-                                     speed_plan.ref_speed_cmps,
-                                     &vx_world_cmps,
-                                     &vy_world_cmps);
-    }
-    if (!g_pf.arrival_braking)
+    use_position_loop = (!g_pf.approach_braking && position_blend > 0.0f) ? 1U : 0U;
+    use_line_guidance = (g_pf.approach_braking || position_blend <= 0.0f) ? 1U : 0U;
+    if (use_position_loop)
     {
         pf_apply_position_loop(&geometry, &vx_world_cmps, &vy_world_cmps);
     }
-    pf_limit_world_speed(&vx_world_cmps, &vy_world_cmps);
+    else if (use_line_guidance)
+    {
+        (void)pf_apply_line_guidance(&geometry,
+                                     &vx_world_cmps,
+                                     &vy_world_cmps);
+    }
+    pf_limit_world_speed(&vx_world_cmps,
+                         &vy_world_cmps,
+                         speed_plan.safety_cap_cmps);
 
     g_pf.debug.distance_m = geometry.distance_m;
     g_pf.debug.dir_x = geometry.dir_x;
     g_pf.debug.dir_y = geometry.dir_y;
-    g_pf.debug.speed_ref_cmps = speed_plan.ref_speed_cmps;
+    g_pf.debug.speed_ref_cmps = sqrtf(vx_world_cmps * vx_world_cmps +
+                                      vy_world_cmps * vy_world_cmps);
+    g_pf.debug.speed_cap_cmps = speed_plan.safety_cap_cmps;
     g_pf.debug.target_x_m = geometry.target_x_m;
     g_pf.debug.target_y_m = geometry.target_y_m;
+    g_pf.debug.position_speed_limit_cmps = position_speed_threshold_cmps;
+    g_pf.debug.approach_braking_active = g_pf.approach_braking;
+    g_pf.debug.position_loop_active = use_position_loop;
+    g_pf.debug.line_guidance_active = use_line_guidance;
     g_pf.debug.segment_axis = geometry.segment_axis;
 
     if (out != NULL)
@@ -1920,11 +2085,20 @@ void path_follow_get_status(path_follow_status_t *status)
     status->dir_y = g_pf.debug.dir_y;
     status->speed_ref_cmps = g_pf.debug.speed_ref_cmps;
     status->actual_speed_cmps = g_pf.linear_speed_cmps;
+    status->speed_cap_cmps = g_pf.debug.speed_cap_cmps;
+    status->position_speed_limit_cmps =
+        g_pf.debug.position_speed_limit_cmps;
+    status->position_speed_factor = pf_position_speed_factor();
     status->target_yaw_deg = g_pf.target_yaw_deg;
     status->active = (g_pf.active || g_pf.rotate_only_active) ? 1U : 0U;
     status->reached = status->active ? 0U : 1U;
     status->paused = g_pf.paused;
     status->yaw_only_active = g_pf.rotate_only_active;
+    status->overspeed_guard_active = g_pf.debug.approach_braking_active;
+    status->approach_braking_active =
+        g_pf.debug.approach_braking_active;
+    status->position_loop_active = g_pf.debug.position_loop_active;
+    status->line_guidance_active = g_pf.debug.line_guidance_active;
     status->segment_axis = g_pf.debug.segment_axis;
     status->target_idx = g_pf.target_idx;
     status->yaw_error_deg = pf_yaw_error_deg(g_pf.pose.yaw_deg,

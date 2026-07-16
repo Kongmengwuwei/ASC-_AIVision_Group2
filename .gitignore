@@ -115,6 +115,9 @@ RTE/Device/RTE_Device.h
 **pycache**/
 *.pyc
 
+# Local Codex / RT1064 debug-tool dependencies
+.codex_tmp/
+
 ############################
 
 # CMake (if mixed build system)

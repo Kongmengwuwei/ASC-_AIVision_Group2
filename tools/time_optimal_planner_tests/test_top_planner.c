@@ -227,7 +227,7 @@ static void test_repeated_ids(void)
     assert(top_verify_result(&problem, &config, &result, &report) == TOP_VERIFY_OK);
 }
 
-static void test_interleaved_delivery(void)
+static void test_identification_precedes_delivery(void)
 {
     top_problem_t problem;
     top_config_t config;
@@ -249,9 +249,9 @@ static void test_interleaved_delivery(void)
     {
         top_status_t status = top_plan(&problem, &config, &result);
         if (status != TOP_STATUS_PARTIAL_REPLAN ||
-            result.requested_identify_kind != TOP_OBJECT_NONE)
+            result.requested_identify_kind == TOP_OBJECT_NONE)
         {
-            printf("interleave status=%s request=%d mask=%u motion=%u\n",
+            printf("staged status=%s request=%d mask=%u motion=%u\n",
                    top_status_string(status),
                    (int)result.requested_identify_kind,
                    result.end_state.box_active_mask,
@@ -261,8 +261,15 @@ static void test_interleaved_delivery(void)
         assert(status == TOP_STATUS_PARTIAL_REPLAN);
     }
     assert(result.needs_replan);
-    assert(result.requested_identify_kind == TOP_OBJECT_NONE);
-    assert((result.end_state.box_active_mask & 1U) == 0U);
+    assert(result.requested_identify_kind == TOP_OBJECT_BOX ||
+           result.requested_identify_kind == TOP_OBJECT_TARGET);
+    assert(result.end_state.box_active_mask == (top_object_mask_t)0x07U);
+    assert(result.end_state.target_active_mask == (top_object_mask_t)0x07U);
+    for (uint16_t i = 0U; i < result.segment_count; i++)
+    {
+        assert(result.segments[i].action != TOP_ACTION_PUSH_BOX);
+        assert(result.segments[i].action != TOP_ACTION_PUSH_BOMB);
+    }
 }
 
 static void test_control_flow(void)
@@ -294,6 +301,53 @@ static void test_control_flow(void)
     assert(control.stage == TOP_CONTROL_FINISHED);
 }
 
+static void test_ten_object_capacity(void)
+{
+    top_problem_t problem;
+    top_result_t result;
+    top_object_mask_t all_objects =
+        (top_object_mask_t)((UINT16_C(1) << TOP_MAX_BOXES) - UINT16_C(1));
+
+    assert(TOP_MAX_BOXES == 10U);
+    assert(TOP_MAX_TARGETS == 10U);
+    top_problem_clear(&problem);
+    problem.match_mode = TOP_MODE_ID_MATCH;
+    problem.car = (top_cell_t){9, 13};
+    problem.heading = TOP_HEADING_RIGHT;
+    problem.box_count = TOP_MAX_BOXES;
+    problem.target_count = TOP_MAX_TARGETS;
+    for (uint8_t i = 0U; i < TOP_MAX_BOXES; i++)
+    {
+        problem.boxes[i] = object_at(0, i, i, 1U);
+        problem.targets[i] = object_at(2, i, i, 1U);
+    }
+    assert(top_problem_validate(&problem) == TOP_STATUS_OK);
+
+    memset(&result, 0, sizeof(result));
+    result.status = TOP_STATUS_PARTIAL_REPLAN;
+    result.end_state.car = problem.car;
+    result.end_state.heading = problem.heading;
+    result.end_state.box_active_mask = all_objects;
+    result.end_state.target_active_mask = all_objects;
+    for (uint8_t i = 0U; i < TOP_MAX_BOXES; i++)
+        result.end_state.box_cells[i] = problem.boxes[i].cell;
+    assert(top_problem_apply_result(&problem, &result) == TOP_STATUS_OK);
+    assert(top_cell_valid(problem.boxes[8].cell));
+    assert(top_cell_valid(problem.boxes[9].cell));
+
+    result.end_state.box_active_mask &=
+        (top_object_mask_t)~((top_object_mask_t)(UINT16_C(1) << 8U) |
+                             (top_object_mask_t)(UINT16_C(1) << 9U));
+    result.end_state.target_active_mask &=
+        (top_object_mask_t)~((top_object_mask_t)(UINT16_C(1) << 8U) |
+                             (top_object_mask_t)(UINT16_C(1) << 9U));
+    assert(top_problem_apply_result(&problem, &result) == TOP_STATUS_OK);
+    assert(!top_cell_valid(problem.boxes[8].cell));
+    assert(!top_cell_valid(problem.boxes[9].cell));
+    assert(!top_cell_valid(problem.targets[8].cell));
+    assert(!top_cell_valid(problem.targets[9].cell));
+}
+
 int main(void)
 {
     puts("grid"); fflush(stdout);
@@ -308,10 +362,12 @@ int main(void)
     test_last_pair_inference();
     puts("repeat"); fflush(stdout);
     test_repeated_ids();
-    puts("interleave"); fflush(stdout);
-    test_interleaved_delivery();
+    puts("staged"); fflush(stdout);
+    test_identification_precedes_delivery();
     puts("control"); fflush(stdout);
     test_control_flow();
+    puts("capacity"); fflush(stdout);
+    test_ten_object_capacity();
     puts("top planner smoke tests passed");
     return 0;
 }

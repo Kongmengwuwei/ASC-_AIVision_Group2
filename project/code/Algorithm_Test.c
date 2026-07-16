@@ -4,6 +4,12 @@
 #include "path_follow.h"
 #include <string.h>
 
+#if ALGORITHM_TEST_BOARD_BENCHMARK
+#include "Game_logic.h"
+#include "fsl_gpt.h"
+#include <stdio.h>
+#endif
+
 static uint8 s_preset_input_enabled = 0U;
 static MapPresetConfig s_active_preset;
 
@@ -287,3 +293,552 @@ uint8 Algorithm_Test_PresetInput_GetObjectId(Position object_pos, uint8 is_targe
     }
     return 0U;
 }
+
+#if ALGORITHM_TEST_BOARD_BENCHMARK
+
+#define ALGORITHM_TEST_BENCHMARK_TIMER_HZ 1000000UL
+
+volatile algorithm_test_benchmark_report_t g_algorithm_test_benchmark;
+
+/* Large work buffers are static so planner tests do not consume the small C stack. */
+static MapPresetConfig s_benchmark_config;
+static path_map_snapshot_t s_benchmark_before;
+static path_map_snapshot_t s_benchmark_after;
+static Position s_benchmark_exec_path[MAX_CAR_PATH];
+static Position s_benchmark_initial_boxes[MAX_BOXES];
+static Position s_benchmark_initial_targets[MAX_TARGETS];
+
+static void benchmark_timer_init(void)
+{
+    gpt_config_t config;
+
+    GPT_GetDefaultConfig(&config);
+    config.clockSource = kGPT_ClockSource_Osc;
+    config.divider = 24U;
+    config.enableFreeRun = true;
+    config.enableRunInDbg = true;
+    GPT_Init(GPT1, &config);
+    GPT_StartTimer(GPT1);
+}
+
+static uint32 benchmark_timer_now_us(void)
+{
+    return GPT_GetCurrentTimerCount(GPT1);
+}
+
+static void benchmark_load_config(const MapPresetConfig *config, uint8 known_ids)
+{
+    size_t i;
+
+    memset(obstacles, 0, sizeof(obstacles));
+    memset(boxes, 0, sizeof(boxes));
+    memset(targets, 0, sizeof(targets));
+    memset(bombs, 0, sizeof(bombs));
+    memset(car_path, 0, sizeof(car_path));
+
+    Obstacles_count = config->obstacles_count;
+    Boxes_count = config->boxes_count;
+    Targets_count = config->targets_count;
+    Bombs_count = config->bombs_count;
+    Car_path_count = 0U;
+    car = config->car_start;
+
+    memcpy(obstacles, config->obstacles, Obstacles_count * sizeof(Position));
+    memcpy(boxes, config->boxes, Boxes_count * sizeof(Position));
+    memcpy(targets, config->targets, Targets_count * sizeof(Position));
+    memcpy(bombs, config->bombs, Bombs_count * sizeof(Position));
+
+    if (!known_ids)
+    {
+        for (i = 0U; i < Boxes_count; i++)
+        {
+            boxes[i].id = MAP_PRESET_UNKNOWN_ID;
+        }
+        for (i = 0U; i < Targets_count; i++)
+        {
+            targets[i].id = MAP_PRESET_UNKNOWN_ID;
+        }
+    }
+}
+
+/*
+ * Continue push planning from the state produced by identification.
+ * Recognition discovers IDs at runtime, while the benchmark obtains the same
+ * IDs from the preset by cell. Walls/bombs/car remain exactly as identification
+ * left them, including any optional bomb shortcut.
+ */
+static uint8 benchmark_restore_preset_ids_after_identify(const MapPresetConfig *config)
+{
+    size_t i;
+    size_t j;
+
+    if (config == NULL ||
+        Boxes_count != config->boxes_count ||
+        Targets_count != config->targets_count)
+    {
+        return 0U;
+    }
+
+    for (i = 0U; i < Boxes_count; i++)
+    {
+        uint8 found = 0U;
+        for (j = 0U; j < config->boxes_count; j++)
+        {
+            if (boxes[i].row == config->boxes[j].row &&
+                boxes[i].col == config->boxes[j].col)
+            {
+                boxes[i].id = config->boxes[j].id;
+                found = 1U;
+                break;
+            }
+        }
+        if (!found)
+        {
+            return 0U;
+        }
+    }
+
+    for (i = 0U; i < Targets_count; i++)
+    {
+        uint8 found = 0U;
+        for (j = 0U; j < config->targets_count; j++)
+        {
+            if (targets[i].row == config->targets[j].row &&
+                targets[i].col == config->targets[j].col)
+            {
+                targets[i].id = config->targets[j].id;
+                found = 1U;
+                break;
+            }
+        }
+        if (!found)
+        {
+            return 0U;
+        }
+    }
+
+    memset(car_path, 0, sizeof(car_path));
+    Car_path_count = 0U;
+    return 1U;
+}
+
+static void benchmark_take_snapshot(path_map_snapshot_t *snapshot)
+{
+    memset(snapshot, 0, sizeof(*snapshot));
+    snapshot->obstacles_count = Obstacles_count;
+    snapshot->boxes_count = Boxes_count;
+    snapshot->targets_count = Targets_count;
+    snapshot->bombs_count = Bombs_count;
+    snapshot->car_pose_grid = car;
+    memcpy(snapshot->obstacles_buf, obstacles, Obstacles_count * sizeof(Position));
+    memcpy(snapshot->boxes_buf, boxes, Boxes_count * sizeof(Position));
+    memcpy(snapshot->targets_buf, targets, Targets_count * sizeof(Position));
+    memcpy(snapshot->bombs_buf, bombs, Bombs_count * sizeof(Position));
+}
+
+static uint8 benchmark_same_cells(const Position *left,
+                                  const Position *right,
+                                  size_t count)
+{
+    size_t i;
+
+    for (i = 0U; i < count; i++)
+    {
+        if (left[i].row != right[i].row || left[i].col != right[i].col)
+        {
+            return 0U;
+        }
+    }
+    return 1U;
+}
+
+static uint8 benchmark_validate_raw_path(void)
+{
+    size_t i;
+
+    if (Car_path_count < 2U || Car_path_count > MAX_CAR_PATH)
+    {
+        return 0U;
+    }
+    for (i = 0U; i < Car_path_count; i++)
+    {
+        if (car_path[i].row >= MAP_ROWS || car_path[i].col >= MAP_COLS)
+        {
+            return 0U;
+        }
+        if (i > 0U)
+        {
+            int row_delta = (int)car_path[i].row - (int)car_path[i - 1U].row;
+            int col_delta = (int)car_path[i].col - (int)car_path[i - 1U].col;
+            if (row_delta < 0)
+            {
+                row_delta = -row_delta;
+            }
+            if (col_delta < 0)
+            {
+                col_delta = -col_delta;
+            }
+            if ((row_delta + col_delta) > 1)
+            {
+                return 0U;
+            }
+        }
+    }
+    return 1U;
+}
+
+static uint16 benchmark_count_events(const Position *path,
+                                     size_t count,
+                                     uint8 event_mask)
+{
+    size_t i;
+    uint16 found = 0U;
+
+    for (i = 0U; i < count; i++)
+    {
+        if ((path[i].id & event_mask) != 0U)
+        {
+            found++;
+        }
+    }
+    return found;
+}
+
+static uint32 benchmark_hash_path(const Position *path, size_t count)
+{
+    size_t i;
+    uint32 hash = 2166136261UL;
+
+    for (i = 0U; i < count; i++)
+    {
+        hash = (hash ^ path[i].row) * 16777619UL;
+        hash = (hash ^ path[i].col) * 16777619UL;
+        hash = (hash ^ path[i].id) * 16777619UL;
+    }
+    hash = (hash ^ (uint32)count) * 16777619UL;
+    return hash;
+}
+
+static uint8 benchmark_exec_preserves_events(size_t exec_steps)
+{
+    static const uint8 events[] = {
+        IDENTIFICATION, BOMB_EXPLOSION, PUSH_START_POINT, PUSH_END_POINT
+    };
+    size_t i;
+
+    if (exec_steps < 2U)
+    {
+        return 0U;
+    }
+    for (i = 0U; i < (sizeof(events) / sizeof(events[0])); i++)
+    {
+        if (benchmark_count_events(car_path, Car_path_count, events[i]) !=
+            benchmark_count_events(s_benchmark_exec_path, exec_steps, events[i]))
+        {
+            return 0U;
+        }
+    }
+    return 1U;
+}
+
+static void benchmark_add_timing(volatile algorithm_test_timing_t *timing,
+                                 uint32 elapsed_us,
+                                 uint8 repeat)
+{
+    if (repeat == 0U)
+    {
+        timing->min_us = elapsed_us;
+        timing->max_us = elapsed_us;
+        timing->avg_us = elapsed_us;
+        return;
+    }
+    if (elapsed_us < timing->min_us)
+    {
+        timing->min_us = elapsed_us;
+    }
+    if (elapsed_us > timing->max_us)
+    {
+        timing->max_us = elapsed_us;
+    }
+    timing->avg_us += elapsed_us;
+}
+
+static void benchmark_finish_timing(volatile algorithm_test_timing_t *timing)
+{
+    timing->avg_us /= ALGORITHM_TEST_BENCHMARK_REPEATS;
+}
+
+void Algorithm_Test_RunBoardBenchmark(void)
+{
+    size_t map_index;
+    uint32 benchmark_start;
+    uint16 map_count;
+
+    memset((void *)&g_algorithm_test_benchmark, 0, sizeof(g_algorithm_test_benchmark));
+    g_algorithm_test_benchmark.magic = ALGORITHM_TEST_BENCHMARK_MAGIC;
+    g_algorithm_test_benchmark.version = ALGORITHM_TEST_BENCHMARK_VERSION;
+    g_algorithm_test_benchmark.timer_hz = ALGORITHM_TEST_BENCHMARK_TIMER_HZ;
+    g_algorithm_test_benchmark.repeats = ALGORITHM_TEST_BENCHMARK_REPEATS;
+    map_count = (Map_preset_count <= ALGORITHM_TEST_BENCHMARK_MAX_MAPS) ?
+                    (uint16)Map_preset_count : ALGORITHM_TEST_BENCHMARK_MAX_MAPS;
+    g_algorithm_test_benchmark.requested_maps = map_count;
+
+    benchmark_timer_init();
+    benchmark_start = benchmark_timer_now_us();
+
+    for (map_index = 0U; map_index < map_count; map_index++)
+    {
+        volatile algorithm_test_map_result_t *result =
+            &g_algorithm_test_benchmark.map[map_index];
+        uint8 identify_valid = 1U;
+        uint8 identify_exec_valid = 1U;
+        uint8 push_valid = 1U;
+        uint8 push_exec_valid = 1U;
+        uint8 repeat_stable = 1U;
+        uint8 repeat;
+
+        result->map_index = (uint8)map_index;
+        if (!Map_Preset_BuildConfig(map_index, &s_benchmark_config))
+        {
+            result->result_flags = ALGORITHM_TEST_RESULT_COMPLETE;
+            g_algorithm_test_benchmark.failed_maps++;
+            g_algorithm_test_benchmark.completed_maps++;
+            continue;
+        }
+
+        result->result_flags = ALGORITHM_TEST_RESULT_MAP_BUILT;
+        result->plan_mode = (uint8)s_benchmark_config.plan_mode;
+
+        for (repeat = 0U; repeat < ALGORITHM_TEST_BENCHMARK_REPEATS; repeat++)
+        {
+            size_t initial_box_count;
+            size_t initial_target_count;
+            size_t exec_steps = 0U;
+            uint16 raw_steps;
+            uint16 event_count;
+            uint16 bomb_event_count;
+            uint16 push_start_count;
+            uint16 push_end_count;
+            uint32 start_us;
+            uint32 elapsed_us;
+            uint32 path_hash;
+            uint8 current_valid;
+            uint8 current_exec_valid;
+            uint8 id_restore_ok;
+            Position identify_end;
+            Position push_start;
+
+            benchmark_load_config(&s_benchmark_config, 0U);
+            initial_box_count = Boxes_count;
+            initial_target_count = Targets_count;
+            memcpy(s_benchmark_initial_boxes, boxes, sizeof(s_benchmark_initial_boxes));
+            memcpy(s_benchmark_initial_targets, targets, sizeof(s_benchmark_initial_targets));
+            benchmark_take_snapshot(&s_benchmark_before);
+
+            start_us = benchmark_timer_now_us();
+            Plan_path_Identify();
+            elapsed_us = benchmark_timer_now_us() - start_us;
+            benchmark_add_timing(&result->identify_plan, elapsed_us, repeat);
+            benchmark_take_snapshot(&s_benchmark_after);
+            identify_end = car;
+
+            raw_steps = (uint16)Car_path_count;
+            event_count = benchmark_count_events(car_path, Car_path_count, IDENTIFICATION);
+            bomb_event_count = benchmark_count_events(car_path, Car_path_count, BOMB_EXPLOSION);
+            path_hash = benchmark_hash_path(car_path, Car_path_count);
+            current_valid = (benchmark_validate_raw_path() &&
+                             car_path[Car_path_count - 1U].row == identify_end.row &&
+                             car_path[Car_path_count - 1U].col == identify_end.col &&
+                             Boxes_count == initial_box_count &&
+                             Targets_count == initial_target_count &&
+                             benchmark_same_cells(boxes, s_benchmark_initial_boxes,
+                                                  initial_box_count) &&
+                             benchmark_same_cells(targets, s_benchmark_initial_targets,
+                                                  initial_target_count));
+            identify_valid = (uint8)(identify_valid && current_valid);
+
+            start_us = benchmark_timer_now_us();
+            current_exec_valid = path_build_exec_from_planner(car_path,
+                                                               Car_path_count,
+                                                               &s_benchmark_after,
+                                                               &s_benchmark_before,
+                                                               s_benchmark_exec_path,
+                                                               MAX_CAR_PATH,
+                                                               &exec_steps);
+            elapsed_us = benchmark_timer_now_us() - start_us;
+            benchmark_add_timing(&result->identify_exec_build, elapsed_us, repeat);
+            current_exec_valid = (uint8)(current_exec_valid &&
+                                         benchmark_exec_preserves_events(exec_steps));
+            identify_exec_valid = (uint8)(identify_exec_valid && current_exec_valid);
+
+            if (repeat == 0U)
+            {
+                result->identify_raw_steps = raw_steps;
+                result->identify_exec_steps = (uint16)exec_steps;
+                result->identify_events = event_count;
+                result->identify_bomb_events = bomb_event_count;
+                result->identify_path_hash = path_hash;
+                result->identify_end_row = identify_end.row;
+                result->identify_end_col = identify_end.col;
+            }
+            else if (result->identify_raw_steps != raw_steps ||
+                     result->identify_exec_steps != (uint16)exec_steps ||
+                     result->identify_events != event_count ||
+                     result->identify_bomb_events != bomb_event_count ||
+                     result->identify_end_row != identify_end.row ||
+                     result->identify_end_col != identify_end.col ||
+                     result->identify_path_hash != path_hash)
+            {
+                repeat_stable = 0U;
+            }
+
+            id_restore_ok = benchmark_restore_preset_ids_after_identify(&s_benchmark_config);
+            push_start = car;
+            benchmark_take_snapshot(&s_benchmark_before);
+            start_us = benchmark_timer_now_us();
+            if (s_benchmark_config.plan_mode == MAP_PRESET_PLAN_MODE1)
+            {
+                Plan_path_Mode1();
+            }
+            else
+            {
+                Plan_path_Mode2();
+            }
+            elapsed_us = benchmark_timer_now_us() - start_us;
+            benchmark_add_timing(&result->push_plan, elapsed_us, repeat);
+            benchmark_take_snapshot(&s_benchmark_after);
+
+            raw_steps = (uint16)Car_path_count;
+            push_start_count = benchmark_count_events(car_path, Car_path_count,
+                                                       PUSH_START_POINT);
+            push_end_count = benchmark_count_events(car_path, Car_path_count,
+                                                     PUSH_END_POINT);
+            bomb_event_count = benchmark_count_events(car_path, Car_path_count,
+                                                       BOMB_EXPLOSION);
+            path_hash = benchmark_hash_path(car_path, Car_path_count);
+            current_valid = (id_restore_ok &&
+                             benchmark_validate_raw_path() &&
+                             car_path[0].row == push_start.row &&
+                             car_path[0].col == push_start.col &&
+                             Boxes_count == 0U && Targets_count == 0U &&
+                             car_path[Car_path_count - 1U].col == 0U &&
+                             (car_path[Car_path_count - 1U].row == 4U ||
+                              car_path[Car_path_count - 1U].row == 5U));
+            push_valid = (uint8)(push_valid && current_valid);
+
+            exec_steps = 0U;
+            start_us = benchmark_timer_now_us();
+            current_exec_valid = path_build_exec_from_planner(car_path,
+                                                               Car_path_count,
+                                                               &s_benchmark_after,
+                                                               &s_benchmark_before,
+                                                               s_benchmark_exec_path,
+                                                               MAX_CAR_PATH,
+                                                               &exec_steps);
+            elapsed_us = benchmark_timer_now_us() - start_us;
+            benchmark_add_timing(&result->push_exec_build, elapsed_us, repeat);
+            current_exec_valid = (uint8)(current_exec_valid &&
+                                         benchmark_exec_preserves_events(exec_steps));
+            push_exec_valid = (uint8)(push_exec_valid && current_exec_valid);
+
+            if (repeat == 0U)
+            {
+                result->push_raw_steps = raw_steps;
+                result->push_exec_steps = (uint16)exec_steps;
+                result->push_start_events = push_start_count;
+                result->push_end_events = push_end_count;
+                result->push_bomb_events = bomb_event_count;
+                result->push_path_hash = path_hash;
+            }
+            else if (result->push_raw_steps != raw_steps ||
+                     result->push_exec_steps != (uint16)exec_steps ||
+                     result->push_start_events != push_start_count ||
+                     result->push_end_events != push_end_count ||
+                     result->push_bomb_events != bomb_event_count ||
+                     result->push_path_hash != path_hash)
+            {
+                repeat_stable = 0U;
+            }
+        }
+
+        benchmark_finish_timing(&result->identify_plan);
+        benchmark_finish_timing(&result->identify_exec_build);
+        benchmark_finish_timing(&result->push_plan);
+        benchmark_finish_timing(&result->push_exec_build);
+
+        if (identify_valid)
+        {
+            result->result_flags |= ALGORITHM_TEST_RESULT_IDENTIFY_VALID;
+        }
+        if (identify_exec_valid)
+        {
+            result->result_flags |= ALGORITHM_TEST_RESULT_IDENTIFY_EXEC_VALID;
+        }
+        if (push_valid)
+        {
+            result->result_flags |= ALGORITHM_TEST_RESULT_PUSH_VALID;
+        }
+        if (push_exec_valid)
+        {
+            result->result_flags |= ALGORITHM_TEST_RESULT_PUSH_EXEC_VALID;
+        }
+        if (repeat_stable)
+        {
+            result->result_flags |= ALGORITHM_TEST_RESULT_REPEAT_STABLE;
+        }
+        result->result_flags |= ALGORITHM_TEST_RESULT_COMPLETE;
+
+        if (result->result_flags != ALGORITHM_TEST_RESULT_ALL_OK)
+        {
+            g_algorithm_test_benchmark.failed_maps++;
+        }
+        g_algorithm_test_benchmark.completed_maps++;
+    }
+
+    g_algorithm_test_benchmark.total_us = benchmark_timer_now_us() - benchmark_start;
+
+    printf("PLANBENCH magic=%08lX maps=%u failed=%u repeats=%u total_us=%lu\r\n",
+           (unsigned long)g_algorithm_test_benchmark.magic,
+           (unsigned)g_algorithm_test_benchmark.completed_maps,
+           (unsigned)g_algorithm_test_benchmark.failed_maps,
+           (unsigned)g_algorithm_test_benchmark.repeats,
+           (unsigned long)g_algorithm_test_benchmark.total_us);
+    for (map_index = 0U; map_index < map_count; map_index++)
+    {
+        volatile algorithm_test_map_result_t *result =
+            &g_algorithm_test_benchmark.map[map_index];
+        printf("map%u flags=%04X id=%u/%u %luus end=(%u,%u) push=%u/%u %luus\r\n",
+               (unsigned)result->map_index,
+               (unsigned)result->result_flags,
+               (unsigned)result->identify_raw_steps,
+               (unsigned)result->identify_exec_steps,
+               (unsigned long)result->identify_plan.avg_us,
+               (unsigned)result->identify_end_row,
+               (unsigned)result->identify_end_col,
+               (unsigned)result->push_raw_steps,
+               (unsigned)result->push_exec_steps,
+               (unsigned long)result->push_plan.avg_us);
+    }
+}
+
+#if defined(__GNUC__) || defined(__ARMCC_VERSION)
+__attribute__((noinline))
+#endif
+void Algorithm_Test_BenchmarkCompleteTrap(void)
+{
+    while (1)
+    {
+    }
+}
+
+#else
+
+void Algorithm_Test_RunBoardBenchmark(void)
+{
+}
+
+void Algorithm_Test_BenchmarkCompleteTrap(void)
+{
+}
+
+#endif

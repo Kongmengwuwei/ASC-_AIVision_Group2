@@ -47,6 +47,15 @@ int main(void)
   debug_init();                  // 调试端口初始化
   // 模块初始化
   system_delay_ms(300);                          // 等待主板其他外设上电完成
+#if ALGORITHM_TEST_BOARD_BENCHMARK
+  /* Planner-only board benchmark: no motor/peripheral control is started. */
+  Algorithm_Test_RunBoardBenchmark();
+  Algorithm_Test_BenchmarkCompleteTrap();
+  while (1)
+  {
+    __NOP();
+  }
+#endif
   flash_init();
   Menu_Init();
   uart_blob_init();

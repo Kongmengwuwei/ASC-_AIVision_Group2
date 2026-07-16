@@ -23,6 +23,7 @@ static uint16 s_rebuild_indices[MAX_CAR_PATH] = {0U};
 static uint16 s_mandatory_prefix[MAX_CAR_PATH + 1U] = {0U};
 static uint16 s_push_edge_prefix[MAX_CAR_PATH + 1U] = {0U};
 static uint16 s_last_required_before[MAX_CAR_PATH] = {0U};
+static Position s_safe_relocation_raw_path[PATH_SAFE_RELOCATION_MAX_POINTS] = {{0}};
 static path_map_snapshot_t s_stage_maps[PATH_STAGE_SNAPSHOT_CAPACITY];
 static uint8 s_raw_stage_index[MAX_CAR_PATH] = {0U};
 static uint8 s_stage_model_valid = 0U;
@@ -1291,4 +1292,179 @@ uint8 path_build_exec_from_planner(const Position *planner_path,
 
     *exec_steps = out_steps;
     return 1U;
+}
+
+static uint8 path_cell_has_adjacent_wall(const path_map_snapshot_t *map,
+                                         uint8 row,
+                                         uint8 col)
+{
+    static const int8 d_row[5] = {0, -1, 0, 1, 0};
+    static const int8 d_col[5] = {0, 0, 1, 0, -1};
+    size_t i = 0U;
+
+    if (!path_snapshot_counts_valid(map) || row >= MAP_ROWS || col >= MAP_COLS)
+    {
+        return 1U;
+    }
+    for (i = 0U; i < 5U; i++)
+    {
+        int32 check_row = (int32)row + (int32)d_row[i];
+        int32 check_col = (int32)col + (int32)d_col[i];
+
+        if (check_row < 0 || check_col < 0 ||
+            check_row >= (int32)MAP_ROWS || check_col >= (int32)MAP_COLS)
+        {
+            continue;
+        }
+        if (path_blocker_list_contains_cell(map->obstacles_buf,
+                                            map->obstacles_count,
+                                            MAX_OBSTACLES,
+                                            (uint8)check_row,
+                                            (uint8)check_col))
+        {
+            return 1U;
+        }
+    }
+    return 0U;
+}
+
+uint8 path_build_nearest_wall_clear_exec(const Position *start_map,
+                                         const path_map_snapshot_t *map,
+                                         Position *exec_path,
+                                         size_t exec_capacity,
+                                         size_t *exec_steps)
+{
+    static const int8 d_row[4] = {0, -1, 0, 1};
+    static const int8 d_col[4] = {1, 0, -1, 0};
+    const size_t cell_count = (size_t)PATH_SAFE_RELOCATION_MAX_POINTS;
+    size_t i = 0U;
+    size_t head = 0U;
+    size_t tail = 0U;
+    size_t reverse_count = 0U;
+    size_t raw_steps = 0U;
+    uint16 start_index = 0U;
+    uint16 target_index = PATH_INDEX_NONE;
+    uint16 cursor = PATH_INDEX_NONE;
+
+    if (exec_steps != NULL)
+    {
+        *exec_steps = 0U;
+    }
+    if (start_map == NULL || map == NULL || exec_path == NULL ||
+        exec_steps == NULL || exec_capacity == 0U ||
+        !path_is_map_cell_valid(start_map) ||
+        !path_snapshot_counts_valid(map) ||
+        cell_count == 0U || cell_count > MAX_CAR_PATH ||
+        cell_count >= PATH_INDEX_NONE)
+    {
+        return 0U;
+    }
+
+    memset(exec_path, 0, exec_capacity * sizeof(Position));
+    memset(s_safe_relocation_raw_path, 0, sizeof(s_safe_relocation_raw_path));
+    for (i = 0U; i < cell_count; i++)
+    {
+        s_prev_index[i] = PATH_INDEX_NONE;
+    }
+
+    start_index = (uint16)((uint16)start_map->row * (uint16)MAP_COLS +
+                           (uint16)start_map->col);
+    s_prev_index[start_index] = start_index;
+    s_rebuild_indices[tail++] = start_index;
+
+    while (head < tail)
+    {
+        uint16 current = s_rebuild_indices[head++];
+        uint8 row = (uint8)(current / (uint16)MAP_COLS);
+        uint8 col = (uint8)(current % (uint16)MAP_COLS);
+
+        if (!path_cell_has_blocker(map, NULL, row, col, 1U) &&
+            !path_cell_has_adjacent_wall(map, row, col))
+        {
+            target_index = current;
+            break;
+        }
+
+        for (i = 0U; i < 4U; i++)
+        {
+            int32 next_row = (int32)row + (int32)d_row[i];
+            int32 next_col = (int32)col + (int32)d_col[i];
+            uint16 next_index = 0U;
+
+            if (next_row < 0 || next_col < 0 ||
+                next_row >= (int32)MAP_ROWS || next_col >= (int32)MAP_COLS ||
+                path_cell_has_blocker(map, NULL,
+                                      (uint8)next_row,
+                                      (uint8)next_col,
+                                      1U))
+            {
+                continue;
+            }
+            next_index = (uint16)((uint16)next_row * (uint16)MAP_COLS +
+                                  (uint16)next_col);
+            if (s_prev_index[next_index] != PATH_INDEX_NONE)
+            {
+                continue;
+            }
+            if (tail >= cell_count)
+            {
+                return 0U;
+            }
+            s_prev_index[next_index] = current;
+            s_rebuild_indices[tail++] = next_index;
+        }
+    }
+
+    if (target_index == PATH_INDEX_NONE)
+    {
+        return 0U;
+    }
+
+    cursor = target_index;
+    while (reverse_count < cell_count)
+    {
+        s_rebuild_indices[reverse_count++] = cursor;
+        if (cursor == start_index)
+        {
+            break;
+        }
+        cursor = s_prev_index[cursor];
+        if (cursor == PATH_INDEX_NONE)
+        {
+            return 0U;
+        }
+    }
+    if (reverse_count == 0U ||
+        s_rebuild_indices[reverse_count - 1U] != start_index)
+    {
+        return 0U;
+    }
+
+    for (i = 0U; i < reverse_count; i++)
+    {
+        uint16 map_index = s_rebuild_indices[reverse_count - 1U - i];
+
+        s_safe_relocation_raw_path[raw_steps].row =
+            (uint8)(map_index / (uint16)MAP_COLS);
+        s_safe_relocation_raw_path[raw_steps].col =
+            (uint8)(map_index % (uint16)MAP_COLS);
+        s_safe_relocation_raw_path[raw_steps].id = PATH_EVENT_NONE;
+        raw_steps++;
+    }
+
+    if (raw_steps == 1U)
+    {
+        exec_path[0] = s_safe_relocation_raw_path[0];
+        path_remap_exec_point(&exec_path[0]);
+        *exec_steps = 1U;
+        return 1U;
+    }
+
+    return path_build_exec_from_planner(s_safe_relocation_raw_path,
+                                        raw_steps,
+                                        map,
+                                        map,
+                                        exec_path,
+                                        exec_capacity,
+                                        exec_steps);
 }

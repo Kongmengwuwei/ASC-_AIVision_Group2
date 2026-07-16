@@ -68,7 +68,6 @@ float g_control_prestart_depart_compensate_m = -0.025f;
 #define CONTROL_BOMB_EXPLOSION_PAUSE_MS 500U
 /* 回到发车区后，车头回正到发车方向基准的角度容差。 */
 #define CONTROL_RETURN_YAW_ALIGN_TOL_DEG 5.0f
-#define CONTROL_IDENTIFY_SAFE_PATH_CAPACITY (MAP_ROWS * MAP_COLS)
 #define CONTROL_CONTINUOUS_LEVEL_COUNT 3U
 #define CONTROL_CONTINUOUS_STOP_ENCODER_TOL 5
 #define CONTROL_CONTINUOUS_STOP_STABLE_LOOPS 3U
@@ -264,7 +263,7 @@ static uint8 g_identify_safe_move_prepared = 0U;
 static uint8 g_identify_safe_move_running = 0U;
 static uint8 g_identify_return_start_valid = 0U;
 static Position g_identify_return_start_map = {0U, 0U, 0U};
-static Position g_identify_safe_move_path[CONTROL_IDENTIFY_SAFE_PATH_CAPACITY] = {{0}};
+static Position g_identify_safe_move_path[PATH_SAFE_RELOCATION_MAX_POINTS] = {{0}};
 static size_t g_identify_safe_move_steps = 0U;
 
 static control_identify_target_t g_identify_targets[CONTROL_IDENTIFY_MAX_TARGETS_PER_POINT];
@@ -1821,157 +1820,6 @@ static uint8 identify_cell_blocks_near_half_step(uint8 row, uint8 col)
     return 0U;
 }
 
-static uint8 identify_wall_at(uint8 row, uint8 col)
-{
-    size_t i = 0U;
-
-    for (i = 0U; i < Obstacles_count; i++)
-    {
-        if (obstacles[i].row == row && obstacles[i].col == col)
-            return 1U;
-    }
-    return 0U;
-}
-
-/**
- * @brief 判断格子自身及四邻域是否没有墙；允许邻近箱子和目标点。
- */
-static uint8 identify_safe_localization_cell(uint8 row, uint8 col)
-{
-    static const int8 d_row[5] = {0, -1, 0, 1, 0};
-    static const int8 d_col[5] = {0, 0, 1, 0, -1};
-    size_t i = 0U;
-
-    if (row >= MAP_ROWS || col >= MAP_COLS ||
-        identify_cell_has_blocker(row, col))
-    {
-        return 0U;
-    }
-    for (i = 0U; i < 5U; i++)
-    {
-        int32 check_row = (int32)row + (int32)d_row[i];
-        int32 check_col = (int32)col + (int32)d_col[i];
-
-        if (check_row < 0 || check_col < 0 ||
-            check_row >= (int32)MAP_ROWS || check_col >= (int32)MAP_COLS)
-        {
-            continue;
-        }
-        if (identify_wall_at((uint8)check_row, (uint8)check_col))
-        {
-            return 0U;
-        }
-    }
-    return 1U;
-}
-
-/**
- * @brief 用四邻域 BFS 构建到最近安全定位格的可达路径。
- */
-static uint8 build_identify_safe_localization_path(Position start_map,
-                                                   Position *out_exec_path,
-                                                   size_t capacity,
-                                                   size_t *out_steps)
-{
-    static int16 prev[CONTROL_IDENTIFY_SAFE_PATH_CAPACITY];
-    static uint16 queue[CONTROL_IDENTIFY_SAFE_PATH_CAPACITY];
-    static uint16 reverse_indices[CONTROL_IDENTIFY_SAFE_PATH_CAPACITY];
-    static const int8 d_row[4] = {0, -1, 0, 1};
-    static const int8 d_col[4] = {1, 0, -1, 0};
-    size_t i = 0U;
-    size_t head = 0U;
-    size_t tail = 0U;
-    size_t reverse_count = 0U;
-    int32 start_index = 0;
-    int32 target_index = -1;
-
-    if (out_steps != NULL)
-    {
-        *out_steps = 0U;
-    }
-    if (out_exec_path == NULL || out_steps == NULL ||
-        capacity < 1U || start_map.row >= MAP_ROWS || start_map.col >= MAP_COLS)
-    {
-        return 0U;
-    }
-
-    for (i = 0U; i < CONTROL_IDENTIFY_SAFE_PATH_CAPACITY; i++)
-    {
-        prev[i] = -2;
-    }
-    start_index = (int32)start_map.row * (int32)MAP_COLS + (int32)start_map.col;
-    prev[start_index] = -1;
-    queue[tail++] = (uint16)start_index;
-
-    while (head < tail)
-    {
-        int32 current = (int32)queue[head++];
-        uint8 row = (uint8)(current / (int32)MAP_COLS);
-        uint8 col = (uint8)(current % (int32)MAP_COLS);
-
-        if (identify_safe_localization_cell(row, col))
-        {
-            target_index = current;
-            break;
-        }
-
-        for (i = 0U; i < 4U; i++)
-        {
-            int32 next_row = (int32)row + (int32)d_row[i];
-            int32 next_col = (int32)col + (int32)d_col[i];
-            int32 next_index = 0;
-
-            if (next_row < 0 || next_col < 0 ||
-                next_row >= (int32)MAP_ROWS || next_col >= (int32)MAP_COLS)
-            {
-                continue;
-            }
-            if (identify_cell_has_blocker((uint8)next_row, (uint8)next_col))
-            {
-                continue;
-            }
-            next_index = next_row * (int32)MAP_COLS + next_col;
-            if (prev[next_index] != -2)
-            {
-                continue;
-            }
-            if (tail >= CONTROL_IDENTIFY_SAFE_PATH_CAPACITY)
-            {
-                return 0U;
-            }
-            prev[next_index] = (int16)current;
-            queue[tail++] = (uint16)next_index;
-        }
-    }
-
-    if (target_index < 0)
-    {
-        return 0U;
-    }
-    while (target_index >= 0 && reverse_count < CONTROL_IDENTIFY_SAFE_PATH_CAPACITY)
-    {
-        reverse_indices[reverse_count++] = (uint16)target_index;
-        target_index = (int32)prev[target_index];
-    }
-    if (reverse_count == 0U || reverse_count > capacity)
-    {
-        return 0U;
-    }
-
-    for (i = 0U; i < reverse_count; i++)
-    {
-        uint16 map_index = reverse_indices[reverse_count - 1U - i];
-        Position point = {0U, 0U, 0U};
-
-        point.row = (uint8)(map_index / MAP_COLS);
-        point.col = (uint8)(map_index % MAP_COLS);
-        path_remap_exec_point(&point);
-        out_exec_path[i] = point;
-    }
-    *out_steps = reverse_count;
-    return 1U;
-}
-
 static void map_float_grid_to_exec_meter(float map_row_f,
                                          float map_col_f,
                                          float *x_m,
@@ -2990,6 +2838,7 @@ static void handle_prestart_move(void)
 static void handle_identify_return_heading_stage(void)
 {
     path_follow_status_t st = {0};
+    static path_map_snapshot_t runtime_map;
     float start_base_yaw_deg = map_dir_to_yaw_deg(CONTROL_MAP_DIR_RIGHT);
 
     if (!g_identify_safe_move_prepared)
@@ -2997,12 +2846,15 @@ static void handle_identify_return_heading_stage(void)
         g_identify_safe_move_prepared = 1U;
         g_identify_safe_move_steps = 0U;
         memset(g_identify_safe_move_path, 0, sizeof(g_identify_safe_move_path));
+        memset(&runtime_map, 0, sizeof(runtime_map));
+        snapshot_take(&runtime_map);
 
         if (g_identify_return_start_valid &&
-            build_identify_safe_localization_path(g_identify_return_start_map,
-                                                  g_identify_safe_move_path,
-                                                  CONTROL_IDENTIFY_SAFE_PATH_CAPACITY,
-                                                  &g_identify_safe_move_steps) &&
+            path_build_nearest_wall_clear_exec(&g_identify_return_start_map,
+                                               &runtime_map,
+                                               g_identify_safe_move_path,
+                                               PATH_SAFE_RELOCATION_MAX_POINTS,
+                                               &g_identify_safe_move_steps) &&
             g_identify_safe_move_steps >= 2U)
         {
             path_follow_set_pause_indices(NULL, 0U, 0U);

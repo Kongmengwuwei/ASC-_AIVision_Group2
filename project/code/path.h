@@ -13,6 +13,7 @@
  */
 #define PATH_COORD_TRANSPOSE_COMPENSATE 1U
 #define PATH_COORD_FLIP_VERTICAL 1U
+#define PATH_SAFE_RELOCATION_MAX_POINTS (MAP_ROWS * MAP_COLS)
 
 #if PATH_COORD_TRANSPOSE_COMPENSATE
 #define PATH_WORLD_X_MAX_M ((float)(MAP_COLS - 1) * GRID_SIZE_M)
@@ -92,5 +93,24 @@ uint8 path_build_exec_from_planner(const Position *planner_path,
                                    Position *exec_path,
                                    size_t exec_capacity,
                                    size_t *exec_steps);
+
+/**
+ * @brief 搜索最近可达的不贴墙格，并生成经过现有路径提取/捷径处理的执行路径。
+ *
+ * 安全格自身及四邻域不能有墙；允许邻近箱子和目标点，但路线和终点不能
+ * 穿过或占用墙、箱子、目标点或炸弹。
+ *
+ * @param start_map 起点，使用地图坐标。
+ * @param map 当前执行阶段的地图快照。
+ * @param exec_path 输出路径，使用 path_follow 执行坐标。
+ * @param exec_capacity 输出数组容量。
+ * @param exec_steps 输出点数；当前位置已经安全时为 1。
+ * @return uint8 1 表示找到安全格并成功生成路径，0 表示无可达安全格或输入无效。
+ */
+uint8 path_build_nearest_wall_clear_exec(const Position *start_map,
+                                         const path_map_snapshot_t *map,
+                                         Position *exec_path,
+                                         size_t exec_capacity,
+                                         size_t *exec_steps);
 
 #endif

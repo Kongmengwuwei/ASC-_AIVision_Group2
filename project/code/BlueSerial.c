@@ -489,17 +489,28 @@ static void BlueSerial_PrintVisionResult(VisionRecognitionType type,
 {
     if (result == NULL)
     {
-        BlueSerial_Printf("VISION type=%s success=0 label=? score=-1 mode=0\r\n",
+        BlueSerial_Printf("VISION type=%s success=0 label=? score=NA mode=0\r\n",
                           BlueSerial_VisionTypeName(type));
         return;
     }
 
-    BlueSerial_Printf("VISION type=%s success=%u label=%s score=%d mode=%u\r\n",
-                      BlueSerial_VisionTypeName(type),
-                      result->success ? 1U : 0U,
-                      result->label,
-                      (int)result->score,
-                      result->mode_marker ? 1U : 0U);
+    if (result->score < 0)
+    {
+        BlueSerial_Printf("VISION type=%s success=%u label=%s score=NA mode=%u\r\n",
+                          BlueSerial_VisionTypeName(type),
+                          result->success ? 1U : 0U,
+                          result->label,
+                          result->mode_marker ? 1U : 0U);
+    }
+    else
+    {
+        BlueSerial_Printf("VISION type=%s success=%u label=%s score=%d mode=%u\r\n",
+                          BlueSerial_VisionTypeName(type),
+                          result->success ? 1U : 0U,
+                          result->label,
+                          (int)result->score,
+                          result->mode_marker ? 1U : 0U);
+    }
 }
 
 static void BlueSerial_StartVisionRequest(VisionRecognitionType type,

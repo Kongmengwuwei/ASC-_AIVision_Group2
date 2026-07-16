@@ -55,14 +55,14 @@ bool uart_rx_overflow_flag = false;
 /*
  * ===================== 图案/数字识别摄像头串口模块 =====================
  *
- * 这一组变量只服务 loadmode.py 的 NUM/IMG 行协议，和上面的地图/车姿
+ * 这一组变量只服务右侧识别摄像头的 SNAP 请求、B=/T= 回包协议，和上面的地图/车姿
  * $MAP/$CAR/$END 流式协议完全分开：
  * - 使用独立 UART（默认 UART4）；
  * - 使用独立 FIFO；
  * - 使用独立行缓冲；
  * - 使用独立结果结构和 updated 标志。
  *
- * 这样即使视觉识别端返回 "NUM,3,96\n" 这种短行，也不会被地图解析器当成
+ * 这样即使视觉识别端返回 "T=3\r\n" 这种短行，也不会被地图解析器当成
  * 噪声塞进 stream_buf；反过来地图大包也不会污染视觉识别结果。
  */
 static uint8_t vision_uart_fifo_buf[VISION_FIFO_SIZE];
@@ -791,34 +791,19 @@ static char *vision_trim_ascii_in_place(char *text)
     return text;
 }
 
-/* 将小写英文字母转成大写，避免 OpenMV 端调试时误发小写命令导致解析失败。 */
-static char vision_ascii_upper(char ch)
+/* 新右侧摄像头用 B=<label> 表示图像结果、T=<label> 表示数字结果。 */
+static VisionRecognitionType vision_parse_type_tag(const char *tag)
 {
-    if (ch >= 'a' && ch <= 'z') {
-        return (char)(ch - ('a' - 'A'));
-    }
-    return ch;
-}
-
-/* 解析视觉结果行的第一个字段：只接受 NUM 或 IMG。 */
-static VisionRecognitionType vision_parse_type_field(const char *cmd)
-{
-    if (cmd == NULL || '\0' == cmd[0] || '\0' == cmd[1] || '\0' == cmd[2] || '\0' != cmd[3]) {
+    if (tag == NULL || '\0' == tag[0] || '\0' != tag[1]) {
         return VISION_RECOGNITION_NONE;
     }
 
-    if ('N' == vision_ascii_upper(cmd[0]) &&
-        'U' == vision_ascii_upper(cmd[1]) &&
-        'M' == vision_ascii_upper(cmd[2])) {
-        return VISION_RECOGNITION_NUM;
-    }
-
-    if ('I' == vision_ascii_upper(cmd[0]) &&
-        'M' == vision_ascii_upper(cmd[1]) &&
-        'G' == vision_ascii_upper(cmd[2])) {
+    if ('B' == tag[0]) {
         return VISION_RECOGNITION_IMG;
     }
-
+    if ('T' == tag[0]) {
+        return VISION_RECOGNITION_NUM;
+    }
     return VISION_RECOGNITION_NONE;
 }
 
@@ -871,7 +856,7 @@ static void vision_reset_result(VisionRecognitionResult *result, VisionRecogniti
     result->success = false;
 }
 
-/* 提交一条已经校验过的 NUM/IMG 结果，更新对应的 ready/updated 标志。 */
+/* 提交一条已经校验过的 B=/T= 结果，更新对应的 ready/updated 标志。 */
 static void vision_store_result(VisionRecognitionType type,
                                 const char *label,
                                 int32 label_value,
@@ -913,78 +898,51 @@ static void vision_store_result(VisionRecognitionType type,
 }
 
 /*
- * 解析 loadmode.py 返回的一整行：
+ * 解析 main(视觉).py 返回的一整行：
  *
  * 正常格式：
- *   NUM,标签,置信度
- *   IMG,标签,置信度
+ *   B=<标签>  图像识别
+ *   T=<标签>  数字识别
  *
- * 失败格式：
- *   NUM,-1,-1
- *   IMG,-1,-1
- *
+ * 摄像头只在其内部置信度超过阈值时回包，因此没有旧协议中的 score 或失败帧。
  * 注意：这里不解析地图帧，也不查找 $MAP/$END。视觉识别是行协议，
  * 地图/车姿是包协议，两者保持独立，避免互相误判。
  */
 static void vision_parse_line(char *line)
 {
-    char *cmd = NULL;
+    char *tag = NULL;
     char *label = NULL;
-    char *score_text = NULL;
-    char *comma1 = NULL;
-    char *comma2 = NULL;
+    char *equal_sign = NULL;
     VisionRecognitionType type = VISION_RECOGNITION_NONE;
-    int32 score_value = 0;
     int32 label_value = -1;
     bool label_is_number = false;
-    bool success = true;
-    bool mode_marker = false;
 
     if (line == NULL) {
         return;
     }
 
-    cmd = vision_trim_ascii_in_place(line);
-    if (cmd == NULL || '\0' == *cmd) {
+    tag = vision_trim_ascii_in_place(line);
+    if (tag == NULL || '\0' == *tag) {
         return;
     }
 
-    comma1 = strchr(cmd, ',');
-    if (comma1 == NULL) {
+    equal_sign = strchr(tag, '=');
+    if (equal_sign == NULL || strchr(equal_sign + 1U, '=') != NULL) {
         vision_note_bad_line();
         return;
     }
-    *comma1 = '\0';
+    *equal_sign = '\0';
+    label = equal_sign + 1U;
 
-    label = comma1 + 1U;
-    comma2 = strchr(label, ',');
-    if (comma2 == NULL) {
-        vision_note_bad_line();
-        return;
-    }
-    *comma2 = '\0';
-    score_text = comma2 + 1U;
-
-    if (strchr(score_text, ',') != NULL) {
-        vision_note_bad_line();
-        return;
-    }
-
-    cmd = vision_trim_ascii_in_place(cmd);
+    tag = vision_trim_ascii_in_place(tag);
     label = vision_trim_ascii_in_place(label);
-    score_text = vision_trim_ascii_in_place(score_text);
-    if (cmd == NULL || label == NULL || score_text == NULL || '\0' == *label) {
+    if (tag == NULL || label == NULL || '\0' == *label) {
         vision_note_bad_line();
         return;
     }
 
-    type = vision_parse_type_field(cmd);
+    type = vision_parse_type_tag(tag);
     if (VISION_RECOGNITION_NONE == type) {
-        vision_note_bad_line();
-        return;
-    }
-
-    if (!vision_parse_int32_text(score_text, &score_value)) {
         vision_note_bad_line();
         return;
     }
@@ -994,27 +952,7 @@ static void vision_parse_line(char *line)
         label_value = -1;
     }
 
-    if (0 == strcmp(label, "-1")) {
-        if (-1 == score_value) {
-            success = false;
-        } else if (0 == score_value) {
-            /*
-             * 新版摄像头在第一次接收到识别命令时，会先判断关卡模式色块。
-             * 命中对应纯色块时返回 IMG/NUM,-1,0：这不是普通识别失败，
-             * 而是告诉主控“已确认模式，但本帧没有实际图案/数字标签”。
-             */
-            success = true;
-            mode_marker = true;
-        } else {
-            vision_note_bad_line();
-            return;
-        }
-    } else if (score_value < 0 || score_value > 100) {
-        vision_note_bad_line();
-        return;
-    }
-
-    vision_store_result(type, label, label_value, label_is_number, (int16)score_value, success, mode_marker);
+    vision_store_result(type, label, label_value, label_is_number, -1, true, false);
 }
 
 /*
@@ -1228,13 +1166,10 @@ void vision_uart_rx_interrupt_handler(void)
 /*
  * 根据识别类型和识别距离选择主控要发送给摄像头的命令。
  *
- * 新协议里第 1 个字符表示距离：
- * - '1'：两格距离模型；
- * - '2'：一格距离模型。
- *
- * 第 2 个字符表示模型类型：
- * - 'I'：图像识别，摄像头返回 IMG,...；
- * - 'N'：数字识别，摄像头返回 NUM,...。
+ * 新摄像头使用 SNAP=<模式>\n 请求：
+ * - SNAP=0：近距离图像识别；   SNAP=1：近距离数字识别；
+ * - SNAP=2：远距离图像识别；   SNAP=3：远距离数字识别。
+ * 摄像头只在置信度达标时回传一行：图像为 B=<标签>，数字为 T=<标签>。
  */
 static const char *vision_get_request_command(VisionRecognitionType type,
                                               VisionRecognitionDistance distance)
@@ -1308,14 +1243,14 @@ bool uart_send_vision_img_request_by_distance(VisionRecognitionDistance distance
     return uart_send_vision_request(VISION_RECOGNITION_IMG, distance);
 }
 
-/* 兼容旧调用：默认使用一格距离数字识别模型，即发送 "2N\n"。 */
+/* 兼容旧调用：默认使用近距离数字识别，即发送 "SNAP=1\n"。 */
 void uart_send_vision_num_request(void)
 {
     (void)uart_send_vision_num_request_by_distance(VISION_RECOGNITION_DISTANCE_ONE_GRID);
 }
 
 /* 向视觉识别端请求一次图案识别。发送前清掉半包数据，避免旧残留误触发本次结果。 */
-/* 兼容旧调用：默认使用一格距离图像识别模型，即发送 "2I\n"。 */
+/* 兼容旧调用：默认使用近距离图像识别，即发送 "SNAP=0\n"。 */
 void uart_send_vision_img_request(void)
 {
     (void)uart_send_vision_img_request_by_distance(VISION_RECOGNITION_DISTANCE_ONE_GRID);

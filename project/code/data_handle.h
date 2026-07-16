@@ -48,33 +48,15 @@
 #define UART_CMD_CAR_STREAM_STOP "CARSTOP\r\n"
 
 /*
- * loadmode.py 支持的识别命令：
- * - 主控发送 "NUM\n"：调用数字模型；
- * - 主控发送 "IMG\n"：调用图案模型。
- *
- * OpenMV 返回：
- * - "NUM,<label>,<score>\n"
- * - "IMG,<label>,<score>\n"
- * 其中 score 是 0~100 的置信度百分比；识别失败返回 "<cmd>,-1,-1"。
+ * 右侧识别摄像头协议（main(视觉).py）：
+ * - 主控发送 SNAP=0/1/2/3\n，分别是近图像、近数字、远图像、远数字；
+ * - 置信度超过摄像头阈值时，回传 B=<label>\r\n（图像）或 T=<label>\r\n（数字）；
+ * - 未达到阈值时摄像头不回包，由主控等待超时处理。
  */
-/*
- * 视觉识别摄像头命令协议。
- *
- * 主控每次只发送一条命令，并且必须以 '\n' 结尾：
- * - "1I\n"：两格距离图像识别模型；
- * - "2I\n"：一格距离图像识别模型；
- * - "1N\n"：两格距离数字识别模型；
- * - "2N\n"：一格距离数字识别模型。
- *
- * 返回协议仍按模型类型区分：
- * - 图像识别返回 "IMG,<标签>,<可信度>\n"；
- * - 数字识别返回 "NUM,<标签>,<可信度>\n"；
- * - 识别失败返回 "IMG,-1,-1\n" 或 "NUM,-1,-1\n"。
- */
-#define UART_CMD_VISION_IMG_TWO_GRID "1I\n"
-#define UART_CMD_VISION_IMG_ONE_GRID "2I\n"
-#define UART_CMD_VISION_NUM_TWO_GRID "1N\n"
-#define UART_CMD_VISION_NUM_ONE_GRID "2N\n"
+#define UART_CMD_VISION_IMG_ONE_GRID "SNAP=0\n"
+#define UART_CMD_VISION_NUM_ONE_GRID "SNAP=1\n"
+#define UART_CMD_VISION_IMG_TWO_GRID "SNAP=2\n"
+#define UART_CMD_VISION_NUM_TWO_GRID "SNAP=3\n"
 
 /* 地图字符语义（供上层业务使用） */
 #define MAP_SYMBOL_OBSTACLE '#'
@@ -101,9 +83,9 @@ typedef struct {
     char label[VISION_LABEL_MAX_LEN]; /* 原始标签字符串，例如 "3"、"box"、"-1"。 */
     int32 label_value;                /* 当 label 是纯数字时保存数值；否则为 -1。 */
     bool label_is_number;             /* label_value 是否由有效数字转换得到。 */
-    int16 score;                      /* 置信度百分比，范围 0~100；失败帧为 -1。 */
-    bool success;                     /* true=识别成功；false=OpenMV 返回 -1,-1。 */
-    bool mode_marker;                 /* true=摄像头首帧识别到关卡模式纯色块，返回 IMG/NUM,-1,0。 */
+    int16 score;                      /* 新摄像头不回传置信度，固定为 -1。 */
+    bool success;                     /* true=收到 B=/T= 有效回包。 */
+    bool mode_marker;                 /* 新摄像头未使用，固定为 false。 */
 } VisionRecognitionResult;
 
 /* 初始化串口接收、FIFO 与模块状态 */
@@ -112,7 +94,7 @@ void uart_blob_init(void);
 void process_blob_data(void);
 /* Discard pending map/position UART bytes and any incomplete frame. */
 void uart_blob_clear_pending_data(void);
-/* 主循环调用：读取视觉识别 UART FIFO，并按行解析 NUM/IMG 结果。 */
+/* 主循环调用：读取视觉识别 UART FIFO，并按行解析 B=/T= 结果。 */
 void process_vision_data(void);
 /* 直接从多行字符串解析地图（不经过串口帧） */
 bool parse_map_from_string(const char *map_text);
@@ -128,17 +110,15 @@ void uart_send_car_request(void);
 /* Optional continuous position reporting controls. */
 void uart_start_car_stream(void);
 void uart_stop_car_stream(void);
-/* 按“识别类型 + 识别距离”发送新协议命令，命令末尾已包含 '\n'。 */
+/* 按“识别类型 + 识别距离”发送 SNAP=0/1/2/3 命令。 */
 bool uart_send_vision_request(VisionRecognitionType type, VisionRecognitionDistance distance);
 /* 向视觉摄像头发送数字识别请求：distance=1 两格，distance=2 一格。 */
 bool uart_send_vision_num_request_by_distance(VisionRecognitionDistance distance);
 /* 向视觉摄像头发送图像识别请求：distance=1 两格，distance=2 一格。 */
 bool uart_send_vision_img_request_by_distance(VisionRecognitionDistance distance);
-/* 向 loadmode.py 发送数字识别请求 "NUM\n"。 */
-/* 兼容旧调用：默认使用一格距离数字识别模型，即发送 "2N\n"。 */
+/* 兼容调用：默认使用近距离数字识别，即发送 SNAP=1\n。 */
 void uart_send_vision_num_request(void);
-/* 向 loadmode.py 发送图案识别请求 "IMG\n"。 */
-/* 兼容旧调用：默认使用一格距离图像识别模型，即发送 "2I\n"。 */
+/* 兼容调用：默认使用近距离图像识别，即发送 SNAP=0\n。 */
 void uart_send_vision_img_request(void);
 /* 读取并清除“最新数字识别结果已更新”标志。 */
 bool vision_take_num_result(VisionRecognitionResult *out_result);

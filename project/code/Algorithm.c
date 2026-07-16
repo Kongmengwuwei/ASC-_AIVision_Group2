@@ -399,7 +399,9 @@ static inline int manhattan_distance_cells(Position p1, Position p2)
 }
 
 /* 2D A* 节点池。*/
+#ifdef ALGORITHM_USE_LEGACY_2D_ASTAR
 a_star_param a_star[grid_size];
+#endif
 
 /*
  * 2D A*：小车从起点到目标的路径规划
@@ -432,6 +434,8 @@ static int a_star_path_plan(int row_cnt, int col_cnt,
     {
         uint8_t grid[grid_size];
         uint16_t queue[grid_size];
+        uint8_t distance[grid_size];
+        int16_t parent[grid_size];
         int queue_head = 0;
         int queue_tail = 0;
         int start_index = start.row * col_cnt + start.col;
@@ -441,11 +445,11 @@ static int a_star_path_plan(int row_cnt, int col_cnt,
 
         grid_build(row_cnt, col_cnt, obstacles, obstacles_cnt,
                    bombs, bombs_cnt, boxes, boxes_cnt, grid);
-        memset(a_star, 0, sizeof(a_star));
+        memset(distance, 0, sizeof(distance));
 
-        a_star[start_index].parent_index = -1;
-        a_star[start_index].path_len = 1;
-        a_star[start_index].open_or_close = 1;
+        if (out_path)
+            parent[start_index] = -1;
+        distance[start_index] = 1U;
         queue[queue_tail++] = (uint16_t)start_index;
 
         while (queue_head < queue_tail)
@@ -456,7 +460,7 @@ static int a_star_path_plan(int row_cnt, int col_cnt,
 
             if (current_index == target_index)
             {
-                int path_len = a_star[current_index].path_len;
+                int path_len = (int)distance[current_index];
                 if (out_path)
                 {
                     int curr = current_index;
@@ -467,7 +471,7 @@ static int a_star_path_plan(int row_cnt, int col_cnt,
                         out_path[out_index].col = (uint8)(curr % col_cnt);
                         out_path[out_index].id = 0;
                         out_index--;
-                        curr = a_star[curr].parent_index;
+                        curr = (int)parent[curr];
                     }
                 }
                 return path_len;
@@ -482,7 +486,7 @@ static int a_star_path_plan(int row_cnt, int col_cnt,
                 if (nr < 0 || nr >= row_cnt || nc < 0 || nc >= col_cnt)
                     continue;
                 neighbor_index = nr * col_cnt + nc;
-                if (a_star[neighbor_index].open_or_close != 0)
+                if (distance[neighbor_index] != 0U)
                     continue;
                 if (check_obstacle(grid, col_cnt, nr, nc) ||
                     (grid[neighbor_index] & BOX))
@@ -491,10 +495,9 @@ static int a_star_path_plan(int row_cnt, int col_cnt,
                     nc == (int)g_car_forbidden_cell.col)
                     continue;
 
-                a_star[neighbor_index].parent_index = current_index;
-                a_star[neighbor_index].path_len =
-                    a_star[current_index].path_len + 1;
-                a_star[neighbor_index].open_or_close = 1;
+                if (out_path)
+                    parent[neighbor_index] = (int16_t)current_index;
+                distance[neighbor_index] = (uint8_t)(distance[current_index] + 1U);
                 queue[queue_tail++] = (uint16_t)neighbor_index;
             }
         }
@@ -625,15 +628,12 @@ static int a_star_path_plan(int row_cnt, int col_cnt,
 
 /* Resolve every useful face change for one 3D state with one BFS. */
 static void car_walk_lengths_to_box_faces(int row_cnt, int col_cnt,
-                                          const Position *obstacles, int obstacles_cnt,
-                                          const Position *bombs, int bombs_cnt,
-                                          const Position *boxes, int boxes_cnt,
+                                          const uint8_t *static_grid,
                                           Position start,
                                           int box_row, int box_col,
                                           uint8_t requested_faces,
                                           uint8_t *face_walk_len)
 {
-    uint8_t grid[grid_size];
     uint8_t distance[grid_size];
     uint16_t queue[grid_size];
     int queue_head = 0;
@@ -650,8 +650,6 @@ static void car_walk_lengths_to_box_faces(int row_cnt, int col_cnt,
 #ifdef GAME_LOGIC_PROFILE
     g_profile_astar_2d_calls++;
 #endif
-    grid_build(row_cnt, col_cnt, obstacles, obstacles_cnt,
-               bombs, bombs_cnt, boxes, boxes_cnt, grid);
     memset(distance, 0, sizeof(distance));
     distance[(int)start.row * col_cnt + (int)start.col] = 1U;
     queue[queue_tail++] = (uint16_t)((int)start.row * col_cnt + (int)start.col);
@@ -687,8 +685,9 @@ static void car_walk_lengths_to_box_faces(int row_cnt, int col_cnt,
             neighbor_index = nr * col_cnt + nc;
             if (distance[neighbor_index] != 0U)
                 continue;
-            if (check_obstacle(grid, col_cnt, nr, nc) ||
-                (grid[neighbor_index] & BOX))
+            if (check_obstacle((uint8_t *)static_grid, col_cnt, nr, nc) ||
+                (static_grid[neighbor_index] & BOX) ||
+                (nr == box_row && nc == box_col))
                 continue;
             if (nr == (int)g_car_forbidden_cell.row &&
                 nc == (int)g_car_forbidden_cell.col)
@@ -875,7 +874,10 @@ int a_star_path_plan_3d(int row_cnt, int col_cnt,
     }
 
     uint8_t grid[grid_size];
+    uint8_t car_static_grid[grid_size];
     grid_build(row_cnt, col_cnt, obstacles, obstacles_cnt, bombs, bombs_cnt, local_boxes, boxes_cnt, grid);
+    memcpy(car_static_grid, grid, sizeof(car_static_grid));
+    car_static_grid[(int)box_start.row * col_cnt + (int)box_start.col] &= (uint8_t)~BOX;
 
     memset(a_star_3d, 0, sizeof(a_star_3d));
 
@@ -1062,9 +1064,7 @@ int a_star_path_plan_3d(int row_cnt, int col_cnt,
             requested_reorient_faces |= (uint8_t)(1U << candidate_face);
         }
         car_walk_lengths_to_box_faces(row_cnt, col_cnt,
-                                      obstacles, obstacles_cnt,
-                                      bombs, bombs_cnt,
-                                      local_boxes, boxes_cnt,
+                                      car_static_grid,
                                       reorient_car_from,
                                       row, col,
                                       requested_reorient_faces,

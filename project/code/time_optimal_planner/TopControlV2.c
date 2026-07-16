@@ -132,8 +132,10 @@ top_status_t top_control_v2_segment_completed(top_control_v2_t *control)
         control->stage = TOP_CONTROL_FINISHED;
         return TOP_STATUS_OK;
     }
-    control->stage = TOP_CONTROL_NEED_PLAN;
-    return TOP_STATUS_PARTIAL_REPLAN;
+    /* Strict staged planning only emits partial plans for identification. */
+    control->stage = TOP_CONTROL_ERROR;
+    control->last_status = TOP_STATUS_INTERNAL_ERROR;
+    return TOP_STATUS_INTERNAL_ERROR;
 }
 
 top_status_t top_control_v2_submit_identification(top_control_v2_t *control,

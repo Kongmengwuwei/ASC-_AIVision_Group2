@@ -135,6 +135,42 @@ static int s_infer_wall_cache_next = 0;
 static int s_identify_need_cache_next = 0;
 static int s_identify_bomb_cache_next = 0;
 
+#if defined(GAME_LOGIC_PROFILE)
+uint32 g_profile_bomb_task_calls = 0U;
+uint32 g_profile_bomb_task_duplicate_keys = 0U;
+uint32 g_profile_box_plan_calls = 0U;
+uint32 g_profile_box_plan_duplicate_keys = 0U;
+static uint32 s_profile_bomb_keys[2048];
+static uint8 s_profile_bomb_key_valid[2048];
+static uint32 s_profile_box_keys[512];
+static uint8 s_profile_box_key_valid[512];
+
+static void profile_record_key(uint32 key,
+                               uint32 *keys,
+                               uint8 *valid,
+                               int capacity,
+                               uint32 *duplicate_count)
+{
+    int i;
+    int slot = (int)(key % (uint32)capacity);
+    for (i = 0; i < capacity; i++)
+    {
+        int index = (slot + i) % capacity;
+        if (!valid[index])
+        {
+            valid[index] = 1U;
+            keys[index] = key;
+            return;
+        }
+        if (keys[index] == key)
+        {
+            (*duplicate_count)++;
+            return;
+        }
+    }
+}
+#endif
+
 /* 识别访问顺序：kind 0=箱子、1=目标；识别前 id 可能仍为 0。 */
 uint8 g_identify_seq_kind[MAX_BOXES + MAX_TARGETS];
 uint8 g_identify_seq_id[MAX_BOXES + MAX_TARGETS];
@@ -589,6 +625,26 @@ static int plan_box_with_candidates(const planning_state_t *state,
     int has_forbidden_bomb = 0;
     int i;
 
+#if defined(GAME_LOGIC_PROFILE)
+    {
+        uint32 key = hash_state_signature(state);
+        key = hash_mix_u32(key, (uint32)box_index);
+        key = hash_mix_u32(key, (uint32)allowed_bombs_cnt);
+        for (i = 0; i < allowed_bombs_cnt; i++)
+            key = hash_mix_position(key, allowed_bombs[i]);
+        key = hash_mix_u32(key, (uint32)targets_cnt);
+        for (i = 0; i < targets_cnt; i++)
+            key = hash_mix_position(key, targets[i]);
+        key = hash_mix_position(key, car_start);
+        g_profile_box_plan_calls++;
+        profile_record_key(key,
+                           s_profile_box_keys,
+                           s_profile_box_key_valid,
+                           512,
+                           &g_profile_box_plan_duplicate_keys);
+    }
+#endif
+
     if (!state || !targets || targets_cnt <= 0 || !out_plan)
         return -1;
     if (box_index < 0 || box_index >= state->boxes_cnt)
@@ -954,6 +1010,23 @@ static int plan_bomb_task_in_state(const planning_state_t *state,
     int temp_boxes_cnt;
     int i;
     int steps;
+
+#if defined(GAME_LOGIC_PROFILE)
+    {
+        uint32 key = hash_state_signature(state);
+        key = hash_mix_position(key, primary_bomb);
+        key = hash_mix_position(key, wall_ref);
+        key = hash_mix_u32(key, (uint32)support_bombs_cnt);
+        for (i = 0; i < support_bombs_cnt; i++)
+            key = hash_mix_position(key, support_bombs[i]);
+        g_profile_bomb_task_calls++;
+        profile_record_key(key,
+                           s_profile_bomb_keys,
+                           s_profile_bomb_key_valid,
+                           2048,
+                           &g_profile_bomb_task_duplicate_keys);
+    }
+#endif
 
     if (!state || !out_plan)
         return -1;

@@ -14,14 +14,16 @@ extern "C" {
 #define TOP_COLS 14U
 #define TOP_CELL_COUNT (TOP_ROWS * TOP_COLS)
 
-#define TOP_MAX_BOXES 5U
-#define TOP_MAX_TARGETS 5U
+#define TOP_MAX_BOXES 10U
+#define TOP_MAX_TARGETS 10U
 #define TOP_MAX_BOMBS 10U
 #define TOP_MAX_RAW_POINTS 1024U
 #define TOP_MAX_EXEC_POINTS 384U
 #define TOP_MAX_SEGMENTS 256U
 #define TOP_INVALID_CELL 0xFFU
 #define TOP_ID_UNKNOWN 0xFFU
+
+typedef uint16_t top_object_mask_t;
 
 /* New event protocol.  It is deliberately wider than Position.id: events are
  * not object IDs and a point may carry several independent events. */
@@ -130,7 +132,6 @@ typedef struct
     uint16_t identify_far_ms;
     uint16_t bomb_wait_ms;
     uint16_t planning_budget_ms;
-    uint16_t interleave_bias_ms;
     uint16_t max_expansions;
     uint16_t max_nodes;
     uint16_t heuristic_weight_permille;
@@ -170,8 +171,8 @@ typedef struct
     top_cell_t car;
     top_heading_t heading;
     top_wall_bits_t walls;
-    uint8_t box_active_mask;
-    uint8_t target_active_mask;
+    top_object_mask_t box_active_mask;
+    top_object_mask_t target_active_mask;
     uint16_t bomb_active_mask;
     top_cell_t box_cells[TOP_MAX_BOXES];
     top_cell_t bomb_cells[TOP_MAX_BOMBS];
@@ -206,15 +207,16 @@ int top_problem_set_wall(top_problem_t *problem, int row, int col, int blocked);
 int top_problem_has_wall(const top_problem_t *problem, int row, int col);
 top_status_t top_problem_validate(const top_problem_t *problem);
 
-/* Plans either a complete task, one interleaved known delivery, or the next
- * identification action.  A PARTIAL_REPLAN result is intentionally executable
- * and asks the caller to update observations/state before calling again. */
+/* Strict staged policy: while any active ID is unknown, returns only the next
+ * identification action.  Box/bomb planning starts after identification is
+ * complete (including last-pair inference).  A PARTIAL_REPLAN result therefore
+ * represents an identification step only. */
 top_status_t top_plan(const top_problem_t *problem,
                       const top_config_t *config,
                       top_result_t *result);
 
 /* Applies result.end_state to the mutable problem while preserving labels and
- * known flags.  Use this after executing a PARTIAL_REPLAN result. */
+ * known flags.  Use this after executing an identification result. */
 top_status_t top_problem_apply_result(top_problem_t *problem,
                                       const top_result_t *result);
 

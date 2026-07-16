@@ -17,7 +17,7 @@ This directory is a parallel implementation.  It does not replace or modify
   sight line.
 - A bomb is pushed into an internal wall cell, clears the internal 3x3 wall
   area, never affects objects, cannot chain, and adds a 500 ms wait.
-- At most five boxes/targets and ten bombs.
+- At most ten boxes/targets and ten bombs.
 - IDs may repeat.  Any equal-ID box/target assignment is legal.  If exactly one
   active box and target remain unknown, the pair is inferred.
 - All internal walls disappear after the final delivery.  The finish cells are
@@ -27,7 +27,7 @@ This directory is a parallel implementation.  It does not replace or modify
 
 - `TopPlanner.*`: bounded anytime weighted A* over push macro-actions.  Box
   matching, bomb motion/explosion, dynamic walls, return, repeated IDs and
-  interleaved delivery/recognition decisions share one time-cost model.
+  staged recognition/pushing share one time-cost model.
 - `TopGrid.*`: 8-neighbor Dijkstra, no corner cutting, swept-square visibility,
   and time-first/fewest-points walk compression.
 - `TopPath.*`: self-contained raw path, compact execution path, 32-bit event
@@ -56,10 +56,10 @@ remaining budget searches for alternatives.  Timeout returns a verified
 solution when one exists, otherwise an explicit failure.
 
 Unknown IDs make the future conditional on camera output.  The planner returns
-one executable partial plan, then replans after recognition.  If a known pair
-can be delivered faster than the next useful recognition, a delivery may be
-returned first.  This enables recognition and pushing to interleave without
-pretending that an unseen ID is known.
+one executable identification plan, then replans after the camera result.  It
+never returns a box or bomb push while any active ID remains unknown.  Only
+after recognition is complete (including last-pair inference) does it plan the
+full bomb/push/return route.
 
 ## Integration outline
 
@@ -75,8 +75,9 @@ pretending that an unseen ID is known.
    - `ROTATE`: call the yaw rotation primitive.
    - `WAIT`: use a non-blocking 500 ms state.
    - `IDENTIFY`: request the correct camera model and submit the ID.
-6. After the last segment, `top_control_v2_segment_completed()` either finishes
-   or requests the next planning cycle.
+6. After an identification segment, submit the camera ID and start the next
+   identification planning cycle.  After all IDs are known, the returned plan
+   completes the push and return phase without going back to recognition.
 
 Do not feed stationary rotate/identify/wait points directly into old
 `path_follow`; those are control events, not translational waypoints.
@@ -90,7 +91,7 @@ powershell -ExecutionPolicy Bypass -File tools\time_optimal_planner_tests\run_te
 ```
 
 Coverage includes exact small cases, repeated IDs, last-pair inference,
-interleaved delivery, mandatory bomb use, new control flow, all six nonduplicate
+strict recognition-before-delivery, mandatory bomb use, new control flow, all six nonduplicate
 legacy preset maps, 200 deterministic randomized maps, and deliberately damaged
 output paths.
 
@@ -98,7 +99,7 @@ The parallel Keil project is `project/mdk/rt1064_time_optimal.uvprojx`.  It
 compiles every new module with ARM Compiler 6 while leaving the original project
 file unchanged.
 
-Current static planner workspace is about 271 KiB with the 4096-node pool.  On
+Current static planner workspace is about 281 KiB with the 4096-node pool.  On
 ARM Compiler 6 it is explicitly placed in the project's 512 KiB cached OCRAM
 region instead of DTCM.  One `top_result_t` is about 41 KiB on the host ABI.
 Confirm the final ARM map after the new control is selected by `main`, because

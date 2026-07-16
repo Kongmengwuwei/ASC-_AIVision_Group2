@@ -176,7 +176,8 @@ static int verify_end_state(const top_problem_t *state,
     for (i = 0U; i < state->box_count; ++i)
     {
         int active = top_cell_valid(state->boxes[i].cell);
-        if (active != ((result->end_state.box_active_mask & (uint8_t)(1U << i)) != 0U))
+        if (active != ((result->end_state.box_active_mask &
+                        (top_object_mask_t)(UINT16_C(1) << i)) != 0U))
         {
             return 0;
         }
@@ -189,7 +190,8 @@ static int verify_end_state(const top_problem_t *state,
     for (i = 0U; i < state->target_count; ++i)
     {
         int active = top_cell_valid(state->targets[i].cell);
-        if (active != ((result->end_state.target_active_mask & (uint8_t)(1U << i)) != 0U))
+        if (active != ((result->end_state.target_active_mask &
+                        (top_object_mask_t)(UINT16_C(1) << i)) != 0U))
         {
             return 0;
         }

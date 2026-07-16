@@ -23,7 +23,7 @@ typedef struct
     uint8_t heading;
     uint8_t box_pos[TOP_MAX_BOXES];
     uint8_t bomb_pos[TOP_MAX_BOMBS];
-    uint8_t target_active_mask;
+    top_object_mask_t target_active_mask;
 } top_search_state_t;
 
 typedef struct
@@ -49,8 +49,6 @@ typedef struct
 
 typedef struct
 {
-    uint8_t partial_one_delivery;
-    uint8_t initial_active_boxes;
     uint8_t solution_count;
     uint8_t timed_out;
     uint8_t node_limit_hit;
@@ -125,7 +123,6 @@ void top_config_default(top_config_t *config)
     config->identify_far_ms = 200U;
     config->bomb_wait_ms = 500U;
     config->planning_budget_ms = 1000U;
-    config->interleave_bias_ms = 0U;
     config->max_expansions = 4000U;
     config->max_nodes = TOP_INTERNAL_MAX_NODES;
     config->heuristic_weight_permille = 8000U;
@@ -437,7 +434,7 @@ static void top_state_from_problem(const top_problem_t *problem,
     {
         if (top_cell_valid(problem->targets[i].cell))
         {
-            state->target_active_mask |= (uint8_t)(1U << i);
+            state->target_active_mask |= (top_object_mask_t)(UINT16_C(1) << i);
         }
     }
     for (i = 0U; i < problem->bomb_count; ++i)
@@ -510,7 +507,7 @@ static uint32_t top_assignment_recursive(const top_problem_t *problem,
                                          const uint8_t *box_indices,
                                          uint8_t box_count,
                                          uint8_t at,
-                                         uint8_t used_targets,
+                                         top_object_mask_t used_targets,
                                          uint32_t step_ms)
 {
     uint8_t t;
@@ -530,8 +527,8 @@ static uint32_t top_assignment_recursive(const top_problem_t *problem,
         uint32_t rest;
         uint32_t distance;
         int manhattan;
-        if ((state->target_active_mask & (uint8_t)(1U << t)) == 0U ||
-            (used_targets & (uint8_t)(1U << t)) != 0U ||
+        if ((state->target_active_mask & (top_object_mask_t)(UINT16_C(1) << t)) == 0U ||
+            (used_targets & (top_object_mask_t)(UINT16_C(1) << t)) != 0U ||
             !top_ids_compatible(problem, b, t, 1))
         {
             continue;
@@ -551,7 +548,8 @@ static uint32_t top_assignment_recursive(const top_problem_t *problem,
                                             box_indices,
                                             box_count,
                                             (uint8_t)(at + 1U),
-                                            (uint8_t)(used_targets | (uint8_t)(1U << t)),
+                                            (top_object_mask_t)(used_targets |
+                                                (top_object_mask_t)(UINT16_C(1) << t)),
                                             step_ms);
         }
         if (rest < TOP_COST_INF && distance + rest < best)
@@ -564,49 +562,15 @@ static uint32_t top_assignment_recursive(const top_problem_t *problem,
 
 static uint32_t top_heuristic(const top_problem_t *problem,
                               const top_search_state_t *state,
-                              const top_config_t *config,
-                              int partial_one_delivery)
+                              const top_config_t *config)
 {
     uint8_t box_indices[TOP_MAX_BOXES];
     uint8_t box_count = 0U;
     uint8_t b;
-    uint8_t t;
     uint32_t step_ms;
 
     step_ms = (uint32_t)config->cell_size_mm * 1000U /
               config->translation_speed_mmps;
-    if (partial_one_delivery)
-    {
-        uint32_t best = TOP_COST_INF;
-        for (b = 0U; b < problem->box_count; ++b)
-        {
-            top_cell_t box_cell;
-            if (state->box_pos[b] == TOP_INVALID_CELL ||
-                (problem->match_mode == TOP_MODE_ID_MATCH && !problem->boxes[b].id_known))
-            {
-                continue;
-            }
-            box_cell = top_index_cell(state->box_pos[b]);
-            for (t = 0U; t < problem->target_count; ++t)
-            {
-                int manhattan;
-                uint32_t cost;
-                if ((state->target_active_mask & (uint8_t)(1U << t)) == 0U ||
-                    !top_ids_compatible(problem, b, t, 1))
-                {
-                    continue;
-                }
-                manhattan = abs((int)box_cell.row - (int)problem->targets[t].cell.row) +
-                            abs((int)box_cell.col - (int)problem->targets[t].cell.col);
-                cost = (uint32_t)manhattan * step_ms;
-                if (cost < best)
-                {
-                    best = cost;
-                }
-            }
-        }
-        return best;
-    }
     for (b = 0U; b < problem->box_count; ++b)
     {
         if (state->box_pos[b] != TOP_INVALID_CELL)
@@ -851,7 +815,7 @@ static int top_box_reverse_reachable(const top_problem_t *problem,
     memset(visited, 0, sizeof(visited));
     for (t = 0U; t < problem->target_count; ++t)
     {
-        if ((state->target_active_mask & (uint8_t)(1U << t)) != 0U &&
+        if ((state->target_active_mask & (top_object_mask_t)(UINT16_C(1) << t)) != 0U &&
             top_ids_compatible(problem, box_index, t, 1))
         {
             uint8_t index = top_cell_index(problem->targets[t].cell);
@@ -902,7 +866,7 @@ static int top_box_on_compatible_target(const top_problem_t *problem,
     uint8_t t;
     for (t = 0U; t < problem->target_count; ++t)
     {
-        if ((state->target_active_mask & (uint8_t)(1U << t)) != 0U &&
+        if ((state->target_active_mask & (top_object_mask_t)(UINT16_C(1) << t)) != 0U &&
             top_cell_index(problem->targets[t].cell) == cell &&
             top_ids_compatible(problem, box_index, t, 1))
         {
@@ -939,7 +903,7 @@ static int top_box_permanent_deadlock(const top_problem_t *problem,
         for (t = 0U; t < problem->target_count; ++t)
         {
             top_cell_t target = problem->targets[t].cell;
-            if ((state->target_active_mask & (uint8_t)(1U << t)) == 0U ||
+            if ((state->target_active_mask & (top_object_mask_t)(UINT16_C(1) << t)) == 0U ||
                 !top_ids_compatible(problem, box_index, t, 1))
             {
                 continue;
@@ -1015,15 +979,7 @@ static int top_add_or_relax_node(const top_problem_t *problem,
         run->node_limit_hit = 1U;
         return 0;
     }
-    if (run->partial_one_delivery &&
-        top_active_box_count(state, problem) < run->initial_active_boxes)
-    {
-        h_ms = 0U;
-    }
-    else
-    {
-        h_ms = top_heuristic(problem, state, config, run->partial_one_delivery);
-    }
+    h_ms = top_heuristic(problem, state, config);
     if (h_ms >= TOP_COST_INF)
     {
         return 0;
@@ -1160,27 +1116,6 @@ static void top_record_solution(top_search_run_t *run,
     run->solution_cost[at] = cost;
 }
 
-static int top_box_has_known_target(const top_problem_t *problem,
-                                    const top_search_state_t *state,
-                                    uint8_t box_index)
-{
-    uint8_t t;
-    if (problem->match_mode == TOP_MODE_ID_MATCH &&
-        !problem->boxes[box_index].id_known)
-    {
-        return 0;
-    }
-    for (t = 0U; t < problem->target_count; ++t)
-    {
-        if ((state->target_active_mask & (uint8_t)(1U << t)) != 0U &&
-            top_ids_compatible(problem, box_index, t, 1))
-        {
-            return 1;
-        }
-    }
-    return 0;
-}
-
 static void top_expand_node(const top_problem_t *problem,
                             const top_config_t *config,
                             top_search_run_t *run,
@@ -1205,9 +1140,7 @@ static void top_expand_node(const top_problem_t *problem,
     for (i = 0U; i < problem->box_count; ++i)
     {
         top_cell_t object;
-        if (node->state.box_pos[i] == TOP_INVALID_CELL ||
-            (run->partial_one_delivery &&
-             !top_box_has_known_target(problem, &node->state, i)))
+        if (node->state.box_pos[i] == TOP_INVALID_CELL)
         {
             continue;
         }
@@ -1249,7 +1182,8 @@ static void top_expand_node(const top_problem_t *problem,
                                              &target_index))
             {
                 next.box_pos[i] = TOP_INVALID_CELL;
-                next.target_active_mask &= (uint8_t)~(uint8_t)(1U << target_index);
+                next.target_active_mask &= (top_object_mask_t)~
+                    (top_object_mask_t)(UINT16_C(1) << target_index);
             }
             else if (top_box_permanent_deadlock(problem, &next, i))
             {
@@ -1338,7 +1272,6 @@ static void top_expand_node(const top_problem_t *problem,
 static int top_search(const top_problem_t *problem,
                       const top_config_t *config,
                       uint32_t start_ms,
-                      int partial_one_delivery,
                       top_search_run_t *run)
 {
     top_search_state_t initial;
@@ -1352,10 +1285,8 @@ static int top_search(const top_problem_t *problem,
     {
         s_heap.position[i] = TOP_HEAP_NONE;
     }
-    run->partial_one_delivery = partial_one_delivery ? 1U : 0U;
     run->start_ms = start_ms;
     top_state_from_problem(problem, &initial);
-    run->initial_active_boxes = top_active_box_count(&initial, problem);
     if (!top_add_or_relax_node(problem,
                                config,
                                run,
@@ -1401,22 +1332,18 @@ static int top_search(const top_problem_t *problem,
         node->closed = 1U;
         ++run->expanded;
         active_boxes = top_active_box_count(&node->state, problem);
-        if ((partial_one_delivery && active_boxes < run->initial_active_boxes) ||
-            (!partial_one_delivery && active_boxes == 0U))
+        if (active_boxes == 0U)
         {
             uint32_t total = node->g_ms;
-            if (!partial_one_delivery)
+            uint32_t return_ms = top_goal_return_cost(problem,
+                                                      &node->state,
+                                                      config,
+                                                      NULL);
+            if (return_ms >= TOP_COST_INF)
             {
-                uint32_t return_ms = top_goal_return_cost(problem,
-                                                          &node->state,
-                                                          config,
-                                                          NULL);
-                if (return_ms >= TOP_COST_INF)
-                {
-                    continue;
-                }
-                total += return_ms;
+                continue;
             }
+            total += return_ms;
             top_record_solution(run, (uint16_t)popped, total);
             continue;
         }
@@ -1464,7 +1391,7 @@ static void top_fill_end_state(top_end_state_t *out,
     {
         if (state->box_pos[i] != TOP_INVALID_CELL)
         {
-            out->box_active_mask |= (uint8_t)(1U << i);
+            out->box_active_mask |= (top_object_mask_t)(UINT16_C(1) << i);
             out->box_cells[i] = top_index_cell(state->box_pos[i]);
         }
     }
@@ -1620,7 +1547,6 @@ static int top_reconstruct_solution(const top_problem_t *problem,
     final_state = s_nodes[solution_node].state;
     final_car = top_index_cell(final_state.car);
     final_heading = (top_heading_t)final_state.heading;
-    if (!run->partial_one_delivery)
     {
         top_cell_t boxes[TOP_MAX_BOXES];
         top_cell_t bombs[TOP_MAX_BOMBS];
@@ -1677,10 +1603,6 @@ static int top_reconstruct_solution(const top_problem_t *problem,
         final_car = depot;
         final_heading = TOP_HEADING_RIGHT;
     }
-    else if (!top_path_finish(&builder, TOP_EVENT_NONE))
-    {
-        return 0;
-    }
     if (builder.failed)
     {
         return 0;
@@ -1694,10 +1616,9 @@ static int top_reconstruct_solution(const top_problem_t *problem,
     result->generated_nodes = run->generated;
     result->timed_out = run->timed_out;
     result->node_limit_hit = run->node_limit_hit;
-    result->complete = run->partial_one_delivery ? 0U : 1U;
-    result->needs_replan = run->partial_one_delivery ? 1U : 0U;
-    result->status = run->partial_one_delivery ? TOP_STATUS_PARTIAL_REPLAN :
-                                                TOP_STATUS_OK;
+    result->complete = 1U;
+    result->needs_replan = 0U;
+    result->status = TOP_STATUS_OK;
     return 1;
 }
 
@@ -1915,7 +1836,6 @@ top_status_t top_plan(const top_problem_t *problem,
     top_identify_candidate_t identify;
     uint32_t start_ms;
     int have_identify;
-    int have_solution;
     int all_known;
 
     if (result == NULL || problem == NULL)
@@ -1958,46 +1878,18 @@ top_status_t top_plan(const top_problem_t *problem,
 
     if (!all_known)
     {
-        top_config_t partial_config = effective;
-        if (partial_config.max_expansions == 0U || partial_config.max_expansions > 400U)
-        {
-            partial_config.max_expansions = 400U;
-        }
-        if (partial_config.planning_budget_ms > 500U)
-        {
-            partial_config.planning_budget_ms = 500U;
-        }
-        have_solution = top_search(&working,
-                                   &partial_config,
-                                   start_ms,
-                                   1,
-                                   &run);
-        if (have_solution &&
-            top_reconstruct_solution(&working,
-                                     &effective,
-                                     &run,
-                                     top_best_solution(&run),
-                                     result) &&
-            (!have_identify ||
-             result->motion_ms <= identify.cost_ms + effective.interleave_bias_ms))
-        {
-            return top_finalize_verified(&working, &effective, start_ms, result);
-        }
         if (have_identify &&
             top_build_identification_result(&working, &effective, &identify, result))
         {
             return top_finalize_verified(&working, &effective, start_ms, result);
         }
-        result->status = run.timed_out ? TOP_STATUS_TIMEOUT_NO_SOLUTION :
-                         run.node_limit_hit ? TOP_STATUS_NODE_LIMIT_NO_SOLUTION :
-                                              TOP_STATUS_NO_SOLUTION;
+        result->status = TOP_STATUS_NO_SOLUTION;
         result->planning_ms = top_elapsed(start_ms, &effective);
         result->predicted_total_ms = result->planning_ms;
         return result->status;
     }
 
-    have_solution = top_search(&working, &effective, start_ms, 0, &run);
-    if (!have_solution)
+    if (!top_search(&working, &effective, start_ms, &run))
     {
         result->status = run.timed_out ? TOP_STATUS_TIMEOUT_NO_SOLUTION :
                          run.node_limit_hit ? TOP_STATUS_NODE_LIMIT_NO_SOLUTION :
@@ -2039,12 +1931,14 @@ top_status_t top_problem_apply_result(top_problem_t *problem,
     problem->walls = result->end_state.walls;
     for (i = 0U; i < problem->box_count; ++i)
     {
-        problem->boxes[i].cell = (result->end_state.box_active_mask & (uint8_t)(1U << i)) != 0U ?
+        problem->boxes[i].cell = (result->end_state.box_active_mask &
+                                  (top_object_mask_t)(UINT16_C(1) << i)) != 0U ?
                                  result->end_state.box_cells[i] : (top_cell_t){-1, -1};
     }
     for (i = 0U; i < problem->target_count; ++i)
     {
-        if ((result->end_state.target_active_mask & (uint8_t)(1U << i)) == 0U)
+        if ((result->end_state.target_active_mask &
+             (top_object_mask_t)(UINT16_C(1) << i)) == 0U)
         {
             problem->targets[i].cell = (top_cell_t){-1, -1};
         }

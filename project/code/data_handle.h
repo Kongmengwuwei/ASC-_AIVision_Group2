@@ -49,14 +49,15 @@
 
 /*
  * 右侧识别摄像头协议（main(视觉).py）：
- * - 主控发送 SNAP=0/1/2/3\n，分别是近图像、近数字、远图像、远数字；
- * - 置信度超过摄像头阈值时，回传 B=<label>\r\n（图像）或 T=<label>\r\n（数字）；
- * - 未达到阈值时摄像头不回包，由主控等待超时处理。
+ * - 主控发送 SNAP=<mode>,<seq>\n；mode=0/1/2/3 分别是近图像、近数字、远图像、远数字；
+ * - 摄像头对每一条请求均回传 B=<seq>,<label>,<score>\r\n（图像）
+ *   或 T=<seq>,<label>,<score>\r\n（数字），score 范围为 0~100；
+ * - 低置信度也会回包（通常 label=-1），由主控决定是否重试，避免静默等待。
  */
-#define UART_CMD_VISION_IMG_ONE_GRID "SNAP=0\n"
-#define UART_CMD_VISION_NUM_ONE_GRID "SNAP=1\n"
-#define UART_CMD_VISION_IMG_TWO_GRID "SNAP=2\n"
-#define UART_CMD_VISION_NUM_TWO_GRID "SNAP=3\n"
+#define VISION_SNAP_MODE_IMG_ONE_GRID 0U
+#define VISION_SNAP_MODE_NUM_ONE_GRID 1U
+#define VISION_SNAP_MODE_IMG_TWO_GRID 2U
+#define VISION_SNAP_MODE_NUM_TWO_GRID 3U
 
 /* 地图字符语义（供上层业务使用） */
 #define MAP_SYMBOL_OBSTACLE '#'
@@ -80,11 +81,12 @@ typedef enum {
 
 typedef struct {
     VisionRecognitionType type;       /* 本条结果来自数字模型还是图案模型。 */
+    uint16 request_seq;                /* 与 SNAP 请求对应的序号，用于丢弃迟到回包。 */
     char label[VISION_LABEL_MAX_LEN]; /* 原始标签字符串，例如 "3"、"box"、"-1"。 */
     int32 label_value;                /* 当 label 是纯数字时保存数值；否则为 -1。 */
     bool label_is_number;             /* label_value 是否由有效数字转换得到。 */
-    int16 score;                      /* 新摄像头不回传置信度，固定为 -1。 */
-    bool success;                     /* true=收到 B=/T= 有效回包。 */
+    int16 score;                      /* 摄像头返回的置信度百分比，范围 0~100。 */
+    bool success;                     /* true=收到格式正确的 B=/T= 回包（低置信度也为 true）。 */
     bool mode_marker;                 /* 新摄像头未使用，固定为 false。 */
 } VisionRecognitionResult;
 
@@ -94,7 +96,7 @@ void uart_blob_init(void);
 void process_blob_data(void);
 /* Discard pending map/position UART bytes and any incomplete frame. */
 void uart_blob_clear_pending_data(void);
-/* 主循环调用：读取视觉识别 UART FIFO，并按行解析 B=/T= 结果。 */
+/* 主循环调用：读取视觉识别 UART FIFO，并按行解析 B=/T= 序号、标签、置信度结果。 */
 void process_vision_data(void);
 /* 直接从多行字符串解析地图（不经过串口帧） */
 bool parse_map_from_string(const char *map_text);
@@ -110,15 +112,19 @@ void uart_send_car_request(void);
 /* Optional continuous position reporting controls. */
 void uart_start_car_stream(void);
 void uart_stop_car_stream(void);
-/* 按“识别类型 + 识别距离”发送 SNAP=0/1/2/3 命令。 */
+/* 按“识别类型 + 识别距离”发送 SNAP=<mode>,<seq> 命令。 */
 bool uart_send_vision_request(VisionRecognitionType type, VisionRecognitionDistance distance);
+/* 同上，并返回本次请求序号，自动识别流程据此过滤迟到的旧回包。 */
+bool uart_send_vision_request_with_sequence(VisionRecognitionType type,
+                                            VisionRecognitionDistance distance,
+                                            uint16 *out_sequence);
 /* 向视觉摄像头发送数字识别请求：distance=1 两格，distance=2 一格。 */
 bool uart_send_vision_num_request_by_distance(VisionRecognitionDistance distance);
 /* 向视觉摄像头发送图像识别请求：distance=1 两格，distance=2 一格。 */
 bool uart_send_vision_img_request_by_distance(VisionRecognitionDistance distance);
-/* 兼容调用：默认使用近距离数字识别，即发送 SNAP=1\n。 */
+/* 兼容调用：默认使用近距离数字识别。 */
 void uart_send_vision_num_request(void);
-/* 兼容调用：默认使用近距离图像识别，即发送 SNAP=0\n。 */
+/* 兼容调用：默认使用近距离图像识别。 */
 void uart_send_vision_img_request(void);
 /* 读取并清除“最新数字识别结果已更新”标志。 */
 bool vision_take_num_result(VisionRecognitionResult *out_result);

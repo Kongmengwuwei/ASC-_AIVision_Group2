@@ -108,10 +108,13 @@ float g_control_prestart_depart_compensate_m = -0.025f;
 
 #define CONTROL_IDENTIFY_MAX_TARGETS_PER_POINT (MAX_BOXES + MAX_TARGETS)
 #define CONTROL_IDENTIFY_YAW_ALIGN_TOL_DEG 5.0f
-#define CONTROL_IDENTIFY_RECOG_TIMEOUT_LOOPS 250U
+#define CONTROL_IDENTIFY_RECOG_SETTLE_TICKS 20U
+#define CONTROL_IDENTIFY_RECOG_TIMEOUT_TICKS 80U
+#define CONTROL_IDENTIFY_RECOG_ACCEPT_SCORE 85
+#define CONTROL_IDENTIFY_RECOG_CONFIRM_SCORE 70
 #define CONTROL_IDENTIFY_HALF_GRID_M (GRID_SIZE_M * 0.5f)
 /* 连续超时多少次之后才真正重发识别命令（避免在摄像头处理过程中频繁清 FIFO 重发）。 */
-#define CONTROL_IDENTIFY_RECOG_MAX_RETRIES 5U
+#define CONTROL_IDENTIFY_RECOG_MAX_RETRIES 1U
 #define CONTROL_IDENTIFY_ID_UNASSIGNED 0xFFU
 #define CONTROL_IDENTIFY_ID_MIN 0U
 #define CONTROL_IDENTIFY_ID_MAX 9U
@@ -184,13 +187,6 @@ typedef struct
     uint8 need_identify;
     control_plan_mode_t push_mode;
 } control_level_rule_t;
-
-typedef enum
-{
-    CONTROL_RECOG_STEP_DONE = 0U,
-    CONTROL_RECOG_STEP_RETRY,
-    CONTROL_RECOG_STEP_GIVE_UP
-} control_recognition_step_t;
 
 /* ========================= 内部状态变�?========================= */
 
@@ -278,9 +274,14 @@ static uint8 g_identified_target_flags[MAX_TARGETS] = {0U};
 static uint8 g_identify_box_id_assigned[MAX_BOXES] = {0U};
 static uint8 g_identify_target_id_assigned[MAX_TARGETS] = {0U};
 static uint8 g_identify_recog_waiting = 0U;
-static uint16 g_identify_recog_wait_loops = 0U;
 static uint8 g_identify_recog_retry_count = 0U;
 static VisionRecognitionType g_identify_recog_wait_type = VISION_RECOGNITION_NONE;
+static uint16 g_identify_recog_expected_sequence = 0U;
+static uint32 g_identify_recog_wait_start_tick = 0U;
+static uint8 g_identify_recog_settle_waiting = 0U;
+static uint32 g_identify_recog_settle_start_tick = 0U;
+static uint8 g_identify_recog_confirm_pending = 0U;
+static uint8 g_identify_recog_confirm_id = 0U;
 
 static control_identify_id_record_t g_saved_box_id_records[MAX_BOXES] = {{0}};
 static control_identify_id_record_t g_saved_target_id_records[MAX_TARGETS] = {{0}};
@@ -554,9 +555,14 @@ static void mark_wait_new_map_frame(void)
 static void reset_identify_recognition_wait(void)
 {
     g_identify_recog_waiting = 0U;
-    g_identify_recog_wait_loops = 0U;
     g_identify_recog_retry_count = 0U;
     g_identify_recog_wait_type = VISION_RECOGNITION_NONE;
+    g_identify_recog_expected_sequence = 0U;
+    g_identify_recog_wait_start_tick = 0U;
+    g_identify_recog_settle_waiting = 0U;
+    g_identify_recog_settle_start_tick = 0U;
+    g_identify_recog_confirm_pending = 0U;
+    g_identify_recog_confirm_id = 0U;
 }
 
 static void reset_identify_runtime_state(void)
@@ -1199,29 +1205,6 @@ static void report_identify_result_bluetooth(const control_identify_target_t *ta
                       (unsigned int)recognized_id);
 }
 
-static control_recognition_step_t classify_identify_recognition_result(const VisionRecognitionResult *result,
-                                                                       uint8 valid_id)
-{
-    if (result == NULL)
-    {
-        return CONTROL_RECOG_STEP_GIVE_UP;
-    }
-
-    if (valid_id)
-    {
-        return CONTROL_RECOG_STEP_DONE;
-    }
-
-    if ((!result->success || result->mode_marker) &&
-        g_identify_recog_retry_count < CONTROL_IDENTIFY_RECOG_MAX_RETRIES)
-    {
-        g_identify_recog_retry_count++;
-        return CONTROL_RECOG_STEP_RETRY;
-    }
-
-    return CONTROL_RECOG_STEP_GIVE_UP;
-}
-
 static void apply_identify_result_to_map(const control_identify_target_t *target,
                                          uint8 valid_id,
                                          uint8 recognized_id)
@@ -1253,21 +1236,52 @@ static uint8 finish_or_retry_identify_result(const control_identify_target_t *ta
                                              uint8 recognized_id,
                                              VisionRecognitionDistance distance)
 {
-    control_recognition_step_t step = classify_identify_recognition_result(result, valid_id);
-
-    if (step == CONTROL_RECOG_STEP_RETRY)
+    if (result == NULL)
     {
-        if (!start_identify_recognition_request(target, distance))
+        reset_identify_recognition_wait();
+        return 1U;
+    }
+
+    /* 高置信度单帧直接采用，保证停车后的识别流程足够快。 */
+    if (valid_id && result->score >= CONTROL_IDENTIFY_RECOG_ACCEPT_SCORE)
+    {
+        apply_identify_result_to_map(target, valid_id, recognized_id);
+        reset_identify_recognition_wait();
+        return 1U;
+    }
+
+    /* 中等置信度必须用第二帧同标签确认，避免一帧偶然误判写入地图。 */
+    if (valid_id && result->score >= CONTROL_IDENTIFY_RECOG_CONFIRM_SCORE)
+    {
+        if (g_identify_recog_confirm_pending)
         {
+            if (recognized_id == g_identify_recog_confirm_id)
+            {
+                apply_identify_result_to_map(target, valid_id, recognized_id);
+            }
             reset_identify_recognition_wait();
             return 1U;
         }
-        return 0U;
+
+        g_identify_recog_confirm_pending = 1U;
+        g_identify_recog_confirm_id = recognized_id;
+        if (start_identify_recognition_request(target, distance))
+        {
+            return 0U;
+        }
+        reset_identify_recognition_wait();
+        return 1U;
     }
 
-    if (step == CONTROL_RECOG_STEP_DONE)
+    /* 低分、-1 或非数字标签：只补拍一帧；确认帧失败则立即跳过。 */
+    if (!g_identify_recog_confirm_pending &&
+        g_identify_recog_retry_count < CONTROL_IDENTIFY_RECOG_MAX_RETRIES)
     {
-        apply_identify_result_to_map(target, valid_id, recognized_id);
+        g_identify_recog_retry_count++;
+        if (start_identify_recognition_request(target, distance))
+        {
+            return 0U;
+        }
     }
 
     reset_identify_recognition_wait();
@@ -1531,11 +1545,11 @@ static uint8 start_identify_recognition_request(const control_identify_target_t 
         return 0U;
     }
 
-    g_identify_recog_wait_loops = 0U;
-
     if (target->obj_type == CONTROL_IDENTIFY_OBJ_BOX)
     {
-        if (!uart_send_vision_img_request_by_distance(distance))
+        if (!uart_send_vision_request_with_sequence(VISION_RECOGNITION_IMG,
+                                                    distance,
+                                                    &g_identify_recog_expected_sequence))
         {
             return 0U;
         }
@@ -1543,7 +1557,9 @@ static uint8 start_identify_recognition_request(const control_identify_target_t 
     }
     else
     {
-        if (!uart_send_vision_num_request_by_distance(distance))
+        if (!uart_send_vision_request_with_sequence(VISION_RECOGNITION_NUM,
+                                                    distance,
+                                                    &g_identify_recog_expected_sequence))
         {
             return 0U;
         }
@@ -1551,6 +1567,7 @@ static uint8 start_identify_recognition_request(const control_identify_target_t 
     }
 
     g_identify_recog_waiting = 1U;
+    g_identify_recog_wait_start_tick = g_control_tick_10ms;
     return 1U;
 }
 
@@ -1620,10 +1637,20 @@ static uint8 identify_action_stub(const control_identify_target_t *target)
 
     if (!g_identify_recog_waiting)
     {
-        /*
-         * Clear stale vision data before a new request so this target only consumes
-         * the response generated for the current IMG/NUM command.
-         */
+        if (!g_identify_recog_settle_waiting)
+        {
+            g_identify_recog_settle_waiting = 1U;
+            g_identify_recog_settle_start_tick = g_control_tick_10ms;
+            return 0U;
+        }
+
+        if ((uint32)(g_control_tick_10ms - g_identify_recog_settle_start_tick) <
+            CONTROL_IDENTIFY_RECOG_SETTLE_TICKS)
+        {
+            return 0U;
+        }
+
+        g_identify_recog_settle_waiting = 0U;
         if (!start_identify_recognition_request(target, distance))
         {
             return 1U;
@@ -1635,6 +1662,10 @@ static uint8 identify_action_stub(const control_identify_target_t *target)
     {
         if (vision_take_img_result(&result))
         {
+            if (result.request_seq != g_identify_recog_expected_sequence)
+            {
+                return 0U;
+            }
             valid_id = identify_result_to_valid_id(&result, &recognized_id);
             report_identify_result_bluetooth(target, &result, valid_id, recognized_id);
             return finish_or_retry_identify_result(target,
@@ -1648,6 +1679,10 @@ static uint8 identify_action_stub(const control_identify_target_t *target)
     {
         if (vision_take_num_result(&result))
         {
+            if (result.request_seq != g_identify_recog_expected_sequence)
+            {
+                return 0U;
+            }
             valid_id = identify_result_to_valid_id(&result, &recognized_id);
             report_identify_result_bluetooth(target, &result, valid_id, recognized_id);
             return finish_or_retry_identify_result(target,
@@ -1658,31 +1693,17 @@ static uint8 identify_action_stub(const control_identify_target_t *target)
         }
     }
 
-    g_identify_recog_wait_loops++;
-    if (g_identify_recog_wait_loops >= CONTROL_IDENTIFY_RECOG_TIMEOUT_LOOPS)
+    if ((uint32)(g_control_tick_10ms - g_identify_recog_wait_start_tick) >=
+        CONTROL_IDENTIFY_RECOG_TIMEOUT_TICKS)
     {
         if (g_identify_recog_retry_count < CONTROL_IDENTIFY_RECOG_MAX_RETRIES)
         {
             g_identify_recog_retry_count++;
-            /*
-             * OpenMV TFLite 推理耗时长（~300-800ms），主循环轮询 250 次可能远小于
-             * 一次识别耗时。连续超时前不要清 FIFO 重发命令，否则会把摄像头刚发回
-             * 的响应字节丢弃，导致永远收不到结果。
-             *
-             * 只在连续多次超时后才真正重发，应对摄像头确实丢命令的极端情况。
-             */
-            if (g_identify_recog_retry_count >= CONTROL_IDENTIFY_RECOG_MAX_RETRIES)
+            if (!start_identify_recognition_request(target, distance))
             {
-                if (!start_identify_recognition_request(target, distance))
-                {
-                    return 1U;
-                }
-                return 0U;
+                reset_identify_recognition_wait();
+                return 1U;
             }
-            /* 不重发：只重置计数器，清除可能残留的旧 updated 标志，继续等待。 */
-            g_identify_recog_wait_loops = 0U;
-            vision_num_result_updated = false;
-            vision_img_result_updated = false;
             return 0U;
         }
         reset_identify_recognition_wait();

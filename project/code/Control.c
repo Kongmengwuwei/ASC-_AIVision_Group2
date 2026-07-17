@@ -53,7 +53,7 @@ float g_control_prestart_depart_compensate_m = -0.025f;
 #define CONTROL_REQ_MAP_RETRY_TIMEOUT_TICKS 500U
 #define CONTROL_REQ_CAR_RETRY_TIMEOUT_TICKS 200U
 #define CONTROL_LOCALIZE_STOP_STABLE_TICKS 20U
-#define CONTROL_LOCALIZE_POST_STOP_DRAIN_TICKS 40U
+#define CONTROL_LOCALIZE_POST_STOP_DRAIN_TICKS 20U
 #define CONTROL_LOCALIZE_WHEEL_STOP_ENCODER_TOL 5
 #define CONTROL_LOCALIZE_MAX_SAMPLES 5U
 #define CONTROL_LOCALIZE_TWO_SAMPLE_MATCH_M 0.03f
@@ -3582,6 +3582,20 @@ static void handle_identify_execute_path(void)
             }
             g_identify_segment_map_event_applied = 1U;
         }
+
+        /* 炸弹推动发生在识别路径内，不会进入普通推箱分段；到达爆炸点后单独校正。 */
+        if (g_control_checkpoint_vision_localization_enabled &&
+            (g_exec_path[endpoint_idx].id & BOMB_EXPLOSION) != 0U &&
+            !g_identify_checkpoint_localized)
+        {
+            begin_checkpoint_visual_localization();
+            if (!process_checkpoint_visual_localization())
+            {
+                return;
+            }
+            g_identify_checkpoint_localized = 1U;
+        }
+
         if (g_identify_endpoint_need_action[g_identify_endpoint_cursor])
         {
             if (g_identify_target_count == 0U)

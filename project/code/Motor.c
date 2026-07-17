@@ -147,7 +147,7 @@ int16 Lowpass(int16 X_last,int16 X_new)
 
 void motor_pwm(int up_left_speed,int up_right_speed,int down_left_speed,int down_right_speed)
 {
-#if MOTOR_BOARD_REMAP_ORDER_2341
+#if MOTOR_BOARD_REMAP_LOGICAL_WHEELS
 	int logical_ul = up_left_speed;
 	int logical_ur = up_right_speed;
 	int logical_dl = down_left_speed;
@@ -166,10 +166,11 @@ void motor_pwm(int up_left_speed,int up_right_speed,int down_left_speed,int down
 	logical_dr = -logical_dr;
 #endif
 
-	up_left_speed = logical_dr;
+	/* Physical channels: M1=UL, M2=UR, M3=DR, M4=DL. */
+	up_left_speed = logical_ul;
 	up_right_speed = logical_ur;
-	down_left_speed = logical_dl;
-	down_right_speed = logical_ul;
+	down_left_speed = logical_dr;
+	down_right_speed = logical_dl;
 #endif
 
 #if MOTOR_BOARD_REVERSE_ALL_DIR

@@ -21,17 +21,17 @@
 #define MOTOR_BOARD_USE_NEW          (1)
 
 #if MOTOR_BOARD_USE_NEW
-// Measured order was 2,3,4,1 when commands were sent as 1,2,3,4.
-#define MOTOR_BOARD_REMAP_ORDER_2341 (1)
+// Remap logical wheels UL, UR, DL, DR to the measured physical motor channels.
+#define MOTOR_BOARD_REMAP_LOGICAL_WHEELS (1)
 #define MOTOR_BOARD_REVERSE_ALL_DIR  (1)
 // Extra logical-wheel direction correction for the new board.
-#define MOTOR_BOARD_REVERSE_UL_DIR   (1)
+#define MOTOR_BOARD_REVERSE_UL_DIR   (0)
 #define MOTOR_BOARD_REVERSE_UR_DIR   (0)
-#define MOTOR_BOARD_REVERSE_DL_DIR   (0)
+#define MOTOR_BOARD_REVERSE_DL_DIR   (1)
 #define MOTOR_BOARD_REVERSE_DR_DIR   (1)
 #define MOTOR_BOARD_REVERSE_ENCODER_ALL_DIR (1)
 #else
-#define MOTOR_BOARD_REMAP_ORDER_2341 (0)
+#define MOTOR_BOARD_REMAP_LOGICAL_WHEELS (0)
 #define MOTOR_BOARD_REVERSE_ALL_DIR  (0)
 #define MOTOR_BOARD_REVERSE_UL_DIR   (0)
 #define MOTOR_BOARD_REVERSE_UR_DIR   (0)

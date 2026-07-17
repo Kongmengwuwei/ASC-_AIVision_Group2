@@ -17,6 +17,7 @@ typedef struct
     uint8 preset_map_index;
     uint8 show_map;
     uint8 show_data;
+    uint8 blue_serial;
 } menu_flash_config_t;
 
 uint8 Data_save_to_flash(const menu_flash_config_t *config);

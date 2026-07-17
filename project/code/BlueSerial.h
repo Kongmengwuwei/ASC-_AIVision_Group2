@@ -3,6 +3,9 @@
 
 /* UART8 蓝牙模块初始化和发送辅助函数。 */
 void Blue_Serial_Init(void);
+/* 调车蓝牙总开关。关闭时禁止收发、命令解析和底盘接管。 */
+void BlueSerial_SetEnabled(uint8 enabled);
+uint8 BlueSerial_GetEnabled(void);
 void BlueSerial_Printf(char *format, ...);
 void BlueSerial_GetLastRxFrame(char *buffer, uint16 length);
 /* Send the existing POSITION vision/odometry report without requesting a new camera frame. */

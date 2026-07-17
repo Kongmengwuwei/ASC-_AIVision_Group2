@@ -86,6 +86,9 @@ static volatile uint8 g_rx_queue_read = 0U;
 static volatile uint32 g_rx_drop_count = 0U;
 static char g_last_rx_frame[BLUESERIAL_RX_FRAME_LEN] = "";
 static volatile uint8 g_last_rx_frame_len = 0U;
+/* 正式比赛默认关闭；菜单/Flash 只在需要调车时显式打开。 */
+static volatile uint8 g_blueserial_enabled = 0U;
+static uint8 g_blueserial_uart_initialized = 0U;
 
 static volatile blueserial_control_mode_t g_control_mode = BLUESERIAL_MODE_STOP;
 /* 逻辑轮序与 Motor.c 的 motor_pwm() 参数一致：UL, UR, DL, DR。 */
@@ -160,6 +163,18 @@ static void BlueSerial_ZeroSpeedCommand(void)
     speed_encoder[3] = 0;
 }
 
+/* 调用者需关中断，防止 UART8 ISR 与主循环同时修改收帧队列。 */
+static void BlueSerial_ResetRxStateLocked(void)
+{
+    g_rx_collecting = 0U;
+    g_rx_work_len = 0U;
+    g_rx_queue_write = 0U;
+    g_rx_queue_read = 0U;
+    g_rx_drop_count = 0U;
+    g_last_rx_frame[0] = '\0';
+    g_last_rx_frame_len = 0U;
+}
+
 /*
  * 蓝牙侧保持“逻辑轮序”不变。新旧电机板的物理通道重映射、方向反向和编码器修正
  * 全部集中在 Motor.c 内部处理，避免蓝牙模块再维护一套容易跑偏的映射关系。
@@ -197,13 +212,54 @@ static void BlueSerial_StopControl(void)
     interrupt_global_enable(primask);
 }
 
+void BlueSerial_SetEnabled(uint8 enabled)
+{
+    uint32 primask;
+    uint8 discard = 0U;
+    uint8 normalized = (enabled != 0U) ? 1U : 0U;
+
+    /* 先关外设 RX 中断，再修改被 ISR 和主循环共享的状态。 */
+    if (g_blueserial_uart_initialized)
+    {
+        uart_rx_interrupt(BLUESERIAL_UART, ZF_DISABLE);
+    }
+
+    primask = interrupt_global_disable();
+    if (!normalized &&
+        (g_control_mode != BLUESERIAL_MODE_STOP || g_yaw_hold_enabled))
+    {
+        /* 仅当蓝牙确实占用底盘时停车，避免误清除自动控制路径。 */
+        BlueSerial_StopControlLocked();
+    }
+    g_blueserial_enabled = normalized;
+    BlueSerial_ResetRxStateLocked();
+    g_position_request_pending = 0U;
+    g_vision_request_pending = 0U;
+    interrupt_global_enable(primask);
+
+    if (g_blueserial_uart_initialized && normalized)
+    {
+        /* 丢弃关闭期间积存在硬件 FIFO 中的旧命令，禁止重新开启后误动作。 */
+        while (uart_query_byte(BLUESERIAL_UART, &discard))
+        {
+        }
+        uart_rx_interrupt(BLUESERIAL_UART, ZF_ENABLE);
+    }
+}
+
+uint8 BlueSerial_GetEnabled(void)
+{
+    return g_blueserial_enabled;
+}
+
 uint8 BlueSerial_IsControlActive(void)
 {
     uint32 primask;
     uint8 active;
 
     primask = interrupt_global_disable();
-    active = (g_control_mode != BLUESERIAL_MODE_STOP || g_yaw_hold_enabled) ? 1U : 0U;
+    active = (g_blueserial_enabled &&
+              (g_control_mode != BLUESERIAL_MODE_STOP || g_yaw_hold_enabled)) ? 1U : 0U;
     interrupt_global_enable(primask);
     return active;
 }
@@ -940,20 +996,23 @@ static void BlueSerial_EnterRawPwmMode(void)
 
 void Blue_Serial_Init(void)
 {
-    g_rx_collecting = 0U;
-    g_rx_work_len = 0U;
-    g_rx_queue_write = 0U;
-    g_rx_queue_read = 0U;
-    g_rx_drop_count = 0U;
-    g_last_rx_frame[0] = '\0';
-    g_last_rx_frame_len = 0U;
+    uint32 primask = interrupt_global_disable();
+
+    BlueSerial_ResetRxStateLocked();
+    interrupt_global_enable(primask);
     uart_init(BLUESERIAL_UART, BLUESERIAL_BAUDRATE, BLUESERIAL_TX_PIN, BLUESERIAL_RX_PIN);
+    g_blueserial_uart_initialized = 1U;
     interrupt_set_priority(BLUESERIAL_IRQN, BLUESERIAL_IRQ_PRIORITY);
-    uart_rx_interrupt(BLUESERIAL_UART, ZF_ENABLE);
+    uart_rx_interrupt(BLUESERIAL_UART,
+                      g_blueserial_enabled ? ZF_ENABLE : ZF_DISABLE);
 }
 
 void BlueSerial_SendByte(uint8 Byte)
 {
+    if (!g_blueserial_enabled)
+    {
+        return;
+    }
     uart_write_byte(BLUESERIAL_UART, Byte);
 }
 
@@ -1132,7 +1191,10 @@ void BlueSerial_RxIrqHandler(void)
      */
     while (uart_query_byte(BLUESERIAL_UART, &ch))
     {
-        BlueSerial_ProcessRxByte(ch);
+        if (g_blueserial_enabled)
+        {
+            BlueSerial_ProcessRxByte(ch);
+        }
     }
 }
 
@@ -1606,6 +1668,11 @@ static void BlueSerial_CommandTask(void)
 
 void BlueSerial_ControlTick10ms(void)
 {
+    if (!g_blueserial_enabled)
+    {
+        return;
+    }
+
     if (g_control_mode == BLUESERIAL_MODE_RAW_PWM)
     {
         path_follow_output_t unused_output = {0};
@@ -1672,6 +1739,11 @@ void BlueSerial_ControlTick10ms(void)
 
 void BlueSerial_Task(void)
 {
+    if (!g_blueserial_enabled)
+    {
+        return;
+    }
+
     BlueSerial_CommandTask();
     BlueSerial_ServiceMotionCompletion();
     BlueSerial_ServicePositionRequest();

@@ -2391,7 +2391,7 @@ static int exact_box_completion_cost(const planning_state_t *state,
                                                               return_path,
                                                               MAP_ROWS * MAP_COLS,
                                                               &depot,
-                                                              0);
+                                                              1);
         best_cost = (return_len > 0) ? (return_len - 1) : ROUTE_COST_INF;
         store_exact_box_cost_cache(state, pairs, require_same_id, best_cost);
         return best_cost;
@@ -3075,8 +3075,8 @@ static int append_return_to_depot(planning_state_t *state,
     if (!state || !merged_path || !merged_len)
         return 0;
 
-    /* 未被真实爆炸事件清除的墙始终存在；返场不能把“箱子已完成”误当成“墙已消失”。 */
-    ignore_obstacles = 0;
+    /* 规则约定：全部箱子完成后所有墙体消失，最终返场只需避让仍占格的炸弹/箱子。 */
+    ignore_obstacles = 1;
     ret_len = build_shortest_return_path_to_depot(state,
                                                   ret_path,
                                                   MAP_ROWS * MAP_COLS,

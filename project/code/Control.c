@@ -14,16 +14,6 @@
 #include <string.h>
 
 /*
- * 手动开关：初始定位之后，是否继续使用视觉 CAR 位置修正定位。
- *
- * 注意：起步后的第一次定位始终强制使用视觉，因为系统需要先拿到小车真实位置，
- * 方向基准只取发车时的 IMU yaw；该开关只控制后续流程：
- * - 识别结束进入推箱子阶段前是否二次视觉定位；
- * - 等待地图阶段收到新 CAR 位置时是否顺带同步 path_follow。
- */
-static uint8 g_control_use_followup_vision_localization = 1U;
-
-/*
  * 手动选择起步发车方向。
  * 0：起步临时右，对应车前方；
  * 1：起步临时上，对应车左方；
@@ -42,6 +32,8 @@ static uint8 g_control_prestart_depart_dir = 0U;
  */
 static uint8 g_control_identify_prerotate_enabled = 1U;
 static uint8 g_control_continuous_levels_enabled = 0U;
+/* 每个识别驻车点、每次推箱结束后的视觉位置校正，默认关闭以保持原流程。 */
+static uint8 g_control_checkpoint_vision_localization_enabled = 0U;
 
 /*
  * Extra compensation for the first power-on departure move.
@@ -261,7 +253,18 @@ static control_identify_target_t g_identify_targets[CONTROL_IDENTIFY_MAX_TARGETS
 static size_t g_identify_target_count = 0U;
 static size_t g_identify_target_cursor = 0U;
 static uint8 g_identify_rotate_started = 0U;
+static uint8 g_identify_checkpoint_localized = 0U;
+static uint8 g_identify_targets_collected_at_endpoint = 0U;
 static control_identify_exec_state_t g_identify_exec_state = CONTROL_IDENTIFY_EXEC_IDLE;
+
+/* 推箱阶段按 PUSH_END_POINT 分段，段间可插入视觉定位。 */
+static Position g_pushbox_segment_path[MAX_CAR_PATH] = {{0}};
+static size_t g_pushbox_segment_end_idx = 0U;
+static uint8 g_pushbox_segment_running = 0U;
+static uint8 g_pushbox_checkpoint_localized = 0U;
+
+/* 识别和推箱检查点共用的一次性视觉定位运行状态。 */
+static uint8 g_checkpoint_visual_localization_active = 0U;
 
 static uint8 g_identified_box_flags[MAX_BOXES] = {0U};
 static uint8 g_identified_target_flags[MAX_TARGETS] = {0U};
@@ -435,25 +438,6 @@ static void set_control_phase_stage(control_phase_step_t step)
     g_control_stage = make_control_phase_stage(g_control_flow_phase, step);
 }
 
-/**
- * @brief 当前大阶段是否需要进入视觉定位状态。
- *
- * 识别阶段的第一次定位不能被菜单开关关闭，否则规划起点无法可靠落到地图坐标。
- * 推箱子阶段属于后续重定位，由菜单开关控制是否继续使用视觉修正。
- */
-static uint8 should_enter_vision_localization_stage(void)
-{
-    if (g_level_start_localization_required)
-    {
-        return 1U;
-    }
-    if (g_control_flow_phase == CONTROL_FLOW_IDENTIFY)
-    {
-        return 1U;
-    }
-    return g_control_use_followup_vision_localization;
-}
-
 static void reset_localization_accumulator(void)
 {
     g_localize_sample_count = 0U;
@@ -574,6 +558,8 @@ static void reset_identify_runtime_state(void)
     g_identify_target_count = 0U;
     g_identify_target_cursor = 0U;
     g_identify_rotate_started = 0U;
+    g_identify_checkpoint_localized = 0U;
+    g_identify_targets_collected_at_endpoint = 0U;
     g_identify_exec_state = CONTROL_IDENTIFY_EXEC_IDLE;
     reset_identify_recognition_wait();
 
@@ -1001,6 +987,11 @@ static void reset_level_runtime_state_for_launch(void)
     memset(g_identify_safe_move_path, 0, sizeof(g_identify_safe_move_path));
     g_continuous_stop_stable_count = 0U;
     memset(g_exec_path, 0, sizeof(g_exec_path));
+    memset(g_pushbox_segment_path, 0, sizeof(g_pushbox_segment_path));
+    g_pushbox_segment_end_idx = 0U;
+    g_pushbox_segment_running = 0U;
+    g_pushbox_checkpoint_localized = 0U;
+    g_checkpoint_visual_localization_active = 0U;
 
     reset_localization_accumulator();
     g_prestart_move_started = 0U;
@@ -2008,6 +1999,8 @@ static uint8 start_identify_segment(size_t end_idx)
     }
 
     g_identify_rotate_started = 0U;
+    g_identify_checkpoint_localized = 0U;
+    g_identify_targets_collected_at_endpoint = 0U;
     g_identify_segment_map_event_applied = 0U;
     memset(g_identify_targets, 0, sizeof(g_identify_targets));
     g_identify_target_count = 0U;
@@ -2197,6 +2190,157 @@ static uint8 get_camera_position_meter(float *x_m, float *y_m)
 
     *x_m = row_f * GRID_SIZE_M;
     *y_m = col_f * GRID_SIZE_M;
+    return 1U;
+}
+
+static void begin_checkpoint_visual_localization(void)
+{
+    if (g_checkpoint_visual_localization_active)
+    {
+        return;
+    }
+
+    path_follow_set_path(NULL, 0U);
+    reset_localization_accumulator();
+    clear_car_request_wait();
+    car_pose_updated = false;
+    g_checkpoint_visual_localization_active = 1U;
+    car_go_flag = 1U;
+    car_stop_flag = 1U;
+}
+
+/* 检查点定位不请求新地图，只在车辆停稳并排空运动旧帧后采集 CARPOS。 */
+static uint8 settle_camera_before_checkpoint_localization(void)
+{
+    uint32 now_tick = g_control_tick_10ms;
+
+    if (g_localize_camera_settled)
+    {
+        return 1U;
+    }
+
+    if (Algorithm_Test_PresetInput_IsEnabled())
+    {
+        (void)Algorithm_Test_PresetInput_ProvideCarPoseFrame();
+        g_localize_camera_settled = 1U;
+        return 1U;
+    }
+
+    car_go_flag = 1U;
+    car_stop_flag = 1U;
+    if (!g_localize_stop_sequence_started)
+    {
+        uart_stop_car_stream();
+        uart_blob_clear_pending_data();
+        g_localize_stop_sequence_started = 1U;
+        g_localize_post_stop_start_tick = now_tick;
+    }
+
+    if (!localization_wheels_stopped())
+    {
+        g_localize_stop_stable_start_tick = 0U;
+        return 0U;
+    }
+    if (g_localize_stop_stable_start_tick == 0U)
+    {
+        g_localize_stop_stable_start_tick = now_tick;
+        return 0U;
+    }
+    if ((uint32)(now_tick - g_localize_stop_stable_start_tick) <
+        CONTROL_LOCALIZE_STOP_STABLE_TICKS)
+    {
+        return 0U;
+    }
+    if ((uint32)(now_tick - g_localize_post_stop_start_tick) <
+        CONTROL_LOCALIZE_POST_STOP_DRAIN_TICKS)
+    {
+        return 0U;
+    }
+
+    g_localize_camera_settled = 1U;
+    return 1U;
+}
+
+/* 返回 1 表示本次检查点定位完成，返回 0 表示仍在停车/等待/采样。 */
+static uint8 process_checkpoint_visual_localization(void)
+{
+    uint8 accept_sample = 0U;
+    float cam_x_m = 0.0f;
+    float cam_y_m = 0.0f;
+    float corrected_x_m = 0.0f;
+    float corrected_y_m = 0.0f;
+
+    if (!g_checkpoint_visual_localization_active)
+    {
+        return 1U;
+    }
+    if (!settle_camera_before_checkpoint_localization())
+    {
+        return 0U;
+    }
+
+    if (!g_localize_fresh_pose_request_started)
+    {
+        g_localize_car_frame_base = car_frame_count;
+        car_pose_updated = false;
+        g_localize_fresh_pose_request_started = 1U;
+        send_car_request_once();
+        return 0U;
+    }
+
+    if (car_pose_updated)
+    {
+        car_pose_updated = false;
+        if (car_frame_count != g_localize_car_frame_base)
+        {
+            clear_car_request_wait();
+            accept_sample = 1U;
+        }
+    }
+    if (!accept_sample)
+    {
+        service_car_request_wait();
+        return 0U;
+    }
+    if (!get_camera_position_meter(&cam_x_m, &cam_y_m))
+    {
+        service_car_request_wait();
+        return 0U;
+    }
+
+    if (g_localize_sample_count >= CONTROL_LOCALIZE_MAX_SAMPLES)
+    {
+        g_localize_sample_count = (uint8)(CONTROL_LOCALIZE_MAX_SAMPLES - 1U);
+    }
+    g_localize_samples_x_m[g_localize_sample_count] = cam_x_m;
+    g_localize_samples_y_m[g_localize_sample_count] = cam_y_m;
+    g_localize_sample_count++;
+
+    if (g_localize_sample_count == 2U && localization_first_two_samples_match())
+    {
+        corrected_x_m = 0.5f * (g_localize_samples_x_m[0] + g_localize_samples_x_m[1]);
+        corrected_y_m = 0.5f * (g_localize_samples_y_m[0] + g_localize_samples_y_m[1]);
+    }
+    else if (g_localize_sample_count < CONTROL_RELOCALIZE_MIN_SAMPLES_PUSHBOX)
+    {
+        g_localize_car_frame_base = car_frame_count;
+        car_pose_updated = false;
+        send_car_request_once();
+        return 0U;
+    }
+    else
+    {
+        corrected_x_m = localization_median(g_localize_samples_x_m,
+                                             g_localize_sample_count);
+        corrected_y_m = localization_median(g_localize_samples_y_m,
+                                             g_localize_sample_count);
+    }
+
+    clear_car_request_wait();
+    path_follow_reset_pose(corrected_x_m, corrected_y_m, eulerAngle.yaw);
+    BlueSerial_ReportPosition();
+    control_hold_yaw_closed_loop();
+    g_checkpoint_visual_localization_active = 0U;
     return 1U;
 }
 
@@ -2595,15 +2739,7 @@ static void handle_prestart_move(void)
         }
         control_hold_yaw_closed_loop();
         reset_localization_accumulator();
-        if (should_enter_vision_localization_stage())
-        {
-            set_control_phase_stage(CONTROL_PHASE_STEP_LOCALIZE);
-        }
-        else
-        {
-            mark_wait_new_map_frame();
-            set_control_phase_stage(CONTROL_PHASE_STEP_WAIT_CAMERA_DATA);
-        }
+        set_control_phase_stage(CONTROL_PHASE_STEP_LOCALIZE);
     }
 }
 
@@ -2688,16 +2824,7 @@ static void handle_identify_return_heading_stage(void)
     g_identify_return_start_valid = 0U;
     control_hold_yaw_closed_loop();
     reset_localization_accumulator();
-
-    if (should_enter_vision_localization_stage())
-    {
-        set_control_phase_stage(CONTROL_PHASE_STEP_LOCALIZE);
-    }
-    else
-    {
-        mark_wait_new_map_frame();
-        set_control_phase_stage(CONTROL_PHASE_STEP_WAIT_CAMERA_DATA);
-    }
+    set_control_phase_stage(CONTROL_PHASE_STEP_LOCALIZE);
 }
 
 /**
@@ -2715,19 +2842,6 @@ static void handle_localization_stage(void)
     float avg_x_m = 0.0f;
     float avg_y_m = 0.0f;
     float start_base_yaw_deg = map_dir_to_yaw_deg(CONTROL_MAP_DIR_RIGHT);
-
-    if (!should_enter_vision_localization_stage())
-    {
-        /* 后续视觉定位关闭时，推箱子阶段重定位直接降级为“等地图->规划”。 */
-        if (g_control_flow_phase == CONTROL_FLOW_IDENTIFY)
-        {
-        }
-        g_level_start_localization_required = 0U;
-        clear_car_request_wait();
-        mark_wait_new_map_frame();
-        set_control_phase_stage(CONTROL_PHASE_STEP_WAIT_CAMERA_DATA);
-        return;
-    }
 
     if (g_control_flow_phase == CONTROL_FLOW_PUSHBOX)
     {
@@ -2815,34 +2929,13 @@ static void handle_localization_stage(void)
  * @brief 处理“等待地图”阶段�?
  *
  * 阶段目标�?
- * - 按需请求地图，并顺带消费可能到达的车位置
+ * - 按需请求地图；本阶段不使用相机 CAR 位姿修正里程计
  * - 收到有效地图后切换到规划阶段
  */
 static void handle_wait_camera_data(void)
 {
-    float cam_x_m = 0.0f;
-    float cam_y_m = 0.0f;
-
-    if (g_control_use_followup_vision_localization)
-    {
-        if (car_pose_updated)
-        {
-            car_pose_updated = false;
-            if (get_camera_position_meter(&cam_x_m, &cam_y_m))
-            {
-                /* 等地图阶段若拿到新位置，顺带轻量同步一次里程计；方向仍使用发车基准。 */
-                path_follow_reset_pose(cam_x_m,
-                                       cam_y_m,
-                                       map_dir_to_yaw_deg(CONTROL_MAP_DIR_RIGHT));
-                BlueSerial_ReportPosition();
-            }
-        }
-    }
-    else
-    {
-        /* 后续视觉修正关闭时丢弃旧 CAR 更新标志，避免重新开启后误吃关闭期间的缓存帧。 */
-        car_pose_updated = false;
-    }
+    /* 丢弃等待地图期间到达的 CAR 更新，避免旧帧被后续定位流程使用。 */
+    car_pose_updated = false;
 
     if (map_data_ready && map_frame_count > 0U)
     {
@@ -3014,9 +3107,28 @@ static void handle_identify_execute_path(void)
         }
         if (g_identify_endpoint_need_action[g_identify_endpoint_cursor])
         {
+            if (g_identify_target_count == 0U)
+            {
+                g_identify_targets_collected_at_endpoint =
+                    collect_identify_targets_on_exec_point(&g_exec_path[endpoint_idx]);
+            }
+
             if (g_identify_target_count > 0U)
             {
-                if (g_control_identify_prerotate_enabled)
+                /* 每个识别驻车点只定位一次，多目标原地转向不会重复请求 CARPOS。 */
+                if (g_control_checkpoint_vision_localization_enabled &&
+                    !g_identify_checkpoint_localized)
+                {
+                    begin_checkpoint_visual_localization();
+                    if (!process_checkpoint_visual_localization())
+                    {
+                        return;
+                    }
+                    g_identify_checkpoint_localized = 1U;
+                }
+
+                if (g_control_identify_prerotate_enabled &&
+                    !g_identify_targets_collected_at_endpoint)
                 {
                     enter_identify_recognition_state();
                 }
@@ -3025,14 +3137,6 @@ static void handle_identify_execute_path(void)
                     g_identify_rotate_started = 0U;
                     g_identify_exec_state = CONTROL_IDENTIFY_EXEC_ROTATE_TO_TARGET;
                 }
-                return;
-            }
-
-            if (collect_identify_targets_on_exec_point(&g_exec_path[endpoint_idx]))
-            {
-                /* 兜底：若段前未拿到目标，则到点后仍按旧逻辑原地转向识别。 */
-                g_identify_rotate_started = 0U;
-                g_identify_exec_state = CONTROL_IDENTIFY_EXEC_ROTATE_TO_TARGET;
                 return;
             }
         }
@@ -3132,6 +3236,52 @@ static void handle_plan_path_stage(void)
     end_path_plan_pause();
 }
 
+static uint8 start_pushbox_segment(size_t start_idx)
+{
+    size_t end_idx;
+    size_t scan_idx;
+    size_t segment_steps;
+    size_t i;
+
+    if (start_idx >= g_exec_steps)
+    {
+        return 0U;
+    }
+
+    end_idx = g_exec_steps - 1U;
+    scan_idx = (start_idx == 0U) ? 0U : (start_idx + 1U);
+    for (; scan_idx < g_exec_steps; scan_idx++)
+    {
+        if ((g_exec_path[scan_idx].id & PUSH_END_POINT) != 0U)
+        {
+            end_idx = scan_idx;
+            break;
+        }
+    }
+
+    segment_steps = end_idx - start_idx + 1U;
+    if (segment_steps == 0U || segment_steps > MAX_CAR_PATH)
+    {
+        return 0U;
+    }
+    for (i = 0U; i < segment_steps; i++)
+    {
+        g_pushbox_segment_path[i] = g_exec_path[start_idx + i];
+    }
+
+    configure_bomb_pause_for_path(g_pushbox_segment_path,
+                                  segment_steps,
+                                  (start_idx > 0U) ? 1U : 0U);
+    control_hold_yaw_closed_loop();
+    path_follow_set_path(g_pushbox_segment_path, segment_steps);
+    g_pushbox_segment_end_idx = end_idx;
+    g_pushbox_segment_running = 1U;
+    g_pushbox_checkpoint_localized = 0U;
+    car_go_flag = 1U;
+    car_stop_flag = 0U;
+    return 1U;
+}
+
 /**
  * @brief 下发阶段：根据当前大流程，把识别路径或推箱路径装载到 path_follow。
  *
@@ -3157,9 +3307,20 @@ static void handle_load_path_stage(void)
         return;
     }
 
-    configure_bomb_pause_for_path(g_exec_path, g_exec_steps, 0U);
-    control_hold_yaw_closed_loop();
-    path_follow_set_path(g_exec_path, g_exec_steps);
+    if (g_control_checkpoint_vision_localization_enabled)
+    {
+        if (!start_pushbox_segment(0U))
+        {
+            g_control_stage = CONTROL_STAGE_ERROR;
+            return;
+        }
+    }
+    else
+    {
+        configure_bomb_pause_for_path(g_exec_path, g_exec_steps, 0U);
+        control_hold_yaw_closed_loop();
+        path_follow_set_path(g_exec_path, g_exec_steps);
+    }
 
     car_go_flag = 1U;
     car_stop_flag = 0U;
@@ -3182,10 +3343,51 @@ static void handle_pushbox_execute_path(void)
     float return_yaw_deg = 0.0f;
     float yaw_err_deg = 0.0f;
 
-    path_follow_get_status(&st);
-    if (st.active)
+    if (g_control_checkpoint_vision_localization_enabled)
     {
-        return;
+        if (g_pushbox_segment_running)
+        {
+            path_follow_get_status(&st);
+            if (st.active)
+            {
+                return;
+            }
+            g_pushbox_segment_running = 0U;
+        }
+
+        if (g_pushbox_segment_end_idx >= g_exec_steps)
+        {
+            g_control_stage = CONTROL_STAGE_ERROR;
+            return;
+        }
+
+        if ((g_exec_path[g_pushbox_segment_end_idx].id & PUSH_END_POINT) != 0U &&
+            !g_pushbox_checkpoint_localized)
+        {
+            begin_checkpoint_visual_localization();
+            if (!process_checkpoint_visual_localization())
+            {
+                return;
+            }
+            g_pushbox_checkpoint_localized = 1U;
+        }
+
+        if (g_pushbox_segment_end_idx < (g_exec_steps - 1U))
+        {
+            if (!start_pushbox_segment(g_pushbox_segment_end_idx))
+            {
+                g_control_stage = CONTROL_STAGE_ERROR;
+            }
+            return;
+        }
+    }
+    else
+    {
+        path_follow_get_status(&st);
+        if (st.active)
+        {
+            return;
+        }
     }
 
     return_yaw_deg = map_dir_to_yaw_deg(CONTROL_MAP_DIR_RIGHT);
@@ -3426,14 +3628,14 @@ uint8 control_get_diagonal_path_enabled(void)
     return path_get_diagonal_enabled();
 }
 
-void control_set_followup_vision_localization_enabled(uint8 enabled)
+void control_set_checkpoint_vision_localization_enabled(uint8 enabled)
 {
-    g_control_use_followup_vision_localization = (enabled != 0U) ? 1U : 0U;
+    g_control_checkpoint_vision_localization_enabled = (enabled != 0U) ? 1U : 0U;
 }
 
-uint8 control_get_followup_vision_localization_enabled(void)
+uint8 control_get_checkpoint_vision_localization_enabled(void)
 {
-    return g_control_use_followup_vision_localization;
+    return g_control_checkpoint_vision_localization_enabled;
 }
 
 void control_set_identify_prerotate_enabled(uint8 enabled)

@@ -11,13 +11,13 @@ typedef struct
     uint8 start_dir;
     uint8 continuous_levels;
     uint8 diagonal_path;
-    uint8 followup_vision;
     uint8 identify_prerotate;
     uint8 preset_input;
     uint8 preset_map_index;
     uint8 show_map;
     uint8 show_data;
     uint8 blue_serial;
+    uint8 checkpoint_vision;
 } menu_flash_config_t;
 
 uint8 Data_save_to_flash(const menu_flash_config_t *config);

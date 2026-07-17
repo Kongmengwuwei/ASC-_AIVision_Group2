@@ -13,12 +13,13 @@
 
 #define MENU_FLAG_CONTINUOUS_LEVELS (1UL << 0)
 #define MENU_FLAG_DIAGONAL_PATH (1UL << 1)
-#define MENU_FLAG_FOLLOWUP_VISION (1UL << 2)
+/* Bit 2 is reserved to keep existing saved layouts compatible. */
 #define MENU_FLAG_IDENTIFY_PREROTATE (1UL << 3)
 #define MENU_FLAG_PRESET_INPUT (1UL << 4)
 #define MENU_FLAG_SHOW_MAP (1UL << 5)
 #define MENU_FLAG_SHOW_DATA (1UL << 6)
 #define MENU_FLAG_BLUE_SERIAL (1UL << 7)
+#define MENU_FLAG_CHECKPOINT_VISION (1UL << 8)
 
 static uint32 menu_flash_checksum(uint32 flags, uint32 start_dir, uint32 map_index)
 {
@@ -31,12 +32,12 @@ static uint32 menu_flash_build_flags(const menu_flash_config_t *config)
 
     if (config->continuous_levels) flags |= MENU_FLAG_CONTINUOUS_LEVELS;
     if (config->diagonal_path) flags |= MENU_FLAG_DIAGONAL_PATH;
-    if (config->followup_vision) flags |= MENU_FLAG_FOLLOWUP_VISION;
     if (config->identify_prerotate) flags |= MENU_FLAG_IDENTIFY_PREROTATE;
     if (config->preset_input) flags |= MENU_FLAG_PRESET_INPUT;
     if (config->show_map) flags |= MENU_FLAG_SHOW_MAP;
     if (config->show_data) flags |= MENU_FLAG_SHOW_DATA;
     if (config->blue_serial) flags |= MENU_FLAG_BLUE_SERIAL;
+    if (config->checkpoint_vision) flags |= MENU_FLAG_CHECKPOINT_VISION;
     return flags;
 }
 
@@ -104,13 +105,13 @@ uint8 Data_load_from_flash(menu_flash_config_t *config)
     config->start_dir = (uint8)flash_union_buffer[MENU_FLASH_WORD_START_DIR].uint32_type;
     config->continuous_levels = (flags & MENU_FLAG_CONTINUOUS_LEVELS) ? 1U : 0U;
     config->diagonal_path = (flags & MENU_FLAG_DIAGONAL_PATH) ? 1U : 0U;
-    config->followup_vision = (flags & MENU_FLAG_FOLLOWUP_VISION) ? 1U : 0U;
     config->identify_prerotate = (flags & MENU_FLAG_IDENTIFY_PREROTATE) ? 1U : 0U;
     config->preset_input = (flags & MENU_FLAG_PRESET_INPUT) ? 1U : 0U;
     config->preset_map_index = (uint8)flash_union_buffer[MENU_FLASH_WORD_MAP_INDEX].uint32_type;
     config->show_map = (flags & MENU_FLAG_SHOW_MAP) ? 1U : 0U;
     config->show_data = (flags & MENU_FLAG_SHOW_DATA) ? 1U : 0U;
     config->blue_serial = (flags & MENU_FLAG_BLUE_SERIAL) ? 1U : 0U;
+    config->checkpoint_vision = (flags & MENU_FLAG_CHECKPOINT_VISION) ? 1U : 0U;
     return 1U;
 }
 

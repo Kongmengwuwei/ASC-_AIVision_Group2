@@ -15,10 +15,10 @@ static bool startup_start_switch = false;
 static bool startup_reset_switch = false;
 static uint8 startup_depart_dir_value = 0U;
 static bool diagonal_path_switch = true;
-static bool followup_vision_switch = true;
 static bool identify_prerotate_switch = true;
 static bool continuous_levels_switch = false;
 static bool blue_serial_switch = true;
+static bool checkpoint_vision_switch = false;
 static bool preset_input_switch = false;
 static bool show_map_switch = true;
 static bool show_data_switch = true;
@@ -125,13 +125,13 @@ static void Menu_Fill_Flash_Config(menu_flash_config_t *config)
     config->start_dir = startup_depart_dir_value;
     config->continuous_levels = continuous_levels_switch ? 1U : 0U;
     config->diagonal_path = diagonal_path_switch ? 1U : 0U;
-    config->followup_vision = followup_vision_switch ? 1U : 0U;
     config->identify_prerotate = identify_prerotate_switch ? 1U : 0U;
     config->preset_input = preset_input_switch ? 1U : 0U;
     config->preset_map_index = Menu_Get_Preset_Map_Index();
     config->show_map = show_map_switch ? 1U : 0U;
     config->show_data = show_data_switch ? 1U : 0U;
     config->blue_serial = blue_serial_switch ? 1U : 0U;
+    config->checkpoint_vision = checkpoint_vision_switch ? 1U : 0U;
 }
 
 static void Menu_Load_Flash_Config(void)
@@ -150,19 +150,19 @@ static void Menu_Load_Flash_Config(void)
     }
     continuous_levels_switch = (config.continuous_levels != 0U);
     diagonal_path_switch = (config.diagonal_path != 0U);
-    followup_vision_switch = (config.followup_vision != 0U);
     identify_prerotate_switch = (config.identify_prerotate != 0U);
     preset_input_switch = (config.preset_input != 0U);
     preset_map_index = clamp_preset_map_index(config.preset_map_index);
     show_map_switch = (config.show_map != 0U);
     show_data_switch = (config.show_data != 0U);
     blue_serial_switch = (config.blue_serial != 0U);
+    checkpoint_vision_switch = (config.checkpoint_vision != 0U);
 
     control_set_prestart_depart_dir(startup_depart_dir_value);
     control_set_continuous_levels_enabled(continuous_levels_switch ? 1U : 0U);
     control_set_diagonal_path_enabled(diagonal_path_switch ? 1U : 0U);
-    control_set_followup_vision_localization_enabled(followup_vision_switch ? 1U : 0U);
     control_set_identify_prerotate_enabled(identify_prerotate_switch ? 1U : 0U);
+    control_set_checkpoint_vision_localization_enabled(checkpoint_vision_switch ? 1U : 0U);
     BlueSerial_SetEnabled(blue_serial_switch ? 1U : 0U);
 }
 
@@ -205,8 +205,8 @@ void Menu_Create(void)
 
     Create_Menu_File_dynamic(Setting, "ContRun", &continuous_levels_switch, bool_Box);
     Create_Menu_File_dynamic(Setting, "DiagPath", &diagonal_path_switch, bool_Box);
-    Create_Menu_File_dynamic(Setting, "FolVision", &followup_vision_switch, bool_Box);
     Create_Menu_File_dynamic(Setting, "PreRotate", &identify_prerotate_switch, bool_Box);
+    Create_Menu_File_dynamic(Setting, "ChkVision", &checkpoint_vision_switch, bool_Box);
     Create_Menu_File_dynamic(Setting, "BlueEn", &blue_serial_switch, bool_Box);
 }
 
@@ -216,9 +216,9 @@ static void Menu_Sync_Control_State(void)
     startup_reset_switch = false;
     startup_depart_dir_value = control_get_prestart_depart_dir();
     diagonal_path_switch = (control_get_diagonal_path_enabled() != 0U);
-    followup_vision_switch = (control_get_followup_vision_localization_enabled() != 0U);
     identify_prerotate_switch = (control_get_identify_prerotate_enabled() != 0U);
     continuous_levels_switch = (control_get_continuous_levels_enabled() != 0U);
+    checkpoint_vision_switch = (control_get_checkpoint_vision_localization_enabled() != 0U);
     blue_serial_switch = (BlueSerial_GetEnabled() != 0U);
     preset_input_switch = (Algorithm_Test_PresetInput_IsEnabled() != 0U);
 }
@@ -257,14 +257,6 @@ static bool Menu_Handle_Control_Bool(Menu_Item *item, bool value)
         return true;
     }
 
-    if (item->data == &followup_vision_switch)
-    {
-        followup_vision_switch = value;
-        control_set_followup_vision_localization_enabled(value ? 1U : 0U);
-        Menu_Mark_Config_Dirty();
-        return true;
-    }
-
     if (item->data == &identify_prerotate_switch)
     {
         identify_prerotate_switch = value;
@@ -291,6 +283,21 @@ static bool Menu_Handle_Control_Bool(Menu_Item *item, bool value)
         }
         blue_serial_switch = value;
         BlueSerial_SetEnabled(value ? 1U : 0U);
+        Menu_Mark_Config_Dirty();
+        return true;
+    }
+
+    if (item->data == &checkpoint_vision_switch)
+    {
+        /* 推箱路径会按检查点分段，运行中切换会破坏当前分段状态。 */
+        if (control_get_stage() != CONTROL_STAGE_IDLE)
+        {
+            checkpoint_vision_switch =
+                (control_get_checkpoint_vision_localization_enabled() != 0U);
+            return true;
+        }
+        checkpoint_vision_switch = value;
+        control_set_checkpoint_vision_localization_enabled(value ? 1U : 0U);
         Menu_Mark_Config_Dirty();
         return true;
     }

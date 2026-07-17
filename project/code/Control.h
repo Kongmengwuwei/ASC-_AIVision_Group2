@@ -149,22 +149,9 @@ void control_set_diagonal_path_enabled(uint8 enabled);
  */
 uint8 control_get_diagonal_path_enabled(void);
 
-/**
- * @brief 设置初始定位之后是否继续使用视觉定位修正。
- *
- * 起步后的第一次视觉定位始终启用；该开关只影响识别结束后的二次定位，
- * 以及等待地图阶段是否用新 CAR 位姿轻量同步 path_follow。
- *
- * @param enabled 1：后续继续使用视觉定位；0：后续依靠里程计/IMU。
- */
-void control_set_followup_vision_localization_enabled(uint8 enabled);
-
-/**
- * @brief 获取后续视觉定位修正开关状态。
- *
- * @return uint8 1：后续继续使用视觉定位；0：后续依靠里程计/IMU。
- */
-uint8 control_get_followup_vision_localization_enabled(void);
+/* 识别驻车点和每次推箱结束后是否执行一次视觉位置校正。 */
+void control_set_checkpoint_vision_localization_enabled(uint8 enabled);
+uint8 control_get_checkpoint_vision_localization_enabled(void);
 
 /**
  * @brief 设置识别阶段是否启用段前提前转向。

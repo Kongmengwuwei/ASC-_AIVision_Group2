@@ -33,7 +33,7 @@ static uint8 g_control_use_followup_vision_localization = 1U;
  *
  * 小车只平移到对应方向，车头朝向保持不变。
  */
-static uint8 g_control_prestart_depart_dir = 0U;
+static uint8 g_control_prestart_depart_dir = 1U;
 
 /*
  * 手动开关：识别阶段是否启用“段前提前转向”。
@@ -48,7 +48,7 @@ static uint8 g_control_continuous_levels_enabled = 0U;
  * Positive values extend the selected Start_Dir move, negative values shorten it.
  * Unit: m. Default +0.05 m keeps the prestart move at 0.35 m total.
  */
-float g_control_prestart_depart_compensate_m = -0.025f;
+float g_control_prestart_depart_compensate_m = -0.00f;
 
 /* ========================= 参数配置�?========================= */
 

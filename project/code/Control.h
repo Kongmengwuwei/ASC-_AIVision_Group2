@@ -170,6 +170,14 @@ void control_set_identify_prerotate_enabled(uint8 enabled);
  */
 uint8 control_get_identify_prerotate_enabled(void);
 
+/*
+ * Optional recognition-ID insurance. When enabled, the identify-to-pushbox
+ * handoff may rewrite the lowest-confidence unmatched IDs to restore a strict
+ * one-box/one-target mapping. It is disabled by default.
+ */
+void control_set_identify_id_fallback_enabled(uint8 enabled);
+uint8 control_get_identify_id_fallback_enabled(void);
+
 void control_set_continuous_levels_enabled(uint8 enabled);
 uint8 control_get_continuous_levels_enabled(void);
 

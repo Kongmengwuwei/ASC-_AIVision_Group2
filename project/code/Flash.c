@@ -13,7 +13,8 @@
 
 #define MENU_FLAG_CONTINUOUS_LEVELS (1UL << 0)
 #define MENU_FLAG_DIAGONAL_PATH (1UL << 1)
-/* Bit 2 is reserved to keep existing saved layouts compatible. */
+/* Bit 2 was reserved; old saved configurations therefore keep this risky fallback off. */
+#define MENU_FLAG_IDENTIFY_ID_FALLBACK (1UL << 2)
 #define MENU_FLAG_IDENTIFY_PREROTATE (1UL << 3)
 #define MENU_FLAG_PRESET_INPUT (1UL << 4)
 #define MENU_FLAG_SHOW_MAP (1UL << 5)
@@ -38,6 +39,7 @@ static uint32 menu_flash_build_flags(const menu_flash_config_t *config)
     if (config->show_data) flags |= MENU_FLAG_SHOW_DATA;
     if (config->blue_serial) flags |= MENU_FLAG_BLUE_SERIAL;
     if (config->checkpoint_vision) flags |= MENU_FLAG_CHECKPOINT_VISION;
+    if (config->identify_id_fallback) flags |= MENU_FLAG_IDENTIFY_ID_FALLBACK;
     return flags;
 }
 
@@ -112,6 +114,7 @@ uint8 Data_load_from_flash(menu_flash_config_t *config)
     config->show_data = (flags & MENU_FLAG_SHOW_DATA) ? 1U : 0U;
     config->blue_serial = (flags & MENU_FLAG_BLUE_SERIAL) ? 1U : 0U;
     config->checkpoint_vision = (flags & MENU_FLAG_CHECKPOINT_VISION) ? 1U : 0U;
+    config->identify_id_fallback = (flags & MENU_FLAG_IDENTIFY_ID_FALLBACK) ? 1U : 0U;
     return 1U;
 }
 

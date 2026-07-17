@@ -18,6 +18,7 @@ typedef struct
     uint8 show_data;
     uint8 blue_serial;
     uint8 checkpoint_vision;
+    uint8 identify_id_fallback;
 } menu_flash_config_t;
 
 uint8 Data_save_to_flash(const menu_flash_config_t *config);

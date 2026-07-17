@@ -1074,6 +1074,7 @@ static void build_pair_table(const planning_state_t *state,
                              pair_task_table_t *table)
 {
     int t;
+    uint8 box_used[MAX_BOXES] = {0U};
 
     if (!state || !table)
         return;
@@ -1087,11 +1088,23 @@ static void build_pair_table(const planning_state_t *state,
     for (t = 0; t < state->targets_cnt && table->count < MAX_TARGETS; t++)
     {
         Position target = state->targets_state[t];
-        int box_index = find_box_index_by_id(state->boxes_state, state->boxes_cnt, target.id);
+        int box_index = -1;
+        int b;
         pair_task_t pair;
+
+        /* Match each physical box at most once. Extra boxes/targets with the same ID stay unmatched. */
+        for (b = 0; b < state->boxes_cnt; b++)
+        {
+            if (!box_used[b] && state->boxes_state[b].id == target.id)
+            {
+                box_index = b;
+                break;
+            }
+        }
 
         if (box_index < 0)
             continue;
+        box_used[box_index] = 1U;
 
         memset(&pair, 0, sizeof(pair));
         pair.valid = 1;
@@ -1160,6 +1173,22 @@ static int count_unfinished_non_late_pairs(const pair_task_table_t *table)
         if (!pair->valid || pair->target_done)
             continue;
         if (pair->status != PAIR_STATUS_LATE)
+            cnt++;
+    }
+    return cnt;
+}
+
+static int count_unfinished_pairs(const pair_task_table_t *table)
+{
+    int i;
+    int cnt = 0;
+
+    if (!table)
+        return 0;
+    for (i = 0; i < table->count; i++)
+    {
+        const pair_task_t *pair = &table->item[i];
+        if (pair->valid && !pair->target_done)
             cnt++;
     }
     return cnt;
@@ -2379,19 +2408,21 @@ static int exact_box_completion_cost(const planning_state_t *state,
     Position depot;
     int best_cost = ROUTE_COST_INF;
     int cached_cost;
+    int unfinished_pairs;
     int p;
 
     if (!state || !pairs)
         return ROUTE_COST_INF;
     if (lookup_exact_box_cost_cache(state, pairs, require_same_id, &cached_cost))
         return cached_cost;
-    if (state->boxes_cnt <= 0 && state->targets_cnt <= 0)
+    unfinished_pairs = count_unfinished_pairs(pairs);
+    if (unfinished_pairs <= 0)
     {
         int return_len = build_shortest_return_path_to_depot(state,
                                                               return_path,
                                                               MAP_ROWS * MAP_COLS,
                                                               &depot,
-                                                              1);
+                                                              (state->boxes_cnt <= 0) ? 1 : 0);
         best_cost = (return_len > 0) ? (return_len - 1) : ROUTE_COST_INF;
         store_exact_box_cost_cache(state, pairs, require_same_id, best_cost);
         return best_cost;
@@ -2448,7 +2479,8 @@ static int greedy_box_completion_cost(const planning_state_t *state,
     shadow_state = *state;
     shadow_pairs = *pairs;
 
-    while (shadow_state.boxes_cnt > BOX_EXACT_LOOKAHEAD_LIMIT && safety_round < MAX_BOXES)
+    while (count_unfinished_pairs(&shadow_pairs) > BOX_EXACT_LOOKAHEAD_LIMIT &&
+           safety_round < MAX_BOXES)
     {
         round_action_t action;
         int non_late;
@@ -2505,10 +2537,13 @@ static int pick_best_box_action_with_future(const planning_state_t *state,
     int action_cnt;
     int best_idx = -1;
     int best_score = ROUTE_COST_INF;
+    int unfinished_pairs;
     int i;
 
     if (!state || !pairs || !out_action)
         return 0;
+
+    unfinished_pairs = count_unfinished_pairs(pairs);
 
     action_cnt = collect_box_action_candidates(state,
                                                require_same_id,
@@ -2560,7 +2595,7 @@ static int pick_best_box_action_with_future(const planning_state_t *state,
         }
     }
 
-    if (state->boxes_cnt <= BOX_EXACT_LOOKAHEAD_LIMIT)
+    if (unfinished_pairs <= BOX_EXACT_LOOKAHEAD_LIMIT)
     {
         for (i = 0; i < action_cnt; i++)
         {
@@ -3076,7 +3111,8 @@ static int append_return_to_depot(planning_state_t *state,
         return 0;
 
     /* 规则约定：全部箱子完成后所有墙体消失，最终返场只需避让仍占格的炸弹/箱子。 */
-    ignore_obstacles = 1;
+    /* Walls disappear only after every physical box is gone. */
+    ignore_obstacles = (state->boxes_cnt <= 0) ? 1 : 0;
     ret_len = build_shortest_return_path_to_depot(state,
                                                   ret_path,
                                                   MAP_ROWS * MAP_COLS,
@@ -4667,7 +4703,14 @@ static void plan_mode2_pair_first(void)
     load_state_from_globals(&state);
     build_pair_table(&state, 1, &pairs);
 
-    while (state.boxes_cnt > 0 && state.targets_cnt > 0 && safety_round < 256)
+    /* No valid ID pair means there is no safe push task to execute. */
+    if (pairs.count <= 0)
+    {
+        Car_path_count = 0U;
+        return;
+    }
+
+    while (count_unfinished_pairs(&pairs) > 0 && safety_round < 256)
     {
         round_action_t action;
         int picked = 0;
@@ -4693,7 +4736,7 @@ static void plan_mode2_pair_first(void)
         safety_round++;
     }
 
-    if (state.boxes_cnt > 0 || state.targets_cnt > 0)
+    if (count_unfinished_pairs(&pairs) > 0)
     {
         Car_path_count = 0U;
         return;

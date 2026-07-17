@@ -32,6 +32,8 @@ static uint8 g_control_prestart_depart_dir = 0U;
  */
 static uint8 g_control_identify_prerotate_enabled = 1U;
 static uint8 g_control_continuous_levels_enabled = 0U;
+/* Risky ID repair is opt-in. Normal recognition results are not rewritten by default. */
+static uint8 g_control_identify_id_fallback_enabled = 0U;
 /* 每个识别驻车点、每次推箱结束后的视觉位置校正，默认关闭以保持原流程。 */
 static uint8 g_control_checkpoint_vision_localization_enabled = 0U;
 
@@ -270,6 +272,8 @@ static uint8 g_identified_box_flags[MAX_BOXES] = {0U};
 static uint8 g_identified_target_flags[MAX_TARGETS] = {0U};
 static uint8 g_identify_box_id_assigned[MAX_BOXES] = {0U};
 static uint8 g_identify_target_id_assigned[MAX_TARGETS] = {0U};
+static int16 g_identify_box_confidence[MAX_BOXES] = {0};
+static int16 g_identify_target_confidence[MAX_TARGETS] = {0};
 static uint8 g_identify_recog_waiting = 0U;
 static uint8 g_identify_recog_retry_count = 0U;
 static VisionRecognitionType g_identify_recog_wait_type = VISION_RECOGNITION_NONE;
@@ -279,6 +283,7 @@ static uint8 g_identify_recog_settle_waiting = 0U;
 static uint32 g_identify_recog_settle_start_tick = 0U;
 static uint8 g_identify_recog_confirm_pending = 0U;
 static uint8 g_identify_recog_confirm_id = 0U;
+static int16 g_identify_recog_confirm_score = -1;
 
 static control_identify_id_record_t g_saved_box_id_records[MAX_BOXES] = {{0}};
 static control_identify_id_record_t g_saved_target_id_records[MAX_TARGETS] = {{0}};
@@ -541,6 +546,7 @@ static void reset_identify_recognition_wait(void)
     g_identify_recog_settle_start_tick = 0U;
     g_identify_recog_confirm_pending = 0U;
     g_identify_recog_confirm_id = 0U;
+    g_identify_recog_confirm_score = -1;
 }
 
 static void reset_identify_runtime_state(void)
@@ -567,6 +573,8 @@ static void reset_identify_runtime_state(void)
     memset(g_identified_target_flags, 0, sizeof(g_identified_target_flags));
     memset(g_identify_box_id_assigned, 0, sizeof(g_identify_box_id_assigned));
     memset(g_identify_target_id_assigned, 0, sizeof(g_identify_target_id_assigned));
+    memset(g_identify_box_confidence, 0xFF, sizeof(g_identify_box_confidence));
+    memset(g_identify_target_confidence, 0xFF, sizeof(g_identify_target_confidence));
 }
 
 static void inverse_remap_exec_path_point(Position *p)
@@ -1180,14 +1188,53 @@ static void report_identify_result_bluetooth(const control_identify_target_t *ta
                       (unsigned int)recognized_id);
 }
 
+static int16 normalize_identify_confidence(int16 score)
+{
+    if (score < 0)
+    {
+        return -1;
+    }
+    if (score > 100)
+    {
+        return 100;
+    }
+    return score;
+}
+
+static void record_identify_confidence(const control_identify_target_t *target,
+                                       int16 score)
+{
+    if (target == NULL)
+    {
+        return;
+    }
+
+    score = normalize_identify_confidence(score);
+    if (target->obj_type == CONTROL_IDENTIFY_OBJ_BOX &&
+        target->obj_index < MAX_BOXES &&
+        target->obj_index < Boxes_count)
+    {
+        g_identify_box_confidence[target->obj_index] = score;
+    }
+    else if (target->obj_type == CONTROL_IDENTIFY_OBJ_TARGET &&
+             target->obj_index < MAX_TARGETS &&
+             target->obj_index < Targets_count)
+    {
+        g_identify_target_confidence[target->obj_index] = score;
+    }
+}
+
 static void apply_identify_result_to_map(const control_identify_target_t *target,
                                          uint8 valid_id,
-                                         uint8 recognized_id)
+                                         uint8 recognized_id,
+                                         int16 confidence)
 {
     if (target == NULL || !valid_id)
     {
         return;
     }
+
+    record_identify_confidence(target, confidence);
 
     if (target->obj_type == CONTROL_IDENTIFY_OBJ_BOX &&
         target->obj_index < MAX_BOXES &&
@@ -1218,9 +1265,32 @@ static uint8 finish_or_retry_identify_result(const control_identify_target_t *ta
     }
 
     /* 高置信度单帧直接采用，保证停车后的识别流程足够快。 */
+    /* A medium-confidence first frame always requires the confirming frame to agree. */
+    if (g_identify_recog_confirm_pending)
+    {
+        int16 confidence = result->score;
+        if (g_identify_recog_confirm_score < confidence)
+        {
+            confidence = g_identify_recog_confirm_score;
+        }
+
+        if (valid_id &&
+            result->score >= CONTROL_IDENTIFY_RECOG_CONFIRM_SCORE &&
+            recognized_id == g_identify_recog_confirm_id)
+        {
+            apply_identify_result_to_map(target, valid_id, recognized_id, confidence);
+        }
+        else
+        {
+            record_identify_confidence(target, confidence);
+        }
+        reset_identify_recognition_wait();
+        return 1U;
+    }
+
     if (valid_id && result->score >= CONTROL_IDENTIFY_RECOG_ACCEPT_SCORE)
     {
-        apply_identify_result_to_map(target, valid_id, recognized_id);
+        apply_identify_result_to_map(target, valid_id, recognized_id, result->score);
         reset_identify_recognition_wait();
         return 1U;
     }
@@ -1228,22 +1298,14 @@ static uint8 finish_or_retry_identify_result(const control_identify_target_t *ta
     /* 中等置信度必须用第二帧同标签确认，避免一帧偶然误判写入地图。 */
     if (valid_id && result->score >= CONTROL_IDENTIFY_RECOG_CONFIRM_SCORE)
     {
-        if (g_identify_recog_confirm_pending)
-        {
-            if (recognized_id == g_identify_recog_confirm_id)
-            {
-                apply_identify_result_to_map(target, valid_id, recognized_id);
-            }
-            reset_identify_recognition_wait();
-            return 1U;
-        }
-
         g_identify_recog_confirm_pending = 1U;
         g_identify_recog_confirm_id = recognized_id;
+        g_identify_recog_confirm_score = normalize_identify_confidence(result->score);
         if (start_identify_recognition_request(target, distance))
         {
             return 0U;
         }
+        record_identify_confidence(target, result->score);
         reset_identify_recognition_wait();
         return 1U;
     }
@@ -1259,6 +1321,7 @@ static uint8 finish_or_retry_identify_result(const control_identify_target_t *ta
         }
     }
 
+    record_identify_confidence(target, result->score);
     reset_identify_recognition_wait();
     return 1U;
 }
@@ -1366,6 +1429,418 @@ static void apply_saved_identify_ids_to_current_map(void)
     }
 }
 
+typedef struct
+{
+    uint8 index;
+    uint8 id;
+    int16 confidence;
+    uint8 active;
+} control_identify_id_candidate_t;
+
+static void count_current_identify_ids(size_t box_cnt,
+                                       size_t target_cnt,
+                                       uint8 box_id_count[256],
+                                       uint8 target_id_count[256])
+{
+    size_t i = 0U;
+
+    memset(box_id_count, 0, 256U * sizeof(box_id_count[0]));
+    memset(target_id_count, 0, 256U * sizeof(target_id_count[0]));
+    for (i = 0U; i < box_cnt; i++)
+    {
+        box_id_count[boxes[i].id]++;
+    }
+    for (i = 0U; i < target_cnt; i++)
+    {
+        target_id_count[targets[i].id]++;
+    }
+}
+
+static uint8 identify_ids_are_strictly_one_to_one(size_t box_cnt,
+                                                   size_t target_cnt)
+{
+    uint8 box_id_count[256];
+    uint8 target_id_count[256];
+    uint16 id = 0U;
+
+    if (box_cnt != target_cnt)
+    {
+        return 0U;
+    }
+
+    count_current_identify_ids(box_cnt, target_cnt, box_id_count, target_id_count);
+    for (id = 0U; id < 256U; id++)
+    {
+        if (box_id_count[id] != target_id_count[id] || box_id_count[id] > 1U)
+        {
+            return 0U;
+        }
+    }
+    return 1U;
+}
+
+static int select_candidate_with_score(const control_identify_id_candidate_t *candidates,
+                                       size_t count,
+                                       uint8 select_highest)
+{
+    size_t i = 0U;
+    int selected = -1;
+
+    for (i = 0U; i < count; i++)
+    {
+        if (!candidates[i].active)
+        {
+            continue;
+        }
+        if (selected < 0 ||
+            (select_highest && candidates[i].confidence > candidates[selected].confidence) ||
+            (!select_highest && candidates[i].confidence < candidates[selected].confidence) ||
+            (candidates[i].confidence == candidates[selected].confidence &&
+             candidates[i].index < candidates[selected].index))
+        {
+            selected = (int)i;
+        }
+    }
+    return selected;
+}
+
+static uint8 split_duplicate_identify_ids(size_t box_cnt,
+                                          size_t target_cnt)
+{
+    uint8 box_id_count[256];
+    uint8 target_id_count[256];
+    uint8 box_used[MAX_BOXES];
+    uint8 target_used[MAX_TARGETS];
+    uint16 id = 0U;
+    uint16 next_auto_id = CONTROL_IDENTIFY_ID_ELIMINATE;
+
+    count_current_identify_ids(box_cnt, target_cnt, box_id_count, target_id_count);
+    for (id = 0U; id < 256U; id++)
+    {
+        uint8 duplicate_count = 0U;
+        size_t i = 0U;
+        int keep_box = -1;
+        int keep_target = -1;
+
+        if (box_id_count[id] <= 1U || box_id_count[id] != target_id_count[id])
+        {
+            continue;
+        }
+
+        memset(box_used, 0, sizeof(box_used));
+        memset(target_used, 0, sizeof(target_used));
+        for (i = 0U; i < box_cnt; i++)
+        {
+            if (boxes[i].id == (uint8)id &&
+                (keep_box < 0 || g_identify_box_confidence[i] > g_identify_box_confidence[keep_box]))
+            {
+                keep_box = (int)i;
+            }
+        }
+        for (i = 0U; i < target_cnt; i++)
+        {
+            if (targets[i].id == (uint8)id &&
+                (keep_target < 0 || g_identify_target_confidence[i] > g_identify_target_confidence[keep_target]))
+            {
+                keep_target = (int)i;
+            }
+        }
+        if (keep_box < 0 || keep_target < 0)
+        {
+            return 0U;
+        }
+        box_used[keep_box] = 1U;
+        target_used[keep_target] = 1U;
+        duplicate_count = (uint8)(box_id_count[id] - 1U);
+
+        while (duplicate_count > 0U)
+        {
+            int box_index = -1;
+            int target_index = -1;
+            uint16 new_id = 0U;
+
+            for (i = 0U; i < box_cnt; i++)
+            {
+                if (!box_used[i] && boxes[i].id == (uint8)id &&
+                    (box_index < 0 ||
+                     g_identify_box_confidence[i] < g_identify_box_confidence[box_index]))
+                {
+                    box_index = (int)i;
+                }
+            }
+            for (i = 0U; i < target_cnt; i++)
+            {
+                if (!target_used[i] && targets[i].id == (uint8)id &&
+                    (target_index < 0 ||
+                     g_identify_target_confidence[i] < g_identify_target_confidence[target_index]))
+                {
+                    target_index = (int)i;
+                }
+            }
+            if (box_index < 0 || target_index < 0)
+            {
+                return 0U;
+            }
+
+            while (next_auto_id < 255U &&
+                   (box_id_count[next_auto_id] > 0U || target_id_count[next_auto_id] > 0U))
+            {
+                next_auto_id++;
+            }
+            if (next_auto_id >= 255U)
+            {
+                return 0U;
+            }
+            new_id = next_auto_id++;
+            box_used[box_index] = 1U;
+            target_used[target_index] = 1U;
+            boxes[box_index].id = (uint8)new_id;
+            targets[target_index].id = (uint8)new_id;
+            box_id_count[id]--;
+            target_id_count[id]--;
+            box_id_count[new_id] = 1U;
+            target_id_count[new_id] = 1U;
+            BlueSerial_Printf("IDSAFE duplicate id=%u B%u T%u -> id=%u\r\n",
+                              (unsigned int)id,
+                              (unsigned int)box_index,
+                              (unsigned int)target_index,
+                              (unsigned int)new_id);
+            duplicate_count--;
+        }
+    }
+    return 1U;
+}
+
+static uint8 repair_identify_ids_by_confidence_impl(size_t box_cnt,
+                                                    size_t target_cnt)
+{
+    uint8 box_id_count[256];
+    uint8 target_id_count[256];
+    uint8 box_selected[MAX_BOXES] = {0U};
+    uint8 target_selected[MAX_TARGETS] = {0U};
+    control_identify_id_candidate_t box_candidates[MAX_BOXES];
+    control_identify_id_candidate_t target_candidates[MAX_TARGETS];
+    size_t box_candidate_count = 0U;
+    size_t target_candidate_count = 0U;
+    uint16 id = 0U;
+    size_t i = 0U;
+
+    if (identify_ids_are_strictly_one_to_one(box_cnt, target_cnt))
+    {
+        return 1U;
+    }
+    if (!g_control_identify_id_fallback_enabled)
+    {
+        BlueSerial_Printf("IDSAFE off: IDs are not one-to-one (B%u T%u)\r\n",
+                          (unsigned int)box_cnt,
+                          (unsigned int)target_cnt);
+        return 0U;
+    }
+    if (box_cnt != target_cnt)
+    {
+        BlueSerial_Printf("IDSAFE abort: object count mismatch B%u T%u\r\n",
+                          (unsigned int)box_cnt,
+                          (unsigned int)target_cnt);
+        return 0U;
+    }
+
+    memset(box_candidates, 0, sizeof(box_candidates));
+    memset(target_candidates, 0, sizeof(target_candidates));
+    count_current_identify_ids(box_cnt, target_cnt, box_id_count, target_id_count);
+
+    /* Odd totals for one ID necessarily produce a surplus on one side and enter this list. */
+    for (id = 0U; id < 256U; id++)
+    {
+        uint8 needed = 0U;
+
+        if (box_id_count[id] > target_id_count[id])
+        {
+            needed = (uint8)(box_id_count[id] - target_id_count[id]);
+            while (needed > 0U)
+            {
+                int selected = -1;
+                for (i = 0U; i < box_cnt; i++)
+                {
+                    if (!box_selected[i] && boxes[i].id == (uint8)id &&
+                        (selected < 0 ||
+                         g_identify_box_confidence[i] < g_identify_box_confidence[selected]))
+                    {
+                        selected = (int)i;
+                    }
+                }
+                if (selected < 0 || box_candidate_count >= MAX_BOXES)
+                {
+                    return 0U;
+                }
+                box_selected[selected] = 1U;
+                box_candidates[box_candidate_count].index = (uint8)selected;
+                box_candidates[box_candidate_count].id = (uint8)id;
+                box_candidates[box_candidate_count].confidence = g_identify_box_confidence[selected];
+                box_candidates[box_candidate_count].active = 1U;
+                box_candidate_count++;
+                needed--;
+            }
+        }
+        else if (target_id_count[id] > box_id_count[id])
+        {
+            needed = (uint8)(target_id_count[id] - box_id_count[id]);
+            while (needed > 0U)
+            {
+                int selected = -1;
+                for (i = 0U; i < target_cnt; i++)
+                {
+                    if (!target_selected[i] && targets[i].id == (uint8)id &&
+                        (selected < 0 ||
+                         g_identify_target_confidence[i] < g_identify_target_confidence[selected]))
+                    {
+                        selected = (int)i;
+                    }
+                }
+                if (selected < 0 || target_candidate_count >= MAX_TARGETS)
+                {
+                    return 0U;
+                }
+                target_selected[selected] = 1U;
+                target_candidates[target_candidate_count].index = (uint8)selected;
+                target_candidates[target_candidate_count].id = (uint8)id;
+                target_candidates[target_candidate_count].confidence = g_identify_target_confidence[selected];
+                target_candidates[target_candidate_count].active = 1U;
+                target_candidate_count++;
+                needed--;
+            }
+        }
+    }
+
+    if (box_candidate_count != target_candidate_count)
+    {
+        BlueSerial_Printf("IDSAFE abort: surplus mismatch B%u T%u\r\n",
+                          (unsigned int)box_candidate_count,
+                          (unsigned int)target_candidate_count);
+        return 0U;
+    }
+
+    for (i = 0U; i < box_candidate_count; i++)
+    {
+        int low_box = select_candidate_with_score(box_candidates, box_candidate_count, 0U);
+        int low_target = select_candidate_with_score(target_candidates, target_candidate_count, 0U);
+        uint8 change_box = 0U;
+
+        if (low_box < 0 || low_target < 0)
+        {
+            return 0U;
+        }
+        if (box_candidates[low_box].confidence <= target_candidates[low_target].confidence)
+        {
+            change_box = 1U;
+        }
+
+        if (change_box)
+        {
+            int trusted_target = select_candidate_with_score(target_candidates,
+                                                               target_candidate_count,
+                                                               1U);
+            uint8 box_index = box_candidates[low_box].index;
+            uint8 target_index;
+            uint8 old_id = boxes[box_index].id;
+
+            if (trusted_target < 0)
+            {
+                return 0U;
+            }
+            target_index = target_candidates[trusted_target].index;
+            boxes[box_index].id = targets[target_index].id;
+            BlueSerial_Printf("IDSAFE B%u id=%u->%u s=%d via T%u s=%d\r\n",
+                              (unsigned int)box_index,
+                              (unsigned int)old_id,
+                              (unsigned int)boxes[box_index].id,
+                              (int)box_candidates[low_box].confidence,
+                              (unsigned int)target_index,
+                              (int)target_candidates[trusted_target].confidence);
+            box_candidates[low_box].active = 0U;
+            target_candidates[trusted_target].active = 0U;
+        }
+        else
+        {
+            int trusted_box = select_candidate_with_score(box_candidates,
+                                                           box_candidate_count,
+                                                           1U);
+            uint8 target_index = target_candidates[low_target].index;
+            uint8 box_index;
+            uint8 old_id = targets[target_index].id;
+
+            if (trusted_box < 0)
+            {
+                return 0U;
+            }
+            box_index = box_candidates[trusted_box].index;
+            targets[target_index].id = boxes[box_index].id;
+            BlueSerial_Printf("IDSAFE T%u id=%u->%u s=%d via B%u s=%d\r\n",
+                              (unsigned int)target_index,
+                              (unsigned int)old_id,
+                              (unsigned int)targets[target_index].id,
+                              (int)target_candidates[low_target].confidence,
+                              (unsigned int)box_index,
+                              (int)box_candidates[trusted_box].confidence);
+            target_candidates[low_target].active = 0U;
+            box_candidates[trusted_box].active = 0U;
+        }
+    }
+
+    count_current_identify_ids(box_cnt, target_cnt, box_id_count, target_id_count);
+    for (id = 0U; id < 256U; id++)
+    {
+        if (box_id_count[id] != target_id_count[id])
+        {
+            BlueSerial_Printf("IDSAFE abort: repair check failed at id=%u\r\n",
+                              (unsigned int)id);
+            return 0U;
+        }
+    }
+
+    if (!split_duplicate_identify_ids(box_cnt, target_cnt) ||
+        !identify_ids_are_strictly_one_to_one(box_cnt, target_cnt))
+    {
+        BlueSerial_Printf("IDSAFE abort: final one-to-one check failed\r\n");
+        return 0U;
+    }
+    BlueSerial_Printf("IDSAFE applied: one-to-one verified (B%u T%u)\r\n",
+                      (unsigned int)box_cnt,
+                      (unsigned int)target_cnt);
+    return 1U;
+}
+
+static uint8 repair_identify_ids_by_confidence(size_t box_cnt,
+                                               size_t target_cnt)
+{
+    uint8 original_box_ids[MAX_BOXES] = {0U};
+    uint8 original_target_ids[MAX_TARGETS] = {0U};
+    size_t i = 0U;
+    uint8 repaired = 0U;
+
+    for (i = 0U; i < box_cnt; i++)
+    {
+        original_box_ids[i] = boxes[i].id;
+    }
+    for (i = 0U; i < target_cnt; i++)
+    {
+        original_target_ids[i] = targets[i].id;
+    }
+
+    repaired = repair_identify_ids_by_confidence_impl(box_cnt, target_cnt);
+    if (!repaired)
+    {
+        for (i = 0U; i < box_cnt; i++)
+        {
+            boxes[i].id = original_box_ids[i];
+        }
+        for (i = 0U; i < target_cnt; i++)
+        {
+            targets[i].id = original_target_ids[i];
+        }
+    }
+    return repaired;
+}
+
 static void finalize_identify_ids_for_pushbox(void)
 {
     uint8 box_id_count[256] = {0U};
@@ -1446,6 +1921,7 @@ static void finalize_identify_ids_for_pushbox(void)
             targets[idx].id = CONTROL_IDENTIFY_ID_ELIMINATE;
             g_identify_target_id_assigned[idx] = 1U;
         }
+        (void)repair_identify_ids_by_confidence(box_cnt, target_cnt);
         save_identify_ids_from_current_map();
         return;
     }
@@ -1509,6 +1985,7 @@ static void finalize_identify_ids_for_pushbox(void)
         g_identify_target_id_assigned[target_idx] = 1U;
     }
 
+    (void)repair_identify_ids_by_confidence(box_cnt, target_cnt);
     save_identify_ids_from_current_map();
 }
 
@@ -1605,7 +2082,7 @@ static uint8 identify_action_stub(const control_identify_target_t *target)
         }
 
         report_identify_result_bluetooth(target, &result, valid_id, recognized_id);
-        apply_identify_result_to_map(target, valid_id, recognized_id);
+        apply_identify_result_to_map(target, valid_id, recognized_id, result.score);
         reset_identify_recognition_wait();
         return 1U;
     }
@@ -3646,6 +4123,16 @@ void control_set_identify_prerotate_enabled(uint8 enabled)
 uint8 control_get_identify_prerotate_enabled(void)
 {
     return g_control_identify_prerotate_enabled;
+}
+
+void control_set_identify_id_fallback_enabled(uint8 enabled)
+{
+    g_control_identify_id_fallback_enabled = (enabled != 0U) ? 1U : 0U;
+}
+
+uint8 control_get_identify_id_fallback_enabled(void)
+{
+    return g_control_identify_id_fallback_enabled;
 }
 
 void control_set_continuous_levels_enabled(uint8 enabled)

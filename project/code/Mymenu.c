@@ -64,23 +64,6 @@ static void clear_data_display(void)
     clear_display_rect(168U, 199U, 239U, 231U);
 }
 
-static void draw_exec_path_diamond(uint16 center_x, uint16 center_y)
-{
-    const uint16 radius = 3U;
-    for (uint16 dy = 0U; dy <= radius; dy++)
-    {
-        uint16 half_width = radius - dy;
-        uint16 x0 = (center_x > half_width) ? (center_x - half_width) : 0U;
-        uint16 x1 = center_x + half_width;
-
-        ips200_draw_line(x0, center_y + dy, x1, center_y + dy, RGB565_BLUE);
-        if (dy > 0U && center_y >= dy)
-        {
-            ips200_draw_line(x0, center_y - dy, x1, center_y - dy, RGB565_BLUE);
-        }
-    }
-}
-
 static uint8 display_object_id(uint8 id)
 {
     return (id == 0xFFU) ? 0U : id;
@@ -861,24 +844,6 @@ void Show_Map(void)
             }
         }
 
-        for (size_t i = 0; i < exec_steps; i++)
-        {
-            Position p = exec_path[i];
-            path_inverse_remap_exec_point(&p);
-
-            int r = p.row;
-            int c = p.col;
-
-            if (r < 0 || c < 0 ||
-                r >= (int)inner_rows || c >= (int)inner_cols)
-            {
-                continue;
-            }
-
-            uint16 x = start_x + (uint16)(c + inner_col_offset) * cell_size + cell_size / 2U;
-            uint16 y = start_y + (uint16)(r + inner_row_offset) * cell_size + cell_size / 2U;
-            draw_exec_path_diamond(x, y);
-        }
     }
 
     // 记录当前地图状�?

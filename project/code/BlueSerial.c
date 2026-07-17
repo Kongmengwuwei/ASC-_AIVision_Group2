@@ -1335,28 +1335,6 @@ static uint8 BlueSerial_SetSlider(const char *name, float value)
         BlueSerial_Printf("OK next_position=%.1fcm\r\n", applied_value);
         return 1U;
     }
-    if (strcmp(name, "cross.left") == 0 || strcmp(name, "ycross.left") == 0)
-    {
-        applied_value = BlueSerial_ClampFloat(value,
-                                              -BLUESERIAL_MAX_Y_CROSSTALK_ABS,
-                                              BLUESERIAL_MAX_Y_CROSSTALK_ABS);
-        primask = interrupt_global_disable();
-        path_y_crosstalk_left_x_comp_k = applied_value;
-        interrupt_global_enable(primask);
-        BlueSerial_Printf("OK cross.left=%.4f\r\n", applied_value);
-        return 1U;
-    }
-    if (strcmp(name, "cross.right") == 0 || strcmp(name, "ycross.right") == 0)
-    {
-        applied_value = BlueSerial_ClampFloat(value,
-                                              -BLUESERIAL_MAX_Y_CROSSTALK_ABS,
-                                              BLUESERIAL_MAX_Y_CROSSTALK_ABS);
-        primask = interrupt_global_disable();
-        path_y_crosstalk_right_x_comp_k = applied_value;
-        interrupt_global_enable(primask);
-        BlueSerial_Printf("OK cross.right=%.4f\r\n", applied_value);
-        return 1U;
-    }
     if (strcmp(name, "yaw.kp") == 0)
     {
         applied_value = BlueSerial_ClampFloat(value, 0.0f, BLUESERIAL_MAX_YAW_KP);
@@ -1434,8 +1412,6 @@ static void BlueSerial_PrintStatus(void)
     yaw_ki = pid_yaw.fKi;
     yaw_kd = pid_yaw.fKd;
     yaw_ff = path_yaw_feedforward_min_degps;
-    cross_left = path_y_crosstalk_left_x_comp_k;
-    cross_right = path_y_crosstalk_right_x_comp_k;
     point_target_valid = g_point_target_valid;
     point_target_x_m = g_point_target_x_m;
     point_target_y_m = g_point_target_y_m;
@@ -1454,9 +1430,6 @@ static void BlueSerial_PrintStatus(void)
                       yaw_kp, yaw_ki, yaw_kd,
                       yaw_ff,
                       (unsigned long)drop_count);
-    BlueSerial_Printf("TUNE cross.left=%.4f cross.right=%.4f\r\n",
-                      cross_left,
-                      cross_right);
     if (point_target_valid)
     {
         BlueSerial_Printf("TARGET pending=1 target_m=%.3f,%.3f\r\n",

@@ -22,7 +22,7 @@
 #define PF_INVALID_BAND                  0xFFU   /* 无效 S 曲线速度档位。 */
 #define PF_DT_S                          (1.0f / (float)PID_RATE) /* 单次控制周期，单位 s。 */
 #define PF_SEGMENT_END_SPEED_CMPS        0.0f    /* 目标中心处的规划终速度，单位 cm/s。 */
-#define PF_POSITION_LOOP_RELEASE_M       0.50f   /* 近点接管距离上限；高速档按理论制动距离动态接管，单位 m。 */
+#define PF_POSITION_LOOP_RELEASE_M       0.55f   /* 近点接管距离上限；高速档按理论制动距离动态接管，单位 m。 */
 #define PF_ARRIVAL_MAX_SPEED_CMPS        3.0f    /* 完成目标允许的最大实测平移速度，单位 cm/s。 */
 #define PF_YAW_FEEDFORWARD_DEADBAND_DEG  0.25f   /* 克服 0.25~0.5 deg 残差死区，极小误差再由浮点 PID 细调。 */
 #define PF_APPROACH_DECEL_CMPS2          150.0f  /* S 曲线参数无效时的接近减速度，单位 cm/s^2。 */
@@ -34,11 +34,11 @@
 /* Y-to-X crosstalk feedforward boot defaults.
  * Unit: X correction / absolute Y command. The gains are signed and
  * independent: +Y is left, -Y is right. X-only commands are unaffected. */
-#define PF_Y_CROSSTALK_LEFT_X_COMP_K      0.028f /* +Y 左移的 X 串轴补偿：80 cm 双速往返标定。 */
-#define PF_Y_CROSSTALK_RIGHT_X_COMP_K    -0.035f /* -Y 右移的 X 串轴补偿：80 cm 双速往返标定。 */
+#define PF_Y_CROSSTALK_LEFT_X_COMP_K      0.0f /* 默认关闭；短距离低速与高速全档验证前不启用。 */
+#define PF_Y_CROSSTALK_RIGHT_X_COMP_K     0.0f /* 默认关闭；短距离低速与高速全档验证前不启用。 */
 #define PF_LATERAL_LEFT_ODOMETRY_SCALE    1.0090f /* 三地图区域五组往返均值：左移里程约多 0.9%。 */
 
-#define PF_POSITION_KP                   0.20f   /* 配合 0.35 制动包络补偿近目标残差。 */
+#define PF_POSITION_KP                   0.50f   /* 配合 0.35 制动包络补偿近目标残差。 */
 #define PF_POSITION_KI                   0.0f    /* 近目标位置环积分系数。 */
 #define PF_POSITION_KD                   0.0f    /* 近目标位置环微分系数。 */
 #define PF_POSITION_MAX_IOUT_CMPS        200.0f  /* 位置环积分输出上限，单位 cm/s。 */

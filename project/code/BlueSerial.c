@@ -44,13 +44,19 @@
 #define BLUESERIAL_IRQ_PRIORITY                 8U
 #define BLUESERIAL_RX_FRAME_LEN                 80U
 #define BLUESERIAL_RX_QUEUE_LEN                 16U
-#define BLUESERIAL_MAX_TARGET_SPEED_CMPS        150.0f
+#define BLUESERIAL_TELEMETRY_PERIOD_TICKS       10U
+#define BLUESERIAL_MAX_TARGET_SPEED_CMPS        200.0f
 #define BLUESERIAL_MAX_TARGET_POSITION_CM       500.0f
 #define BLUESERIAL_MAX_YAW_KP                   20.0f
 #define BLUESERIAL_MAX_YAW_KI                   10.0f
 #define BLUESERIAL_MAX_YAW_KD                   50.0f
 #define BLUESERIAL_MAX_YAW_FF_DEGPS             120.0f
 #define BLUESERIAL_MAX_Y_CROSSTALK_ABS          0.100f
+#define BLUESERIAL_MAX_POSITION_KP              20.0f
+#define BLUESERIAL_MAX_POSITION_KI              10.0f
+#define BLUESERIAL_MAX_POSITION_KD              50.0f
+#define BLUESERIAL_MIN_POSITION_ENVELOPE        0.10f
+#define BLUESERIAL_MAX_POSITION_ENVELOPE        1.00f
 #define BLUESERIAL_RELATIVE_GRID_M              0.01f
 #define BLUESERIAL_RELATIVE_CENTER_CELL         127
 #define BLUESERIAL_RELATIVE_MAX_OFFSET_CELL     120
@@ -109,6 +115,10 @@ static uint8 g_point_target_valid = 0U;
 static float g_point_target_x_m = 0.0f;
 static float g_point_target_y_m = 0.0f;
 static Position g_blueserial_point_target_path[3];
+static volatile uint8 g_telemetry_tick_count = 0U;
+static volatile uint8 g_telemetry_report_pending = 0U;
+static volatile uint32 g_telemetry_sequence = 0U;
+static uint8 g_telemetry_was_active = 0U;
 
 static float BlueSerial_ClampFloat(float value, float min_value, float max_value)
 {
@@ -905,6 +915,10 @@ void Blue_Serial_Init(void)
     g_rx_drop_count = 0U;
     g_last_rx_frame[0] = '\0';
     g_last_rx_frame_len = 0U;
+    g_telemetry_tick_count = 0U;
+    g_telemetry_report_pending = 0U;
+    g_telemetry_sequence = 0U;
+    g_telemetry_was_active = 0U;
     uart_init(BLUESERIAL_UART, BLUESERIAL_BAUDRATE, BLUESERIAL_TX_PIN, BLUESERIAL_RX_PIN);
     interrupt_set_priority(BLUESERIAL_IRQN, BLUESERIAL_IRQ_PRIORITY);
     uart_rx_interrupt(BLUESERIAL_UART, ZF_ENABLE);
@@ -990,40 +1004,10 @@ void BlueSerial_GetLastRxFrame(char *buffer, uint16 length)
     interrupt_global_enable(primask);
 }
 
-static void BlueSerial_RecordRxByteForDisplay(uint8 ch)
-{
-    if (ch == '[')
-    {
-        g_last_rx_frame_len = 0U;
-        g_last_rx_frame[0] = '\0';
-        return;
-    }
-
-    if (ch == ']' || ch == '\r' || ch == '\n')
-    {
-        return;
-    }
-
-    if (ch < 32U || ch > 126U)
-    {
-        return;
-    }
-
-    if (g_last_rx_frame_len >= (BLUESERIAL_RX_FRAME_LEN - 1U))
-    {
-        return;
-    }
-
-    g_last_rx_frame[g_last_rx_frame_len++] = (char)ch;
-    g_last_rx_frame[g_last_rx_frame_len] = '\0';
-}
-
 static void BlueSerial_ProcessRxByte(uint8 ch)
 {
     uint8 next_write;
     uint8 i;
-
-    BlueSerial_RecordRxByteForDisplay(ch);
 
     if (ch == '[')
     {
@@ -1253,6 +1237,46 @@ static uint8 BlueSerial_SetSlider(const char *name, float value)
         BlueSerial_Printf("OK cross.right=%.4f\r\n", applied_value);
         return 1U;
     }
+    if (strcmp(name, "pos.kp") == 0 || strcmp(name, "position.kp") == 0)
+    {
+        applied_value = BlueSerial_ClampFloat(value, 0.0f, BLUESERIAL_MAX_POSITION_KP);
+        primask = interrupt_global_disable();
+        path_follow_set_position_pid_gains(applied_value, pid_stay.fKi, pid_stay.fKd);
+        interrupt_global_enable(primask);
+        BlueSerial_Printf("OK pos.kp=%.4f\r\n", applied_value);
+        return 1U;
+    }
+    if (strcmp(name, "pos.ki") == 0 || strcmp(name, "position.ki") == 0)
+    {
+        applied_value = BlueSerial_ClampFloat(value, 0.0f, BLUESERIAL_MAX_POSITION_KI);
+        primask = interrupt_global_disable();
+        path_follow_set_position_pid_gains(pid_stay.fKp, applied_value, pid_stay.fKd);
+        interrupt_global_enable(primask);
+        BlueSerial_Printf("OK pos.ki=%.4f\r\n", applied_value);
+        return 1U;
+    }
+    if (strcmp(name, "pos.kd") == 0 || strcmp(name, "position.kd") == 0)
+    {
+        applied_value = BlueSerial_ClampFloat(value, 0.0f, BLUESERIAL_MAX_POSITION_KD);
+        primask = interrupt_global_disable();
+        path_follow_set_position_pid_gains(pid_stay.fKp, pid_stay.fKi, applied_value);
+        interrupt_global_enable(primask);
+        BlueSerial_Printf("OK pos.kd=%.4f\r\n", applied_value);
+        return 1U;
+    }
+    if (strcmp(name, "pos.envelope") == 0 ||
+        strcmp(name, "position.envelope") == 0 ||
+        strcmp(name, "envelope.factor") == 0)
+    {
+        applied_value = BlueSerial_ClampFloat(value,
+                                              BLUESERIAL_MIN_POSITION_ENVELOPE,
+                                              BLUESERIAL_MAX_POSITION_ENVELOPE);
+        primask = interrupt_global_disable();
+        path_follow_set_position_speed_factor(applied_value);
+        interrupt_global_enable(primask);
+        BlueSerial_Printf("OK pos.envelope=%.3f\r\n", applied_value);
+        return 1U;
+    }
     if (strcmp(name, "yaw.kp") == 0)
     {
         applied_value = BlueSerial_ClampFloat(value, 0.0f, BLUESERIAL_MAX_YAW_KP);
@@ -1312,6 +1336,10 @@ static void BlueSerial_PrintStatus(void)
     float yaw_ff;
     float cross_left;
     float cross_right;
+    float position_kp;
+    float position_ki;
+    float position_kd;
+    float position_envelope;
     uint8 point_target_valid;
     float point_target_x_m;
     float point_target_y_m;
@@ -1332,6 +1360,10 @@ static void BlueSerial_PrintStatus(void)
     yaw_ff = path_yaw_feedforward_min_degps;
     cross_left = path_y_crosstalk_left_x_comp_k;
     cross_right = path_y_crosstalk_right_x_comp_k;
+    position_kp = pid_stay.fKp;
+    position_ki = pid_stay.fKi;
+    position_kd = pid_stay.fKd;
+    position_envelope = path_follow_get_position_speed_factor();
     point_target_valid = g_point_target_valid;
     point_target_x_m = g_point_target_x_m;
     point_target_y_m = g_point_target_y_m;
@@ -1350,9 +1382,14 @@ static void BlueSerial_PrintStatus(void)
                       yaw_kp, yaw_ki, yaw_kd,
                       yaw_ff,
                       (unsigned long)drop_count);
-    BlueSerial_Printf("TUNE cross.left=%.4f cross.right=%.4f\r\n",
+    BlueSerial_Printf("TUNE cross.left=%.4f cross.right=%.4f "
+                      "pospid=%.4f,%.4f,%.4f envelope=%.3f\r\n",
                       cross_left,
-                      cross_right);
+                      cross_right,
+                      position_kp,
+                      position_ki,
+                      position_kd,
+                      position_envelope);
     if (point_target_valid)
     {
         BlueSerial_Printf("TARGET pending=1 target_m=%.3f,%.3f\r\n",
@@ -1562,6 +1599,123 @@ static void BlueSerial_CommandTask(void)
     }
 }
 
+void BlueSerial_TelemetryTick10ms(void)
+{
+    g_telemetry_tick_count++;
+    if (g_telemetry_tick_count >= BLUESERIAL_TELEMETRY_PERIOD_TICKS)
+    {
+        g_telemetry_tick_count = 0U;
+        g_telemetry_sequence++;
+        g_telemetry_report_pending = 1U;
+    }
+}
+
+static void BlueSerial_ServiceTelemetryReport(void)
+{
+    uint32 primask;
+    uint32 sequence = 0U;
+    uint8 report_pending;
+    uint8 report_active;
+    unsigned int mode = 0U;
+    path_follow_status_t status = {0};
+    float target_speed_cmps;
+    float actual_yaw_deg = 0.0f;
+    float target_cell_x;
+    float target_cell_y;
+    float actual_cell_x;
+    float actual_cell_y;
+
+    primask = interrupt_global_disable();
+    report_pending = g_telemetry_report_pending;
+    if (report_pending)
+    {
+        g_telemetry_report_pending = 0U;
+        sequence = g_telemetry_sequence;
+        mode = (unsigned int)g_control_mode;
+        path_follow_get_status(&status);
+        actual_yaw_deg = eulerAngle.yaw;
+    }
+    interrupt_global_enable(primask);
+
+    if (!report_pending)
+    {
+        return;
+    }
+
+    report_active = (status.active || mode != (unsigned int)BLUESERIAL_MODE_STOP) ? 1U : 0U;
+    if (!report_active && !g_telemetry_was_active)
+    {
+        return;
+    }
+    g_telemetry_was_active = report_active;
+
+    target_speed_cmps = status.speed_ref_cmps;
+    if (mode == (unsigned int)BLUESERIAL_MODE_SPEED_CRUISE)
+    {
+        target_speed_cmps = g_target_speed_cmps;
+    }
+    else if (mode == (unsigned int)BLUESERIAL_MODE_RAW_PWM)
+    {
+        target_speed_cmps = 0.0f;
+    }
+
+    target_cell_x = status.target_x_m / GRID_SIZE_M;
+    target_cell_y = status.target_y_m / GRID_SIZE_M;
+    actual_cell_x = status.x_m / GRID_SIZE_M;
+    actual_cell_y = status.y_m / GRID_SIZE_M;
+
+    if (status.target_grid_valid)
+    {
+        BlueSerial_Printf("PF100 n=%lu active=%u idx=%lu TGRID=%u,%u "
+                          "TCELL=%.3f,%.3f ACELL=%.3f,%.3f\r\n",
+                          (unsigned long)sequence,
+                          (unsigned int)status.active,
+                          (unsigned long)status.target_idx,
+                          (unsigned int)status.target_row,
+                          (unsigned int)status.target_col,
+                          target_cell_x,
+                          target_cell_y,
+                          actual_cell_x,
+                          actual_cell_y);
+    }
+    else
+    {
+        BlueSerial_Printf("PF100 n=%lu active=%u idx=%lu TGRID=NA "
+                          "TCELL=%.3f,%.3f ACELL=%.3f,%.3f\r\n",
+                          (unsigned long)sequence,
+                          (unsigned int)status.active,
+                          (unsigned long)status.target_idx,
+                          target_cell_x,
+                          target_cell_y,
+                          actual_cell_x,
+                          actual_cell_y);
+    }
+
+    BlueSerial_Printf("MOTION100 n=%lu TPOS=%.3f,%.3f APOS=%.3f,%.3f "
+                      "DIST=%.3f TVEL=%.2f AVEL=%.2f ENV=%.2f CAP=%.2f\r\n",
+                      (unsigned long)sequence,
+                      status.target_x_m,
+                      status.target_y_m,
+                      status.x_m,
+                      status.y_m,
+                      status.distance_m,
+                      target_speed_cmps,
+                      status.actual_speed_cmps,
+                      status.position_speed_limit_cmps,
+                      status.speed_cap_cmps);
+
+    BlueSerial_Printf("STATE100 n=%lu TYAW=%.2f AYAW=%.2f BRK=%u POS=%u "
+                      "LINE=%u PAUSE=%u AXIS=%u\r\n",
+                      (unsigned long)sequence,
+                      status.target_yaw_deg,
+                      actual_yaw_deg,
+                      (unsigned int)status.approach_braking_active,
+                      (unsigned int)status.position_loop_active,
+                      (unsigned int)status.line_guidance_active,
+                      (unsigned int)status.paused,
+                      (unsigned int)status.segment_axis);
+}
+
 void BlueSerial_ControlTick10ms(void)
 {
     if (g_control_mode == BLUESERIAL_MODE_RAW_PWM)
@@ -1634,4 +1788,5 @@ void BlueSerial_Task(void)
     BlueSerial_ServiceMotionCompletion();
     BlueSerial_ServicePositionRequest();
     BlueSerial_ServiceVisionRequest();
+    BlueSerial_ServiceTelemetryReport();
 }

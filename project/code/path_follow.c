@@ -23,14 +23,14 @@
 #define PF_INVALID_BAND                  0xFFU   /* 无效 S 曲线速度档位。 */
 #define PF_DT_S                          (1.0f / (float)PID_RATE) /* 单次控制周期，单位 s。 */
 #define PF_SEGMENT_END_SPEED_CMPS        0.0f    /* 目标中心处的规划终速度，单位 cm/s。 */
-#define PF_POSITION_LOOP_RELEASE_M       0.22f   /* 近点接管距离，覆盖高速档实测制动距离，单位 m。 */
+#define PF_POSITION_LOOP_RELEASE_M       0.50f   /* 近点接管距离上限；高速档按理论制动距离动态接管，单位 m。 */
 #define PF_ARRIVAL_MAX_SPEED_CMPS        3.0f    /* 完成目标允许的最大实测平移速度，单位 cm/s。 */
 #define PF_YAW_FEEDFORWARD_DEADBAND_DEG  0.25f   /* 克服 0.25~0.5 deg 残差死区，极小误差再由浮点 PID 细调。 */
-#define PF_APPROACH_DECEL_CMPS2          105.0f  /* S 曲线参数无效时的接近减速度，单位 cm/s^2。 */
+#define PF_APPROACH_DECEL_CMPS2          150.0f  /* S 曲线参数无效时的接近减速度，单位 cm/s^2。 */
 #define PF_POSITION_SPEED_FACTOR_MIN     0.10f   /* 手动制动速度包络系数下限。 */
 #define PF_POSITION_SPEED_FACTOR_MAX     1.00f   /* 制动速度包络系数上限。 */
-#define PF_POSITION_SPEED_FACTOR_DEFAULT 0.35f   /* 近点超速制动包络系数；双向实测可降低终点超调。 */
-#define PF_POSITION_RELEASE_MARGIN_M     0.12f   /* 制动距离外的滑移、执行及低速接近余量。 */
+#define PF_POSITION_SPEED_FACTOR_DEFAULT 0.65f   /* 近点超速制动包络系数；双向实测可降低终点超调。 */
+#define PF_POSITION_RELEASE_MARGIN_M     0.10f   /* 扩大的滑移、执行及位置环接管余量，单位 m。 */
 
 /* Y-to-X crosstalk feedforward boot defaults.
  * Unit: X correction / absolute Y command. The gains are signed and
@@ -42,7 +42,6 @@
 #define PF_POSITION_KP                   0.20f   /* 配合 0.35 制动包络补偿近目标残差。 */
 #define PF_POSITION_KI                   0.0f    /* 近目标位置环积分系数。 */
 #define PF_POSITION_KD                   0.0f    /* 近目标位置环微分系数。 */
-#define PF_POSITION_MIN_COMMAND_CMPS     2.5f    /* 容差外最小可执行修正，确保轮速目标越过死区量化阈值。 */
 #define PF_POSITION_MAX_IOUT_CMPS        200.0f  /* 位置环积分输出上限，单位 cm/s。 */
 #define PF_POSITION_MAX_OUT_CMPS         200.0f  /* 位置环总输出上限，单位 cm/s。 */
 #define PF_POSITION_FILTER_ALPHA         0.9f    /* 位置环微分滤波系数。 */
@@ -165,6 +164,7 @@ typedef struct
     float approach_ref_speed_cmps;
     float approach_dir_x;
     float approach_dir_y;
+    float approach_position_blend;
 
     size_t pause_indices[PATH_FOLLOW_MAX_PAUSE_POINTS];
     size_t pause_count;
@@ -226,20 +226,20 @@ float path_rotate_center_offset_y_cm = 0.0f;
 
 static const path_follow_scurve_band_cfg_t g_default_speed_bands[PATH_FOLLOW_SCURVE_BAND_COUNT] =
 {
-    {0.30f,   0.40f, 1.70f, 8.00f},
-    {0.50f,   0.50f, 1.70f, 8.00f},
-    {0.70f,   0.65f, 1.70f, 8.00f},
-    {0.90f,   0.75f, 1.70f, 8.00f},
-    {1000.0f, 1.50f, 1.70f, 8.00f}
+    {0.30f,   0.60f, 1.50f, 8.00f},
+    {0.50f,   0.80f, 1.50f, 8.00f},
+    {0.70f,   1.05f, 1.50f, 8.00f},
+    {0.90f,   1.25f, 1.50f, 8.00f},
+    {1000.0f, 1.80f, 1.50f, 8.00f}
 };
 
 path_follow_scurve_band_cfg_t g_path_follow_scurve_band_cfg[PATH_FOLLOW_SCURVE_BAND_COUNT] =
 {
-    {0.30f,   0.40f, 1.70f, 8.00f},
-    {0.50f,   0.50f, 1.70f, 8.00f},
-    {0.70f,   0.65f, 1.70f, 8.00f},
-    {0.90f,   0.75f, 1.70f, 8.00f},
-    {1000.0f, 1.50f, 1.70f, 8.00f}
+     {0.30f,   0.60f, 1.50f, 8.00f},
+    {0.50f,   0.80f, 1.50f, 8.00f},
+    {0.70f,   1.05f, 1.50f, 8.00f},
+    {0.90f,   1.25f, 1.50f, 8.00f},
+    {1000.0f, 1.80f, 1.50f, 8.00f}
 };
 
 static float pf_clamp(float value, float min_value, float max_value)
@@ -307,6 +307,7 @@ static void pf_reset_approach_brake(void)
     g_pf.approach_ref_speed_cmps = 0.0f;
     g_pf.approach_dir_x = 0.0f;
     g_pf.approach_dir_y = 0.0f;
+    g_pf.approach_position_blend = 0.0f;
     g_pf.approach_braking = 0U;
 }
 
@@ -1035,8 +1036,6 @@ static void pf_begin_approach_braking(const pf_geometry_t *geometry)
                  fmaxf(max_speed_cmps, PF_ARRIVAL_MAX_SPEED_CMPS));
     g_pf.approach_braking = 1U;
     pf_invalidate_active_profile();
-    PID_Clear(&pid_stay);
-    PID_Clear(&pid_stay_y);
 }
 
 static void pf_plan_approach_deceleration(const pf_geometry_t *geometry,
@@ -1045,6 +1044,7 @@ static void pf_plan_approach_deceleration(const pf_geometry_t *geometry,
     float decel_cmpss;
     float decel_step_cmps;
     float envelope_speed_cmps;
+    float physical_speed_cap_cmps;
     float remaining_m;
 
     if (geometry == NULL || speed_plan == NULL)
@@ -1057,8 +1057,10 @@ static void pf_plan_approach_deceleration(const pf_geometry_t *geometry,
                   PF_APPROACH_DECEL_CMPS2;
     decel_step_cmps = fmaxf(decel_cmpss, 1.0f) * PF_DT_S;
     remaining_m = pf_approach_remaining_m(geometry);
-    envelope_speed_cmps = (remaining_m > 0.0f) ?
-        pf_position_speed_threshold_cmps(remaining_m) : 0.0f;
+    physical_speed_cap_cmps = (remaining_m > 0.0f) ?
+        pf_position_speed_limit_cmps(remaining_m) : 0.0f;
+    envelope_speed_cmps = physical_speed_cap_cmps *
+                           pf_position_speed_factor();
 
     if (remaining_m <= 0.0f)
     {
@@ -1068,12 +1070,9 @@ static void pf_plan_approach_deceleration(const pf_geometry_t *geometry,
         g_pf.approach_ref_speed_cmps = 0.0f;
     }
 
-    /* The approach reference is latched to this target and follows the
-     * distance envelope instead of counting down to zero by time alone.
-     * Slew toward the envelope from either side: the entry reference can be
-     * below the envelope when the measured speed or S-curve reference has
-     * already fallen.  Leaving it there permanently can stop the car short
-     * while the latched braking state prevents position-loop takeover. */
+    /* The latched approach reference is braking-only.  It may slew downward
+     * to the distance envelope, but it must never be raised again here.
+     * Residual shortfall is handled by the continuously active position loop. */
     if (remaining_m > 0.0f &&
         g_pf.approach_ref_speed_cmps > envelope_speed_cmps)
     {
@@ -1081,17 +1080,14 @@ static void pf_plan_approach_deceleration(const pf_geometry_t *geometry,
             fmaxf(g_pf.approach_ref_speed_cmps - decel_step_cmps,
                   envelope_speed_cmps);
     }
-    else if (remaining_m > 0.0f &&
-             g_pf.approach_ref_speed_cmps < envelope_speed_cmps)
-    {
-        g_pf.approach_ref_speed_cmps =
-            fminf(g_pf.approach_ref_speed_cmps + decel_step_cmps,
-                  envelope_speed_cmps);
-    }
 
     memset(speed_plan, 0, sizeof(*speed_plan));
     speed_plan->ref_speed_cmps = g_pf.approach_ref_speed_cmps;
-    speed_plan->safety_cap_cmps = g_pf.approach_ref_speed_cmps;
+    /* While the braking reference is above the physical cap, it owns the cap.
+     * Otherwise the unscaled physical cap leaves controlled headroom for the
+     * position loop above the factor-scaled braking reference. */
+    speed_plan->safety_cap_cmps = (remaining_m > 0.0f) ?
+        fmaxf(g_pf.approach_ref_speed_cmps, physical_speed_cap_cmps) : 0.0f;
     g_pf.last_ref_speed_cmps = speed_plan->ref_speed_cmps;
 }
 
@@ -1181,22 +1177,19 @@ static float pf_position_loop_blend(const pf_geometry_t *geometry)
 
 static void pf_apply_position_loop(const pf_geometry_t *geometry,
                                    float *vx_world_cmps,
-                                   float *vy_world_cmps)
+                                   float *vy_world_cmps,
+                                   float blend)
 {
-    float blend;
     float position_vx_cmps;
     float position_vy_cmps;
     float correction_vx_cmps;
     float correction_vy_cmps;
-    float command_norm_cmps;
-    float command_scale;
 
     if (geometry == NULL || vx_world_cmps == NULL || vy_world_cmps == NULL)
     {
         return;
     }
 
-    blend = pf_position_loop_blend(geometry);
     if (blend <= 0.0f)
     {
         return;
@@ -1227,24 +1220,6 @@ static void pf_apply_position_loop(const pf_geometry_t *geometry,
      * the near-target stage. */
     *vx_world_cmps += correction_vx_cmps;
     *vy_world_cmps += correction_vy_cmps;
-
-    /* Close the gap between the continuous position controller and the
-     * integer wheel-speed interface.  Just outside the 1.5 cm tolerance,
-     * Kp=0.2 produces only about 0.3 cm/s, which truncates to zero encoder
-     * counts and never enables motor dead-zone feedforward.  Limit the final
-     * S-curve-plus-position command, not the correction term alone, so the
-     * blend entry remains continuous.  One-way target-plane completion still
-     * prevents reverse hunting after the target has been crossed. */
-    command_norm_cmps = sqrtf(*vx_world_cmps * *vx_world_cmps +
-                              *vy_world_cmps * *vy_world_cmps);
-    if (!geometry->within_tolerance &&
-        command_norm_cmps > 0.0f &&
-        command_norm_cmps < PF_POSITION_MIN_COMMAND_CMPS)
-    {
-        command_scale = PF_POSITION_MIN_COMMAND_CMPS / command_norm_cmps;
-        *vx_world_cmps *= command_scale;
-        *vy_world_cmps *= command_scale;
-    }
 }
 
 static uint8 pf_apply_line_guidance(const pf_geometry_t *geometry,
@@ -1687,9 +1662,8 @@ static uint8 pf_prepare_geometry(pf_geometry_t *geometry, path_follow_output_t *
 
         if (g_pf.approach_braking)
         {
-            /* Once triggered, keep this state latched until this target is
-             * accepted.  Falling below 3 cm/s before the tolerance boundary
-             * must not re-enable the position loop. */
+            /* Once triggered, keep the final braking-plus-position phase
+             * latched until this target is accepted. */
             geometry->dir_x = g_pf.approach_dir_x;
             geometry->dir_y = g_pf.approach_dir_y;
             geometry->segment_axis =
@@ -1891,6 +1865,28 @@ void path_follow_init(float grid_size_m, float pulses_per_meter)
     pf_init_pid_object(&pid_accel_yaw, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f);
 }
 
+void path_follow_set_position_pid_gains(float kp, float ki, float kd)
+{
+    pid_stay.fKp = fmaxf(kp, 0.0f);
+    pid_stay.fKi = fmaxf(ki, 0.0f);
+    pid_stay.fKd = fmaxf(kd, 0.0f);
+    pf_sync_position_pid_gains();
+    PID_Clear(&pid_stay);
+    PID_Clear(&pid_stay_y);
+}
+
+void path_follow_set_position_speed_factor(float factor)
+{
+    path_position_speed_limit_factor = pf_clamp(factor,
+                                                PF_POSITION_SPEED_FACTOR_MIN,
+                                                PF_POSITION_SPEED_FACTOR_MAX);
+}
+
+float path_follow_get_position_speed_factor(void)
+{
+    return pf_position_speed_factor();
+}
+
 void path_follow_reset_pose(float x_m, float y_m, float yaw_deg)
 {
     g_pf.pose.x_m = x_m;
@@ -2074,38 +2070,44 @@ void path_follow_update(float yaw_deg, path_follow_output_t *out)
     position_speed_threshold_cmps = pf_position_speed_threshold_cmps(
         fmaxf(geometry.along_track_remaining_m, 0.0f));
 
-    if (g_pf.approach_braking)
-    {
-        pf_plan_approach_deceleration(&geometry, &speed_plan);
-        geometry.dir_x = g_pf.approach_dir_x;
-        geometry.dir_y = g_pf.approach_dir_y;
-    }
-    else
+    if (!g_pf.approach_braking)
     {
         pf_plan_scurve_speed(&geometry, &speed_plan);
-        /* The normal S-curve must run unchanged.  Only after entering the
-         * near-target position-loop zone may excessive actual speed switch
-         * ownership to the one-way braking state.  The factor is therefore a
-         * guard threshold, never an S-curve speed multiplier. */
+        /* The position loop may blend in early, but do not latch braking just
+         * because the blend zone has begun.  On a short segment the measured
+         * speed can still be zero here; latching that value would invalidate
+         * the S-curve and leave no command capable of starting the car.
+         * Braking takes over only when measured speed exceeds the distance
+         * envelope.  Once latched, position feedback remains active with it. */
         if (position_blend > 0.0f &&
             g_pf.linear_speed_cmps > position_speed_threshold_cmps &&
             (!geometry.within_tolerance ||
              g_pf.linear_speed_cmps > PF_ARRIVAL_MAX_SPEED_CMPS))
         {
             pf_begin_approach_braking(&geometry);
-            geometry.dir_x = g_pf.approach_dir_x;
-            geometry.dir_y = g_pf.approach_dir_y;
-            pf_plan_approach_deceleration(&geometry, &speed_plan);
         }
+    }
+
+    if (g_pf.approach_braking)
+    {
+        g_pf.approach_position_blend =
+            fmaxf(g_pf.approach_position_blend, position_blend);
+        position_blend = g_pf.approach_position_blend;
+        pf_plan_approach_deceleration(&geometry, &speed_plan);
+        geometry.dir_x = g_pf.approach_dir_x;
+        geometry.dir_y = g_pf.approach_dir_y;
     }
 
     vx_world_cmps = speed_plan.ref_speed_cmps * geometry.dir_x;
     vy_world_cmps = speed_plan.ref_speed_cmps * geometry.dir_y;
-    use_position_loop = (!g_pf.approach_braking && position_blend > 0.0f) ? 1U : 0U;
-    use_line_guidance = (g_pf.approach_braking || position_blend <= 0.0f) ? 1U : 0U;
+    use_position_loop = (position_blend > 0.0f) ? 1U : 0U;
+    use_line_guidance = use_position_loop ? 0U : 1U;
     if (use_position_loop)
     {
-        pf_apply_position_loop(&geometry, &vx_world_cmps, &vy_world_cmps);
+        pf_apply_position_loop(&geometry,
+                               &vx_world_cmps,
+                               &vy_world_cmps,
+                               position_blend);
     }
     else if (use_line_guidance)
     {
@@ -2221,6 +2223,9 @@ void path_follow_get_status(path_follow_status_t *status)
 
     if (g_pf.path != NULL && g_pf.target_idx < g_pf.steps)
     {
+        status->target_grid_valid = 1U;
+        status->target_row = g_pf.path[g_pf.target_idx].row;
+        status->target_col = g_pf.path[g_pf.target_idx].col;
         pf_point_to_world(g_pf.path[g_pf.target_idx],
                           g_pf.path_grid_m,
                           &status->target_x_m,

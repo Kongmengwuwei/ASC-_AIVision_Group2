@@ -52,11 +52,17 @@ typedef struct
     uint8 position_loop_active;
     uint8 line_guidance_active;
     uint8 segment_axis;
+    uint8 target_grid_valid;
+    uint8 target_row;
+    uint8 target_col;
     size_t target_idx;
     float yaw_error_deg;
 } path_follow_status_t;
 
 void path_follow_init(float grid_size_m, float pulses_per_meter);
+void path_follow_set_position_pid_gains(float kp, float ki, float kd);
+void path_follow_set_position_speed_factor(float factor);
+float path_follow_get_position_speed_factor(void);
 void path_follow_set_path(const Position *path, size_t steps);
 void path_follow_set_path_pause_enabled(const Position *path, size_t steps, uint8 pause_events_enabled);
 void path_follow_set_path_with_grid(const Position *path, size_t steps, float grid_m, uint8 pause_events_enabled);

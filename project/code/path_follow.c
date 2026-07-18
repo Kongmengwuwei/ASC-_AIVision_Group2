@@ -46,9 +46,9 @@
 #define PF_POSITION_X_KP                 4.95f   /* X轴近目标位置速度系数。 */
 #define PF_POSITION_X_KI                 0.0f    /* X轴近目标位置积分系数。 */
 #define PF_POSITION_X_KD                 8.0f    /* X轴近目标位置微分系数。 */
-#define PF_POSITION_Y_KP                 1.45f   /* Y轴独立近目标位置速度系数。 */
+#define PF_POSITION_Y_KP                 4.2f    /* Y轴独立近目标位置速度系数。 */
 #define PF_POSITION_Y_KI                 0.0f    /* Y轴独立近目标位置积分系数。 */
-#define PF_POSITION_Y_KD                 2.5f    /* Y轴独立近目标位置微分系数。 */
+#define PF_POSITION_Y_KD                 7.5f    /* Y轴独立近目标位置微分系数。 */
 #define PF_POSITION_X_MAX_IOUT_CMPS      200.0f  /* X轴位置环积分输出上限，单位 cm/s。 */
 #define PF_POSITION_X_MAX_OUT_CMPS       200.0f  /* X轴位置环总输出上限，单位 cm/s。 */
 #define PF_POSITION_Y_MAX_IOUT_CMPS      200.0f  /* Y轴位置环积分输出上限，单位 cm/s。 */
@@ -802,6 +802,7 @@ static float pf_profile_fault_speed(float current_speed_cmps,
 }
 
 static uint8 pf_target_needs_pause(void);
+static float pf_position_loop_release_m(const pf_geometry_t *geometry);
 
 static float pf_segment_end_speed_cmps(void)
 {
@@ -929,12 +930,17 @@ static void pf_plan_scurve_speed(const pf_geometry_t *geometry,
     if (!g_speed_test_enabled &&
         g_pf.profile_active && g_pf.active_profile.T > 0.0f &&
         g_pf.profile_time_s >= g_pf.active_profile.T &&
-        geometry->distance_m > fmaxf(g_pf.position_tolerance_m,
-                                     path_hold_trim_release_distance))
+        geometry->along_track_remaining_m >=
+            pf_position_loop_release_m(geometry))
     {
-        /* The timed profile ended too early (slip/load/odometry mismatch).
-         * Invalidate it; the next control tick replans from the remaining
-         * distance instead of staying at a zero speed reference. */
+        /* The timed profile ended before the car reached the dynamically
+         * calculated position-loop handover region (slip/load/inner-loop
+         * lag).  Replan from the real remaining distance instead of leaving
+         * a zero reference in the gap between the profile and position loop.
+         *
+         * Do not compare against path_hold_trim_release_distance here: that
+         * value is only the upper bound of the handover distance.  Using the
+         * upper bound creates an uncontrolled dead zone on short segments. */
         g_pf.profile_active = 0U;
         g_pf.active_profile.valid = 0U;
         g_pf.profile_time_s = 0.0f;

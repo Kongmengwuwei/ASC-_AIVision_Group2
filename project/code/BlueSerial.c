@@ -60,7 +60,6 @@
 #define BLUESERIAL_POINT_TARGET_GRID_M          0.01f
 #define BLUESERIAL_POINT_TARGET_MAX_CELL        250
 #define BLUESERIAL_POINT_TARGET_MAX_M           20.0f
-
 typedef enum
 {
     BLUESERIAL_MODE_STOP = 0,      /* 蓝牙未接管底盘输出。 */
@@ -113,6 +112,9 @@ static float g_point_target_x_m = 0.0f;
 static float g_point_target_y_m = 0.0f;
 static Position g_blueserial_point_target_path[3];
 
+static void BlueSerial_ClearWheelPid(void);
+static void BlueSerial_StopControlLocked(void);
+
 static float BlueSerial_ClampFloat(float value, float min_value, float max_value)
 {
     if (value < min_value)
@@ -150,6 +152,7 @@ static void BlueSerial_ClearWheelPid(void)
     PID_Clear(&URpid);
     PID_Clear(&DLpid);
     PID_Clear(&DRpid);
+    motor_control_reset_state();
 }
 
 static void BlueSerial_ZeroSpeedCommand(void)
@@ -217,6 +220,13 @@ void BlueSerial_SetEnabled(uint8 enabled)
     uint32 primask;
     uint8 discard = 0U;
     uint8 normalized = (enabled != 0U) ? 1U : 0U;
+
+#if !MOTOR_BOARD_USE_NEW
+#if !MOTOR_OLD_BOARD_UART8_USE_BLUETOOTH
+    /* Old-board camera mode reserves UART8/D16/D17 for recognition. */
+    normalized = 0U;
+#endif
+#endif
 
     /* 先关外设 RX 中断，再修改被 ISR 和主循环共享的状态。 */
     if (g_blueserial_uart_initialized)
@@ -996,8 +1006,19 @@ static void BlueSerial_EnterRawPwmMode(void)
 
 void Blue_Serial_Init(void)
 {
+#if !MOTOR_BOARD_USE_NEW
+#if !MOTOR_OLD_BOARD_UART8_USE_BLUETOOTH
+    /* Camera-owned UART8 must not be reinitialized or have its RX IRQ disabled. */
+    BlueSerial_SetEnabled(0U);
+    return;
+#endif
+#endif
     uint32 primask = interrupt_global_disable();
 
+#if !MOTOR_BOARD_USE_NEW && MOTOR_OLD_BOARD_UART8_USE_BLUETOOTH
+    /* The dedicated old-board tuning image must not depend on saved menu state. */
+    g_blueserial_enabled = 1U;
+#endif
     BlueSerial_ResetRxStateLocked();
     interrupt_global_enable(primask);
     uart_init(BLUESERIAL_UART, BLUESERIAL_BAUDRATE, BLUESERIAL_TX_PIN, BLUESERIAL_RX_PIN);
@@ -1229,8 +1250,8 @@ static const char *BlueSerial_LogicalWheelName(uint8 wheel_index)
 
 static const char *BlueSerial_PhysicalMotorName(uint8 logical_wheel_index)
 {
-#if MOTOR_BOARD_REMAP_ORDER_2341
-    static const char *const names[4] = {"m4", "m2", "m3", "m1"};
+#if MOTOR_BOARD_REMAP_LOGICAL_WHEELS
+    static const char *const names[4] = {"m1", "m2", "m4", "m3"};
 #else
     static const char *const names[4] = {"m1", "m2", "m3", "m4"};
 #endif
@@ -1257,10 +1278,10 @@ static int BlueSerial_GetLogicalWheelIndex(const char *name)
         return 3;
     }
 
-#if MOTOR_BOARD_REMAP_ORDER_2341
+#if MOTOR_BOARD_REMAP_LOGICAL_WHEELS
     if (strcmp(name, "pwm.m1") == 0)
     {
-        return 3;
+        return 0;
     }
     if (strcmp(name, "pwm.m2") == 0)
     {
@@ -1268,11 +1289,11 @@ static int BlueSerial_GetLogicalWheelIndex(const char *name)
     }
     if (strcmp(name, "pwm.m3") == 0)
     {
-        return 2;
+        return 3;
     }
     if (strcmp(name, "pwm.m4") == 0)
     {
-        return 0;
+        return 2;
     }
 #else
     if (strcmp(name, "pwm.m1") == 0)
@@ -1392,8 +1413,6 @@ static void BlueSerial_PrintStatus(void)
     float yaw_ki;
     float yaw_kd;
     float yaw_ff;
-    float cross_left;
-    float cross_right;
     uint8 point_target_valid;
     float point_target_x_m;
     float point_target_y_m;

@@ -10,27 +10,63 @@ float speed_three_array[3] = {0};
 int speed_encoder[4] = {0};
 int car_stop_array[4] = {0};
 
+static const int motor_deadzone_target_min_counts = MOTOR_DEADZONE_TARGET_MIN_COUNTS;
+static const int motor_deadzone_blend_pwm = MOTOR_DEADZONE_BLEND_PWM;
+static const int motor_deadzone_fwd[MOTOR_WHEEL_COUNT] =
+{
+    MOTOR_UL_DEADZONE_FWD,
+    MOTOR_UR_DEADZONE_FWD,
+    MOTOR_DL_DEADZONE_FWD,
+    MOTOR_DR_DEADZONE_FWD
+};
+static const int motor_deadzone_rev[MOTOR_WHEEL_COUNT] =
+{
+    MOTOR_UL_DEADZONE_REV,
+    MOTOR_UR_DEADZONE_REV,
+    MOTOR_DL_DEADZONE_REV,
+    MOTOR_DR_DEADZONE_REV
+};
+static const int motor_startup_fwd[MOTOR_WHEEL_COUNT] =
+{
+    MOTOR_UL_STARTUP_FWD,
+    MOTOR_UR_STARTUP_FWD,
+    MOTOR_DL_STARTUP_FWD,
+    MOTOR_DR_STARTUP_FWD
+};
+static const int motor_startup_rev[MOTOR_WHEEL_COUNT] =
+{
+    MOTOR_UL_STARTUP_REV,
+    MOTOR_UR_STARTUP_REV,
+    MOTOR_DL_STARTUP_REV,
+    MOTOR_DR_STARTUP_REV
+};
+
+static volatile int g_motor_raw_counts[MOTOR_WHEEL_COUNT];
+static uint8 g_motor_running[MOTOR_WHEEL_COUNT];
+static uint8 g_motor_startup_ticks[MOTOR_WHEEL_COUNT];
+static int8 g_motor_last_target_sign[MOTOR_WHEEL_COUNT];
+
 void motor_init(void)
 {
-	gpio_init(MOTOR1_DIR, GPO, GPIO_HIGH, GPO_PUSH_PULL);                            // GPIO 初始化为输出 默认上拉输出高
-    pwm_init(MOTOR1_PWM, 17000, 0);                                                  // PWM 通道初始化频率 17KHz 占空比初始为 0
+	gpio_init(MOTOR1_DIR, GPO, GPIO_HIGH, GPO_PUSH_PULL);                            // GPIO 鍒濆鍖栦负杈撳嚭 榛樿涓婃媺杈撳嚭楂?
+    pwm_init(MOTOR1_PWM, 17000, 0);                                                  // PWM 閫氶亾鍒濆鍖栭鐜?17KHz 鍗犵┖姣斿垵濮嬩负 0
     
-    gpio_init(MOTOR2_DIR, GPO, GPIO_HIGH, GPO_PUSH_PULL);                            // GPIO 初始化为输出 默认上拉输出高
-    pwm_init(MOTOR2_PWM, 17000, 0);                                                  // PWM 通道初始化频率 17KHz 占空比初始为 0
+    gpio_init(MOTOR2_DIR, GPO, GPIO_HIGH, GPO_PUSH_PULL);                            // GPIO 鍒濆鍖栦负杈撳嚭 榛樿涓婃媺杈撳嚭楂?
+    pwm_init(MOTOR2_PWM, 17000, 0);                                                  // PWM 閫氶亾鍒濆鍖栭鐜?17KHz 鍗犵┖姣斿垵濮嬩负 0
 
-    gpio_init(MOTOR3_DIR, GPO, GPIO_HIGH, GPO_PUSH_PULL);                            // GPIO 初始化为输出 默认上拉输出高
-    pwm_init(MOTOR3_PWM, 17000, 0);                                                  // PWM 通道初始化频率 17KHz 占空比初始为 0
+    gpio_init(MOTOR3_DIR, GPO, GPIO_HIGH, GPO_PUSH_PULL);                            // GPIO 鍒濆鍖栦负杈撳嚭 榛樿涓婃媺杈撳嚭楂?
+    pwm_init(MOTOR3_PWM, 17000, 0);                                                  // PWM 閫氶亾鍒濆鍖栭鐜?17KHz 鍗犵┖姣斿垵濮嬩负 0
 
-    gpio_init(MOTOR4_DIR, GPO, GPIO_HIGH, GPO_PUSH_PULL);                            // GPIO 初始化为输出 默认上拉输出高
-    pwm_init(MOTOR4_PWM, 17000, 0);                                                  // PWM 通道初始化频率 17KHz 占空比初始为 0
+    gpio_init(MOTOR4_DIR, GPO, GPIO_HIGH, GPO_PUSH_PULL);                            // GPIO 鍒濆鍖栦负杈撳嚭 榛樿涓婃媺杈撳嚭楂?
+    pwm_init(MOTOR4_PWM, 17000, 0);                                                  // PWM 閫氶亾鍒濆鍖栭鐜?17KHz 鍗犵┖姣斿垵濮嬩负 0
 }
 
 void encoder_init(void)
 {
-	encoder_quad_init(ENCODER_1, ENCODER_1_A, ENCODER_1_B);                     // 初始化编码器模块与引脚 正交解码编码器模式
-    encoder_quad_init(ENCODER_2, ENCODER_2_A, ENCODER_2_B);                     // 初始化编码器模块与引脚 正交解码编码器模式
-    encoder_quad_init(ENCODER_3, ENCODER_3_A, ENCODER_3_B);                     // 初始化编码器模块与引脚 正交解码编码器模式
-    encoder_quad_init(ENCODER_4, ENCODER_4_A, ENCODER_4_B);                     // 初始化编码器模块与引脚 正交解码编码器模式
+	encoder_quad_init(ENCODER_1, ENCODER_1_A, ENCODER_1_B);                     // 鍒濆鍖栫紪鐮佸櫒妯″潡涓庡紩鑴?姝ｄ氦瑙ｇ爜缂栫爜鍣ㄦā寮?
+    encoder_quad_init(ENCODER_2, ENCODER_2_A, ENCODER_2_B);                     // 鍒濆鍖栫紪鐮佸櫒妯″潡涓庡紩鑴?姝ｄ氦瑙ｇ爜缂栫爜鍣ㄦā寮?
+    encoder_quad_init(ENCODER_3, ENCODER_3_A, ENCODER_3_B);                     // 鍒濆鍖栫紪鐮佸櫒妯″潡涓庡紩鑴?姝ｄ氦瑙ｇ爜缂栫爜鍣ㄦā寮?
+    encoder_quad_init(ENCODER_4, ENCODER_4_A, ENCODER_4_B);                     // 鍒濆鍖栫紪鐮佸櫒妯″潡涓庡紩鑴?姝ｄ氦瑙ｇ爜缂栫爜鍣ㄦā寮?
 }
 
 static float speed_L_up[2];
@@ -42,17 +78,17 @@ int all=0;
 int16 up_L_all=0;
 int16 down_L_all=0;
 int16 up_R_all=0;
-int16 down_R_all=0;//编码器积分变量
+int16 down_R_all=0;//缂栫爜鍣ㄧН鍒嗗彉閲?
 int32 encoder_all=0;
-int16 encoders_average;//积分平均值
+int16 encoders_average;//绉垎骞冲潎鍊?
 
-int16 encoder_data_quaddec1 = 0;//编码器的值
+int16 encoder_data_quaddec1 = 0;//缂栫爜鍣ㄧ殑鍊?
 int16 encoder_data_quaddec2 = 0;
 int16 encoder_data_quaddec3 = 0;
 int16 encoder_data_quaddec4 = 0;
 
 /**************************************************************************
-函数功能：编码器滤波
+鍑芥暟鍔熻兘锛氱紪鐮佸櫒婊ゆ尝
 **************************************************************************/                                      
 void encoder_get(void)
 {
@@ -63,15 +99,15 @@ void encoder_get(void)
 	int16 encoder_raw_quaddec4 = encoder_get_count(ENCODER_4);
 
 #if MOTOR_BOARD_USE_NEW
-	encoder_data_quaddec1 = -encoder_raw_quaddec4;                  // 获取编码器计数 左上
-	encoder_data_quaddec2 = -encoder_raw_quaddec3;                  // 获取编码器计数 右上
-	encoder_data_quaddec3 = -encoder_raw_quaddec1;                  // 获取编码器计数 左下
-	encoder_data_quaddec4 = -encoder_raw_quaddec2;                  // 获取编码器计数 右下
+	encoder_data_quaddec1 = -encoder_raw_quaddec4;                  // 鑾峰彇缂栫爜鍣ㄨ鏁?宸︿笂
+	encoder_data_quaddec2 = -encoder_raw_quaddec3;                  // 鑾峰彇缂栫爜鍣ㄨ鏁?鍙充笂
+	encoder_data_quaddec3 = -encoder_raw_quaddec1;                  // 鑾峰彇缂栫爜鍣ㄨ鏁?宸︿笅
+	encoder_data_quaddec4 = -encoder_raw_quaddec2;                  // 鑾峰彇缂栫爜鍣ㄨ鏁?鍙充笅
 #else
-	encoder_data_quaddec1 = -encoder_raw_quaddec1;                  // 获取编码器计数 左上
-	encoder_data_quaddec2 = -encoder_raw_quaddec4;                  // 获取编码器计数 右上
-	encoder_data_quaddec3 = -encoder_raw_quaddec3;                  // 获取编码器计数 左下
-	encoder_data_quaddec4 = -encoder_raw_quaddec2;                  // 获取编码器计数 右下
+	encoder_data_quaddec1 = -encoder_raw_quaddec1;                  // 鑾峰彇缂栫爜鍣ㄨ鏁?宸︿笂
+	encoder_data_quaddec2 = -encoder_raw_quaddec2;                  // 鑾峰彇缂栫爜鍣ㄨ鏁?鍙充笂
+	encoder_data_quaddec3 = -encoder_raw_quaddec3;                  // 鑾峰彇缂栫爜鍣ㄨ鏁?宸︿笅
+	encoder_data_quaddec4 = -encoder_raw_quaddec4;                  // 鑾峰彇缂栫爜鍣ㄨ鏁?鍙充笅
 #endif
 
 #if MOTOR_BOARD_REVERSE_ENCODER_ALL_DIR
@@ -80,18 +116,24 @@ void encoder_get(void)
 	encoder_data_quaddec3 = -encoder_data_quaddec3;
 	encoder_data_quaddec4 = -encoder_data_quaddec4;
 #endif
+
+	/* Logical wheel order/sign used by the four speed controllers. */
+	g_motor_raw_counts[MOTOR_WHEEL_UL] = encoder_data_quaddec1;
+	g_motor_raw_counts[MOTOR_WHEEL_UR] = -encoder_data_quaddec2;
+	g_motor_raw_counts[MOTOR_WHEEL_DL] = encoder_data_quaddec3;
+	g_motor_raw_counts[MOTOR_WHEEL_DR] = -encoder_data_quaddec4;
 	
 	
-	encoder_L_up[4]=encoder_L_up[3];//左上编码器
+	encoder_L_up[4]=encoder_L_up[3];//宸︿笂缂栫爜鍣?
 	encoder_L_up[3]=encoder_L_up[2];
 	encoder_L_up[2]=encoder_L_up[1];
 	encoder_L_up[1]=encoder_L_up[0];
-	encoder_L_up[0]=encoder_data_quaddec1;   //输入第一刻数
+	encoder_L_up[0]=encoder_data_quaddec1;   //杈撳叆绗竴鍒绘暟
 	speed_L_up[1]=speed_L_up[0];
 	speed_L_up[0]=(encoder_L_up[4]*0.5f+encoder_L_up[3]*0.5f+encoder_L_up[2]*2.0f+encoder_L_up[1]*3.0f+encoder_L_up[0]*4.0f)/10.0f;
 	up_L_all=Lowpass(speed_L_up[1],speed_L_up[0]);
 	
-	encoder_R_up[4]=encoder_R_up[3];//右上编码器
+	encoder_R_up[4]=encoder_R_up[3];//鍙充笂缂栫爜鍣?
 	encoder_R_up[3]=encoder_R_up[2];
 	encoder_R_up[2]=encoder_R_up[1];
 	encoder_R_up[1]=encoder_R_up[0];
@@ -100,7 +142,7 @@ void encoder_get(void)
 	speed_R_up[0]=(encoder_R_up[4]*0.5f+encoder_R_up[3]*0.5f+encoder_R_up[2]*2+encoder_R_up[1]*3.0f+encoder_R_up[0]*4.0f)/10.0f;
 	up_R_all=Lowpass(speed_R_up[1],speed_R_up[0]);
 	
-	encoder_L_down[4]=encoder_L_down[3];//左下编码器
+	encoder_L_down[4]=encoder_L_down[3];//宸︿笅缂栫爜鍣?
 	encoder_L_down[3]=encoder_L_down[2];
 	encoder_L_down[2]=encoder_L_down[1];
 	encoder_L_down[1]=encoder_L_down[0];
@@ -109,7 +151,7 @@ void encoder_get(void)
 	speed_L_down[0]=(encoder_L_down[4]*0.5f+encoder_L_down[3]*0.5f+encoder_L_down[2]*2+encoder_L_down[1]*3.0f+encoder_L_down[0]*4.0f)/10.0f;
 	down_L_all=Lowpass(speed_L_down[1],speed_L_down[0]);
 	
-	encoder_R_down[4]=encoder_R_down[3];//右下编码器
+	encoder_R_down[4]=encoder_R_down[3];//鍙充笅缂栫爜鍣?
 	encoder_R_down[3]=encoder_R_down[2];
 	encoder_R_down[2]=encoder_R_down[1];
 	encoder_R_down[1]=encoder_R_down[0];
@@ -118,9 +160,9 @@ void encoder_get(void)
 	speed_R_down[0]=(encoder_R_down[4]*0.5f+encoder_R_down[3]*0.5f+encoder_R_down[2]*2+encoder_R_down[1]*3.0f+encoder_R_down[0]*4.0f)/10.0f;
 	down_R_all=Lowpass(speed_R_down[1],speed_R_down[0]);
 	
-	encoder_clear_count(ENCODER_1);                                       // 清空编码器计数
-	encoder_clear_count(ENCODER_2);                                       // 清空编码器计数
-	encoder_clear_count(ENCODER_3);                                       // 清空编码器计数
+	encoder_clear_count(ENCODER_1);                                       // 娓呯┖缂栫爜鍣ㄨ鏁?
+	encoder_clear_count(ENCODER_2);                                       // 娓呯┖缂栫爜鍣ㄨ鏁?
+	encoder_clear_count(ENCODER_3);                                       // 娓呯┖缂栫爜鍣ㄨ鏁?
 	encoder_clear_count(ENCODER_4);
 
 	all = all + down_R_all+down_L_all+up_L_all+up_R_all;
@@ -131,9 +173,9 @@ void encoder_get(void)
 }
 
 /**************************************************************************
-函数功能：低通滤波
-入口参数：旧X，新X
-返回  值：新值
+鍑芥暟鍔熻兘锛氫綆閫氭护娉?
+鍏ュ彛鍙傛暟锛氭棫X锛屾柊X
+杩斿洖  鍊硷細鏂板�?
 **************************************************************************/
 int16 Lowpass(int16 X_last,int16 X_new)
 { 
@@ -180,69 +222,69 @@ void motor_pwm(int up_left_speed,int up_right_speed,int down_left_speed,int down
 	down_right_speed = -down_right_speed;
 #endif
 
-	if(up_left_speed > 0)                                                           // 正转
+	if(up_left_speed > 0)                                                           // 姝ｈ浆
     {
-		gpio_set_level(MOTOR1_DIR, GPIO_LOW);                     // DIR输出高电平
-        pwm_set_duty(MOTOR1_PWM, up_left_speed);                   // 计算占空比
+		gpio_set_level(MOTOR1_DIR, GPIO_LOW);                     // DIR杈撳嚭楂樼數骞?
+        pwm_set_duty(MOTOR1_PWM, up_left_speed);                   // 璁＄畻鍗犵┖姣?
      }
-     else if (up_left_speed < 0)                                                                  // 反转
+     else if (up_left_speed < 0)                                                                  // 鍙嶈浆
      {
-		gpio_set_level(MOTOR1_DIR, GPIO_HIGH);                    // DIR输出低电平
-        pwm_set_duty(MOTOR1_PWM, -up_left_speed);                // 计算占空比
+		gpio_set_level(MOTOR1_DIR, GPIO_HIGH);                    // DIR杈撳嚭浣庣數骞?
+        pwm_set_duty(MOTOR1_PWM, -up_left_speed);                // 璁＄畻鍗犵┖姣?
 
      }
 	 else if (up_left_speed == 0)
 	 {
-		gpio_set_level(MOTOR1_DIR, GPIO_LOW);                     // DIR输出高电平
-		 pwm_set_duty(MOTOR1_PWM, 0);                                 // 停止
+		gpio_set_level(MOTOR1_DIR, GPIO_LOW);                     // DIR杈撳嚭楂樼數骞?
+		 pwm_set_duty(MOTOR1_PWM, 0);                                 // 鍋滄
 	 }
 
 	 if (up_right_speed > 0)
 	 {
-		 gpio_set_level(MOTOR2_DIR, GPIO_HIGH);                       // DIR输出高电平
-         pwm_set_duty(MOTOR2_PWM, up_right_speed);                   // 计算占空比
+		 gpio_set_level(MOTOR2_DIR, GPIO_HIGH);                       // DIR杈撳嚭楂樼數骞?
+         pwm_set_duty(MOTOR2_PWM, up_right_speed);                   // 璁＄畻鍗犵┖姣?
 	 }
 	 else if (up_right_speed < 0)
 	 {
-		 gpio_set_level(MOTOR2_DIR, GPIO_LOW);                     // DIR输出低电平
-         pwm_set_duty(MOTOR2_PWM, -up_right_speed);                // 计算占空比
+		 gpio_set_level(MOTOR2_DIR, GPIO_LOW);                     // DIR杈撳嚭浣庣數骞?
+         pwm_set_duty(MOTOR2_PWM, -up_right_speed);                // 璁＄畻鍗犵┖姣?
 	 }
 	 else if (up_right_speed == 0)
 	 {
-		 gpio_set_level(MOTOR2_DIR, GPIO_HIGH);                       // DIR输出高电平
-		 pwm_set_duty(MOTOR2_PWM, 0);                                 // 停止
+		 gpio_set_level(MOTOR2_DIR, GPIO_HIGH);                       // DIR杈撳嚭楂樼數骞?
+		 pwm_set_duty(MOTOR2_PWM, 0);                                 // 鍋滄
 	 }
 
 	 if (down_left_speed > 0)
 	 {
-		 gpio_set_level(MOTOR3_DIR, GPIO_LOW);                       // DIR输出高电平
-         pwm_set_duty(MOTOR3_PWM, down_left_speed);                   // 计算占空比
+		 gpio_set_level(MOTOR3_DIR, GPIO_LOW);                       // DIR杈撳嚭楂樼數骞?
+         pwm_set_duty(MOTOR3_PWM, down_left_speed);                   // 璁＄畻鍗犵┖姣?
 	 }
 	 else if (down_left_speed < 0)
 	 {
-		 gpio_set_level(MOTOR3_DIR, GPIO_HIGH);                      // DIR输出低电平
-         pwm_set_duty(MOTOR3_PWM, -down_left_speed);                // 计算占空比
+		 gpio_set_level(MOTOR3_DIR, GPIO_HIGH);                      // DIR杈撳嚭浣庣數骞?
+         pwm_set_duty(MOTOR3_PWM, -down_left_speed);                // 璁＄畻鍗犵┖姣?
 	 }
 	 else if (down_left_speed == 0)
 	 {
-		 gpio_set_level(MOTOR3_DIR, GPIO_LOW);                       // DIR输出高电平
-		 pwm_set_duty(MOTOR3_PWM, 0);                                 // 停止
+		 gpio_set_level(MOTOR3_DIR, GPIO_LOW);                       // DIR杈撳嚭楂樼數骞?
+		 pwm_set_duty(MOTOR3_PWM, 0);                                 // 鍋滄
 	 }
 
 	 if (down_right_speed > 0)
 	 {
-		 gpio_set_level(MOTOR4_DIR, GPIO_HIGH);                       // DIR输出高电平
-         pwm_set_duty(MOTOR4_PWM, down_right_speed);                  // 计算占空比
+		 gpio_set_level(MOTOR4_DIR, GPIO_HIGH);                       // DIR杈撳嚭楂樼數骞?
+         pwm_set_duty(MOTOR4_PWM, down_right_speed);                  // 璁＄畻鍗犵┖姣?
 	 }
 	 else if (down_right_speed < 0)
 	 {
-		 gpio_set_level(MOTOR4_DIR, GPIO_LOW);                       // DIR输出低电平
-         pwm_set_duty(MOTOR4_PWM, -down_right_speed);                // 计算占空比
+		 gpio_set_level(MOTOR4_DIR, GPIO_LOW);                       // DIR杈撳嚭浣庣數骞?
+         pwm_set_duty(MOTOR4_PWM, -down_right_speed);                // 璁＄畻鍗犵┖姣?
 	 }
 	 else if (down_right_speed == 0)
 	 {
-		 gpio_set_level(MOTOR4_DIR, GPIO_HIGH);                       // DIR输出高电平
-		 pwm_set_duty(MOTOR4_PWM, 0);                                 // 停止	
+		 gpio_set_level(MOTOR4_DIR, GPIO_HIGH);                       // DIR杈撳嚭楂樼數骞?
+		 pwm_set_duty(MOTOR4_PWM, 0);                                 // 鍋滄
 	 }
 }
 
@@ -267,39 +309,229 @@ int Limit_int(int left_limit, int target_num, int right_limit)
 		return target_num;
 	}
 }
-//在这里修改
+//鍦ㄨ繖閲屼慨鏀?
 static int motor_apply_deadzone_compensation(int pid_output,
                                              int target_speed,
                                              int deadzone_fwd,
                                              int deadzone_rev)
 {
-    if (target_speed >= MOTOR_DEADZONE_TARGET_MIN_COUNTS)
+    int magnitude;
+    int compensation;
+
+#if MOTOR_BOARD_USE_NEW
+    if (target_speed >= motor_deadzone_target_min_counts)
     {
-        pid_output += deadzone_fwd;
+        if (pid_output >= 0)
+        {
+            pid_output += deadzone_fwd;
+        }
+        else
+        {
+            magnitude = -pid_output;
+            compensation = deadzone_rev;
+            if (motor_deadzone_blend_pwm > 0)
+            {
+                compensation = (deadzone_rev * magnitude) /
+                               (magnitude + motor_deadzone_blend_pwm);
+            }
+            pid_output -= compensation;
+        }
     }
-    else if (target_speed <= -MOTOR_DEADZONE_TARGET_MIN_COUNTS)
+    else if (target_speed <= -motor_deadzone_target_min_counts)
     {
-        pid_output -= deadzone_rev;
+        if (pid_output <= 0)
+        {
+            pid_output -= deadzone_rev;
+        }
+        else
+        {
+            compensation = deadzone_fwd;
+            if (motor_deadzone_blend_pwm > 0)
+            {
+                compensation = (deadzone_fwd * pid_output) /
+                               (pid_output + motor_deadzone_blend_pwm);
+            }
+            pid_output += compensation;
+        }
     }
+#else
+    if (target_speed < motor_deadzone_target_min_counts &&
+        target_speed > -motor_deadzone_target_min_counts)
+    {
+        return Limit_int(LIMIT_PWM_MIN, pid_output, LIMIT_PWM_MAX);
+    }
+
+    if (pid_output > 0)
+    {
+        compensation = deadzone_fwd;
+        if (motor_deadzone_blend_pwm > 0)
+        {
+            compensation = (deadzone_fwd * pid_output) /
+                           (pid_output + motor_deadzone_blend_pwm);
+        }
+        pid_output += compensation;
+    }
+    else if (pid_output < 0)
+    {
+        magnitude = -pid_output;
+        compensation = deadzone_rev;
+        if (motor_deadzone_blend_pwm > 0)
+        {
+            compensation = (deadzone_rev * magnitude) /
+                           (magnitude + motor_deadzone_blend_pwm);
+        }
+        pid_output -= compensation;
+    }
+#endif
 
     return Limit_int(LIMIT_PWM_MIN, pid_output, LIMIT_PWM_MAX);
 }
 
+static tagPID_T *motor_get_wheel_pid(uint8 wheel)
+{
+    switch (wheel)
+    {
+        case MOTOR_WHEEL_UL: return &ULpid;
+        case MOTOR_WHEEL_UR: return &URpid;
+        case MOTOR_WHEEL_DL: return &DLpid;
+        default:             return &DRpid;
+    }
+}
+
+static int motor_get_filtered_speed(uint8 wheel)
+{
+    switch (wheel)
+    {
+        case MOTOR_WHEEL_UL: return up_L_all;
+        case MOTOR_WHEEL_UR: return up_R_all;
+        case MOTOR_WHEEL_DL: return down_L_all;
+        default:             return down_R_all;
+    }
+}
+
+#if !MOTOR_BOARD_USE_NEW
+static uint8 motor_use_startup_kick(uint8 wheel, int target_speed)
+{
+    int target_sign;
+    int directed_raw;
+    tagPID_T *pid = motor_get_wheel_pid(wheel);
+
+    if (target_speed >= motor_deadzone_target_min_counts)
+    {
+        target_sign = 1;
+    }
+    else if (target_speed <= -motor_deadzone_target_min_counts)
+    {
+        target_sign = -1;
+    }
+    else
+    {
+        g_motor_running[wheel] = 0U;
+        g_motor_startup_ticks[wheel] = 0U;
+        g_motor_last_target_sign[wheel] = 0;
+        PID_Clear(pid);
+        return 0U;
+    }
+
+    if (g_motor_last_target_sign[wheel] != target_sign)
+    {
+        g_motor_running[wheel] = 0U;
+        g_motor_startup_ticks[wheel] = 0U;
+        g_motor_last_target_sign[wheel] = (int8)target_sign;
+        PID_Clear(pid);
+    }
+
+    directed_raw = g_motor_raw_counts[wheel] * target_sign;
+    if (directed_raw >= MOTOR_STARTUP_MOVING_MIN_COUNTS)
+    {
+        if (!g_motor_running[wheel])
+        {
+            PID_Clear(pid);
+        }
+        g_motor_running[wheel] = 1U;
+        g_motor_startup_ticks[wheel] = 0U;
+        return 0U;
+    }
+
+    if (g_motor_running[wheel])
+    {
+        return 0U;
+    }
+
+    if (g_motor_startup_ticks[wheel] < MOTOR_STARTUP_KICK_MAX_TICKS)
+    {
+        g_motor_startup_ticks[wheel]++;
+        return 1U;
+    }
+    g_motor_running[wheel] = 1U;
+    PID_Clear(pid);
+    return 0U;
+}
+#endif
+
+static int motor_calculate_wheel_output(uint8 wheel, int target_speed)
+{
+    tagPID_T *pid;
+    int pid_output;
+
+#if !MOTOR_BOARD_USE_NEW
+    if (motor_use_startup_kick(wheel, target_speed))
+    {
+        if (target_speed > 0)
+        {
+            return motor_startup_fwd[wheel];
+        }
+        if (target_speed < 0)
+        {
+            return -motor_startup_rev[wheel];
+        }
+        return 0;
+    }
+#endif
+
+    pid = motor_get_wheel_pid(wheel);
+    pid_output = PID_Add_Calculate(pid,
+                                   motor_get_filtered_speed(wheel),
+                                   target_speed);
+    pid_output = Limit_int(LIMIT_PWM_MIN, pid_output, LIMIT_PWM_MAX);
+    return motor_apply_deadzone_compensation(pid_output,
+                                             target_speed,
+                                             motor_deadzone_fwd[wheel],
+                                             motor_deadzone_rev[wheel]);
+}
+
 void motor_control(int* input_speed_encoder)
 {
-	int motorUL_pwm_value = 0;
-	int motorUR_pwm_value = 0;
-	int motorDL_pwm_value = 0;
-	int motorDR_pwm_value = 0;
-	motorUL_pwm_value = Limit_int(LIMIT_PWM_MIN, PID_Add_Calculate(&ULpid, up_L_all, input_speed_encoder[0]), LIMIT_PWM_MAX);   //上左
-	motorUR_pwm_value = Limit_int(LIMIT_PWM_MIN, PID_Add_Calculate(&URpid, up_R_all, input_speed_encoder[1]), LIMIT_PWM_MAX);   //上右
-	motorDL_pwm_value = Limit_int(LIMIT_PWM_MIN, PID_Add_Calculate(&DLpid, down_L_all, input_speed_encoder[2]), LIMIT_PWM_MAX);   //下左
-	motorDR_pwm_value = Limit_int(LIMIT_PWM_MIN, PID_Add_Calculate(&DRpid, down_R_all, input_speed_encoder[3]), LIMIT_PWM_MAX);   //下右
-	motorUL_pwm_value = motor_apply_deadzone_compensation(motorUL_pwm_value, input_speed_encoder[0], MOTOR_UL_DEADZONE_FWD, MOTOR_UL_DEADZONE_REV);
-	motorUR_pwm_value = motor_apply_deadzone_compensation(motorUR_pwm_value, input_speed_encoder[1], MOTOR_UR_DEADZONE_FWD, MOTOR_UR_DEADZONE_REV);
-	motorDL_pwm_value = motor_apply_deadzone_compensation(motorDL_pwm_value, input_speed_encoder[2], MOTOR_DL_DEADZONE_FWD, MOTOR_DL_DEADZONE_REV);
-	motorDR_pwm_value = motor_apply_deadzone_compensation(motorDR_pwm_value, input_speed_encoder[3], MOTOR_DR_DEADZONE_FWD, MOTOR_DR_DEADZONE_REV);
-	motor_pwm(motorUL_pwm_value, motorUR_pwm_value,motorDL_pwm_value,motorDR_pwm_value);
+    int pwm[MOTOR_WHEEL_COUNT];
+    uint8 i;
+
+    if (input_speed_encoder == NULL)
+    {
+        motor_pwm(0, 0, 0, 0);
+        return;
+    }
+
+    for (i = 0U; i < MOTOR_WHEEL_COUNT; ++i)
+    {
+        pwm[i] = motor_calculate_wheel_output(i, input_speed_encoder[i]);
+    }
+
+    motor_pwm(pwm[MOTOR_WHEEL_UL],
+              pwm[MOTOR_WHEEL_UR],
+              pwm[MOTOR_WHEEL_DL],
+              pwm[MOTOR_WHEEL_DR]);
+}
+
+void motor_control_reset_state(void)
+{
+	uint8 i;
+
+	for (i = 0U; i < MOTOR_WHEEL_COUNT; ++i)
+	{
+		g_motor_running[i] = 0U;
+		g_motor_startup_ticks[i] = 0U;
+		g_motor_last_target_sign[i] = 0;
+	}
 }
 
 
@@ -312,13 +544,13 @@ float r_x = 0;
 float r_y = 0;
 
 /**
-  * @函数作用：运动学解析参数初始化
+  * @鍑芥暟浣滅敤锛氳繍鍔ㄥ瑙ｆ瀽鍙傛暟鍒濆鍖?
   */
 void Kinematics_Init(void)
 {
-	//轮子转动一圈，移动的距离为轮子的周长WHEEL_DIAMETER*3.1415926，编码器产生的脉冲信号为ENCODER_RESOLUTION。则电机编码器转一圈产生的脉冲信号除以轮子周长可得轮子前进1m的距离所对应编码器计数的变化
+	//杞瓙杞姩涓�鍦堬紝绉诲姩鐨勮窛绂讳负杞瓙鐨勫懆闀縒HEEL_DIAMETER*3.1415926锛岀紪鐮佸櫒浜х敓鐨勮剦鍐蹭俊鍙蜂负ENCODER_RESOLUTION銆傚垯鐢垫満缂栫爜鍣ㄨ浆涓�鍦堜骇鐢熺殑鑴夊啿淇″彿闄や互杞瓙鍛ㄩ暱鍙緱杞瓙鍓嶈繘1m鐨勮窛绂绘墍瀵瑰簲缂栫爜鍣ㄨ鏁扮殑鍙樺寲
     pulse_per_meter = (float)(ENCODER_RESOLUTION/(WHEEL_DIAMETER*3.1415926f))/linear_correction_factor;      //12513
-    //宏定义依次对应 2280 0.058 修正系数给了1.0
+    //瀹忓畾涔変緷娆″搴?2280 0.058 淇绯绘暟缁欎簡1.0
     r_x = D_X/2;
     r_y = D_Y/2;
     rx_plus_ry_cali = (r_x + r_y)/angular_correction_factor;
@@ -327,9 +559,9 @@ void Kinematics_Init(void)
 }
 
 /**
-  * @函数作用：逆向运动学解析，底盘三轴速度-->轮子速度
-  * @输入：麦轮车三轴速度 m/s
-  * @输出：电机应达到的目标速度（一个PID控制周期内，电机编码器计数值的变化）
+  * @鍑芥暟浣滅敤锛氶�嗗悜杩愬姩瀛﹁В鏋愶紝搴曠洏涓夎酱閫熷害-->杞瓙閫熷害
+  * @杈撳叆锛氶害杞溅涓夎酱閫熷害 m/s
+  * @杈撳嚭锛氱數鏈哄簲杈惧埌鐨勭洰鏍囬�熷害锛堜竴涓狿ID鎺у埗鍛ㄦ湡鍐咃紝鐢垫満缂栫爜鍣ㄨ鏁板�肩殑鍙樺寲锛?
   */
 void Kinematics_Inverse(float* input, int* output)
 {
@@ -337,7 +569,7 @@ void Kinematics_Inverse(float* input, int* output)
 	float v_tx = input[0] * 0.01f -
 	             LATERAL_TO_LONGITUDINAL_COUPLING_FACTOR * desired_vy_mps;
 	float v_ty = desired_vy_mps / LATERAL_CORRECTION_FACTOR;
-	float omega = input[2];                //rad/s（弧度/秒）
+	float omega = input[2];                //rad/s锛堝姬搴?绉掞級
 	static float v_w[4] = {0};
 	
 	v_w[0] = v_tx - v_ty - (r_x + r_y)*omega;               //rx+ry=0.215
@@ -345,11 +577,11 @@ void Kinematics_Inverse(float* input, int* output)
 	v_w[2] = v_tx + v_ty - (r_x + r_y)*omega;
 	v_w[3] = v_tx - v_ty + (r_x + r_y)*omega;
 
-    //计算一个PID控制周期内，电机编码器计数值的变化
-	output[0] = (int)(v_w[0] * pulse_per_meter/PID_RATE);   //上左    *125
-	output[1] = (int)(v_w[1] * pulse_per_meter/PID_RATE);   //上右
-	output[2] = (int)(v_w[2] * pulse_per_meter/PID_RATE);   //下左
-	output[3] = (int)(v_w[3] * pulse_per_meter/PID_RATE);   //下右
+    //璁＄畻涓�涓狿ID鎺у埗鍛ㄦ湡鍐咃紝鐢垫満缂栫爜鍣ㄨ鏁板�肩殑鍙樺寲
+	output[0] = (int)(v_w[0] * pulse_per_meter/PID_RATE);   //涓婂乏    *125
+	output[1] = (int)(v_w[1] * pulse_per_meter/PID_RATE);   //涓婂彸
+	output[2] = (int)(v_w[2] * pulse_per_meter/PID_RATE);   //涓嬪乏
+	output[3] = (int)(v_w[3] * pulse_per_meter/PID_RATE);   //涓嬪彸
 	
 	output[0] = Limit_int(LIMIT_ENCODER_MIN, output[0], LIMIT_ENCODER_MAX);
 	output[1] = Limit_int(LIMIT_ENCODER_MIN, output[1], LIMIT_ENCODER_MAX);

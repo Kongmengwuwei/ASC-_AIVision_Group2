@@ -16,9 +16,11 @@
 #define MOTOR4_PWM              (PWM2_MODULE3_CHA_D2)
 
 // Motor board selection:
-// 0: old board pin/direction configuration.
-// 1: new board wiring adaptation, enabled by default.
-#define MOTOR_BOARD_USE_NEW          (1)
+// 0: old board pin/direction configuration used by the current tuning car.
+// 1: final board wiring adaptation.
+// Keep both parameter sets independent so old-board tuning cannot overwrite
+// the already validated final-board settings.
+#define MOTOR_BOARD_USE_NEW          (0)
 
 #if MOTOR_BOARD_USE_NEW
 // Remap logical wheels UL, UR, DL, DR to the measured physical motor channels.
@@ -31,6 +33,13 @@
 #define MOTOR_BOARD_REVERSE_DR_DIR   (1)
 #define MOTOR_BOARD_REVERSE_ENCODER_ALL_DIR (1)
 #else
+/*
+ * Old-board UART8 owner:
+ * 1 = Bluetooth tuning on UART8/D16/D17 (recognition camera UART disabled).
+ * 0 = Recognition camera on UART8/D16/D17 (Bluetooth UART disabled).
+ */
+#define MOTOR_OLD_BOARD_UART8_USE_BLUETOOTH (0)
+
 #define MOTOR_BOARD_REMAP_LOGICAL_WHEELS (0)
 #define MOTOR_BOARD_REVERSE_ALL_DIR  (0)
 #define MOTOR_BOARD_REVERSE_UL_DIR   (0)
@@ -68,8 +77,12 @@
 #define LIMIT_PWM_MIN              -6000
 #define LIMIT_PWM_MAX               6000
 
-/* Closed-loop tuned dead-zone feedforward for the final motor driver board. */
+/* Board-specific calibrated motor-control values. */
 #define MOTOR_DEADZONE_TARGET_MIN_COUNTS  2
+#define MOTOR_DEADZONE_BLEND_PWM          120
+#define MOTOR_STARTUP_MOVING_MIN_COUNTS    1
+#define MOTOR_STARTUP_KICK_MAX_TICKS       8U
+#if MOTOR_BOARD_USE_NEW
 #define MOTOR_UL_DEADZONE_FWD             420
 #define MOTOR_UL_DEADZONE_REV             390
 #define MOTOR_UR_DEADZONE_FWD             495
@@ -78,6 +91,40 @@
 #define MOTOR_DL_DEADZONE_REV             390
 #define MOTOR_DR_DEADZONE_FWD             550
 #define MOTOR_DR_DEADZONE_REV             637
+#define MOTOR_UL_STARTUP_FWD              MOTOR_UL_DEADZONE_FWD
+#define MOTOR_UL_STARTUP_REV              MOTOR_UL_DEADZONE_REV
+#define MOTOR_UR_STARTUP_FWD              MOTOR_UR_DEADZONE_FWD
+#define MOTOR_UR_STARTUP_REV              MOTOR_UR_DEADZONE_REV
+#define MOTOR_DL_STARTUP_FWD              MOTOR_DL_DEADZONE_FWD
+#define MOTOR_DL_STARTUP_REV              MOTOR_DL_DEADZONE_REV
+#define MOTOR_DR_STARTUP_FWD              MOTOR_DR_DEADZONE_FWD
+#define MOTOR_DR_STARTUP_REV              MOTOR_DR_DEADZONE_REV
+#else
+/* Old-board kinetic-friction compensation measured by descending PWM sweeps. */
+#define MOTOR_UL_DEADZONE_FWD             380
+#define MOTOR_UL_DEADZONE_REV             420
+#define MOTOR_UR_DEADZONE_FWD             360
+#define MOTOR_UR_DEADZONE_REV             370
+#define MOTOR_DL_DEADZONE_FWD             440
+#define MOTOR_DL_DEADZONE_REV             410
+#define MOTOR_DR_DEADZONE_FWD             390
+#define MOTOR_DR_DEADZONE_REV             380
+/* Static breakaway kicks; running compensation is calibrated separately. */
+#define MOTOR_UL_STARTUP_FWD              850
+#define MOTOR_UL_STARTUP_REV              800
+#define MOTOR_UR_STARTUP_FWD              800
+#define MOTOR_UR_STARTUP_REV              750
+#define MOTOR_DL_STARTUP_FWD             1050
+#define MOTOR_DL_STARTUP_REV             1100
+#define MOTOR_DR_STARTUP_FWD              800
+#define MOTOR_DR_STARTUP_REV              900
+#endif
+
+#define MOTOR_WHEEL_COUNT                  4U
+#define MOTOR_WHEEL_UL                     0U
+#define MOTOR_WHEEL_UR                     1U
+#define MOTOR_WHEEL_DL                     2U
+#define MOTOR_WHEEL_DR                     3U
 
 #define LIMIT_ENCODER_MIN          -500
 #define LIMIT_ENCODER_MAX           500
@@ -102,13 +149,13 @@ extern float rx_plus_ry_cali;
 extern float speed_three_array[3];
 extern int speed_encoder[4];
 extern int car_stop_array[4];
-
 void motor_init(void);
 void encoder_init(void);
 void encoder_get(void);
 int Limit_int(int left_limit, int target_num, int right_limit);
 void motor_pwm(int up_left_speed,int up_right_speed,int down_left_speed,int down_right_speed);
 void motor_control(int* input_speed_encoder);
+void motor_control_reset_state(void);
 //void encoder_read_filtered(int *enc1, int *enc2, int *enc3, int *enc4);
 int16 Lowpass(int16 X_last,int16 X_new);
 void Kinematics_Init(void);

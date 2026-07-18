@@ -31,6 +31,8 @@
 #define PF_POSITION_MAX_IOUT_CMPS        200.0f
 #define PF_POSITION_MAX_OUT_CMPS         200.0f
 #define PF_POSITION_FILTER_ALPHA         0.9f
+#define PF_TERMINAL_MIN_SPEED_CMPS       8.0f
+#define PF_TERMINAL_MIN_SPEED_ZONE_M     0.030f
 #define PF_LINE_GUIDE_MAX_CMPS           12.0f
 #define PF_LINE_GUIDE_DEADBAND_M         0.0025f
 
@@ -1687,6 +1689,22 @@ void path_follow_update(float yaw_deg, path_follow_output_t *out)
                                      &vy_world_cmps);
     }
     pf_apply_position_loop(&geometry, &vx_world_cmps, &vy_world_cmps);
+
+    /* Do not let the terminal position loop request a wheel speed below the
+     * drivetrain's reliable ground-motion range. Keep the original position
+     * tolerance, but cross the final 1.5 cm instead of waiting indefinitely
+     * at a static-friction equilibrium. */
+    if (geometry.distance_m > g_pf.position_tolerance_m &&
+        geometry.distance_m <= PF_TERMINAL_MIN_SPEED_ZONE_M)
+    {
+        float terminal_speed_cmps = sqrtf(vx_world_cmps * vx_world_cmps +
+                                           vy_world_cmps * vy_world_cmps);
+        if (terminal_speed_cmps < PF_TERMINAL_MIN_SPEED_CMPS)
+        {
+            vx_world_cmps = PF_TERMINAL_MIN_SPEED_CMPS * geometry.dir_x;
+            vy_world_cmps = PF_TERMINAL_MIN_SPEED_CMPS * geometry.dir_y;
+        }
+    }
     pf_limit_world_speed(&vx_world_cmps, &vy_world_cmps);
 
     g_pf.debug.distance_m = geometry.distance_m;

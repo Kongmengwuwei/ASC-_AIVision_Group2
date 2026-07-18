@@ -65,9 +65,9 @@ PIDInitStruct ULPidInitStruct =
 
 PIDInitStruct URPidInitStruct =
 {
-	.fKp       = 5.0,
+	.fKp       = 12.0,
 	.fKi       = 0.6,
-	.fKd       = 0.0,
+	.fKd       = 5.0,
 	.fMax_Iout = 4000,
 	.fMax_Out  = 6000,
 	.alpha     = 0.9

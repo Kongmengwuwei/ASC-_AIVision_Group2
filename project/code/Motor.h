@@ -21,17 +21,17 @@
 #define MOTOR_BOARD_USE_NEW          (1)
 
 #if MOTOR_BOARD_USE_NEW
-// Measured order was 2,3,4,1 when commands were sent as 1,2,3,4.
-#define MOTOR_BOARD_REMAP_ORDER_2341 (1)
+// Remap logical wheels UL, UR, DL, DR to the measured physical motor channels.
+#define MOTOR_BOARD_REMAP_LOGICAL_WHEELS (1)
 #define MOTOR_BOARD_REVERSE_ALL_DIR  (1)
 // Extra logical-wheel direction correction for the new board.
-#define MOTOR_BOARD_REVERSE_UL_DIR   (1)
+#define MOTOR_BOARD_REVERSE_UL_DIR   (0)
 #define MOTOR_BOARD_REVERSE_UR_DIR   (0)
-#define MOTOR_BOARD_REVERSE_DL_DIR   (0)
+#define MOTOR_BOARD_REVERSE_DL_DIR   (1)
 #define MOTOR_BOARD_REVERSE_DR_DIR   (1)
 #define MOTOR_BOARD_REVERSE_ENCODER_ALL_DIR (1)
 #else
-#define MOTOR_BOARD_REMAP_ORDER_2341 (0)
+#define MOTOR_BOARD_REMAP_LOGICAL_WHEELS (0)
 #define MOTOR_BOARD_REVERSE_ALL_DIR  (0)
 #define MOTOR_BOARD_REVERSE_UL_DIR   (0)
 #define MOTOR_BOARD_REVERSE_UR_DIR   (0)
@@ -59,7 +59,7 @@
 //参数宏定义
 #define ENCODER_RESOLUTION      2390.0   //编码器分辨率, 轮子转一圈，编码器产生的脉冲数
 #define WHEEL_DIAMETER          0.06239  //轮子直径,单位：米@
-#define LATERAL_CORRECTION_FACTOR 0.910800f  //实际横移距离 / 计划横移距离
+#define LATERAL_CORRECTION_FACTOR 0.901589f  //实际横移距离 / 计划横移距离
 #define LATERAL_TO_LONGITUDINAL_COUPLING_FACTOR 0.0f  // dx drift / dy travel
 #define D_X                     0.176     //底盘Y轴上两轮中心的间距
 #define D_Y                     0.20     //底盘X轴上两轮中心的间距

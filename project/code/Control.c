@@ -33,7 +33,7 @@ static uint8 g_control_use_followup_vision_localization = 1U;
  *
  * 小车只平移到对应方向，车头朝向保持不变。
  */
-static uint8 g_control_prestart_depart_dir = 1U;
+static uint8 g_control_prestart_depart_dir = 0U;
 
 /*
  * 手动开关：识别阶段是否启用“段前提前转向”。
@@ -48,7 +48,7 @@ static uint8 g_control_continuous_levels_enabled = 0U;
  * Positive values extend the selected Start_Dir move, negative values shorten it.
  * Unit: m. Default +0.05 m keeps the prestart move at 0.35 m total.
  */
-float g_control_prestart_depart_compensate_m = -0.00f;
+float g_control_prestart_depart_compensate_m = -0.025f;
 
 /* ========================= 参数配置�?========================= */
 
@@ -68,7 +68,6 @@ float g_control_prestart_depart_compensate_m = -0.00f;
 #define CONTROL_BOMB_EXPLOSION_PAUSE_MS 500U
 /* 回到发车区后，车头回正到发车方向基准的角度容差。 */
 #define CONTROL_RETURN_YAW_ALIGN_TOL_DEG 5.0f
-#define CONTROL_IDENTIFY_SAFE_PATH_CAPACITY (MAP_ROWS * MAP_COLS)
 #define CONTROL_CONTINUOUS_LEVEL_COUNT 3U
 #define CONTROL_CONTINUOUS_STOP_ENCODER_TOL 5
 #define CONTROL_CONTINUOUS_STOP_STABLE_LOOPS 3U
@@ -109,10 +108,13 @@ float g_control_prestart_depart_compensate_m = -0.00f;
 
 #define CONTROL_IDENTIFY_MAX_TARGETS_PER_POINT (MAX_BOXES + MAX_TARGETS)
 #define CONTROL_IDENTIFY_YAW_ALIGN_TOL_DEG 5.0f
-#define CONTROL_IDENTIFY_RECOG_TIMEOUT_LOOPS 250U
+#define CONTROL_IDENTIFY_RECOG_SETTLE_TICKS 20U
+#define CONTROL_IDENTIFY_RECOG_TIMEOUT_TICKS 80U
+#define CONTROL_IDENTIFY_RECOG_ACCEPT_SCORE 85
+#define CONTROL_IDENTIFY_RECOG_CONFIRM_SCORE 70
 #define CONTROL_IDENTIFY_HALF_GRID_M (GRID_SIZE_M * 0.5f)
 /* 连续超时多少次之后才真正重发识别命令（避免在摄像头处理过程中频繁清 FIFO 重发）。 */
-#define CONTROL_IDENTIFY_RECOG_MAX_RETRIES 5U
+#define CONTROL_IDENTIFY_RECOG_MAX_RETRIES 1U
 #define CONTROL_IDENTIFY_ID_UNASSIGNED 0xFFU
 #define CONTROL_IDENTIFY_ID_MIN 0U
 #define CONTROL_IDENTIFY_ID_MAX 9U
@@ -186,13 +188,6 @@ typedef struct
     control_plan_mode_t push_mode;
 } control_level_rule_t;
 
-typedef enum
-{
-    CONTROL_RECOG_STEP_DONE = 0U,
-    CONTROL_RECOG_STEP_RETRY,
-    CONTROL_RECOG_STEP_GIVE_UP
-} control_recognition_step_t;
-
 /* ========================= 内部状态变�?========================= */
 
 /**
@@ -264,7 +259,7 @@ static uint8 g_identify_safe_move_prepared = 0U;
 static uint8 g_identify_safe_move_running = 0U;
 static uint8 g_identify_return_start_valid = 0U;
 static Position g_identify_return_start_map = {0U, 0U, 0U};
-static Position g_identify_safe_move_path[CONTROL_IDENTIFY_SAFE_PATH_CAPACITY] = {{0}};
+static Position g_identify_safe_move_path[PATH_SAFE_RELOCATION_MAX_POINTS] = {{0}};
 static size_t g_identify_safe_move_steps = 0U;
 
 static control_identify_target_t g_identify_targets[CONTROL_IDENTIFY_MAX_TARGETS_PER_POINT];
@@ -279,9 +274,14 @@ static uint8 g_identified_target_flags[MAX_TARGETS] = {0U};
 static uint8 g_identify_box_id_assigned[MAX_BOXES] = {0U};
 static uint8 g_identify_target_id_assigned[MAX_TARGETS] = {0U};
 static uint8 g_identify_recog_waiting = 0U;
-static uint16 g_identify_recog_wait_loops = 0U;
 static uint8 g_identify_recog_retry_count = 0U;
 static VisionRecognitionType g_identify_recog_wait_type = VISION_RECOGNITION_NONE;
+static uint16 g_identify_recog_expected_sequence = 0U;
+static uint32 g_identify_recog_wait_start_tick = 0U;
+static uint8 g_identify_recog_settle_waiting = 0U;
+static uint32 g_identify_recog_settle_start_tick = 0U;
+static uint8 g_identify_recog_confirm_pending = 0U;
+static uint8 g_identify_recog_confirm_id = 0U;
 
 static control_identify_id_record_t g_saved_box_id_records[MAX_BOXES] = {{0}};
 static control_identify_id_record_t g_saved_target_id_records[MAX_TARGETS] = {{0}};
@@ -555,9 +555,14 @@ static void mark_wait_new_map_frame(void)
 static void reset_identify_recognition_wait(void)
 {
     g_identify_recog_waiting = 0U;
-    g_identify_recog_wait_loops = 0U;
     g_identify_recog_retry_count = 0U;
     g_identify_recog_wait_type = VISION_RECOGNITION_NONE;
+    g_identify_recog_expected_sequence = 0U;
+    g_identify_recog_wait_start_tick = 0U;
+    g_identify_recog_settle_waiting = 0U;
+    g_identify_recog_settle_start_tick = 0U;
+    g_identify_recog_confirm_pending = 0U;
+    g_identify_recog_confirm_id = 0U;
 }
 
 static void reset_identify_runtime_state(void)
@@ -1200,29 +1205,6 @@ static void report_identify_result_bluetooth(const control_identify_target_t *ta
                       (unsigned int)recognized_id);
 }
 
-static control_recognition_step_t classify_identify_recognition_result(const VisionRecognitionResult *result,
-                                                                       uint8 valid_id)
-{
-    if (result == NULL)
-    {
-        return CONTROL_RECOG_STEP_GIVE_UP;
-    }
-
-    if (valid_id)
-    {
-        return CONTROL_RECOG_STEP_DONE;
-    }
-
-    if ((!result->success || result->mode_marker) &&
-        g_identify_recog_retry_count < CONTROL_IDENTIFY_RECOG_MAX_RETRIES)
-    {
-        g_identify_recog_retry_count++;
-        return CONTROL_RECOG_STEP_RETRY;
-    }
-
-    return CONTROL_RECOG_STEP_GIVE_UP;
-}
-
 static void apply_identify_result_to_map(const control_identify_target_t *target,
                                          uint8 valid_id,
                                          uint8 recognized_id)
@@ -1254,21 +1236,52 @@ static uint8 finish_or_retry_identify_result(const control_identify_target_t *ta
                                              uint8 recognized_id,
                                              VisionRecognitionDistance distance)
 {
-    control_recognition_step_t step = classify_identify_recognition_result(result, valid_id);
-
-    if (step == CONTROL_RECOG_STEP_RETRY)
+    if (result == NULL)
     {
-        if (!start_identify_recognition_request(target, distance))
+        reset_identify_recognition_wait();
+        return 1U;
+    }
+
+    /* 高置信度单帧直接采用，保证停车后的识别流程足够快。 */
+    if (valid_id && result->score >= CONTROL_IDENTIFY_RECOG_ACCEPT_SCORE)
+    {
+        apply_identify_result_to_map(target, valid_id, recognized_id);
+        reset_identify_recognition_wait();
+        return 1U;
+    }
+
+    /* 中等置信度必须用第二帧同标签确认，避免一帧偶然误判写入地图。 */
+    if (valid_id && result->score >= CONTROL_IDENTIFY_RECOG_CONFIRM_SCORE)
+    {
+        if (g_identify_recog_confirm_pending)
         {
+            if (recognized_id == g_identify_recog_confirm_id)
+            {
+                apply_identify_result_to_map(target, valid_id, recognized_id);
+            }
             reset_identify_recognition_wait();
             return 1U;
         }
-        return 0U;
+
+        g_identify_recog_confirm_pending = 1U;
+        g_identify_recog_confirm_id = recognized_id;
+        if (start_identify_recognition_request(target, distance))
+        {
+            return 0U;
+        }
+        reset_identify_recognition_wait();
+        return 1U;
     }
 
-    if (step == CONTROL_RECOG_STEP_DONE)
+    /* 低分、-1 或非数字标签：只补拍一帧；确认帧失败则立即跳过。 */
+    if (!g_identify_recog_confirm_pending &&
+        g_identify_recog_retry_count < CONTROL_IDENTIFY_RECOG_MAX_RETRIES)
     {
-        apply_identify_result_to_map(target, valid_id, recognized_id);
+        g_identify_recog_retry_count++;
+        if (start_identify_recognition_request(target, distance))
+        {
+            return 0U;
+        }
     }
 
     reset_identify_recognition_wait();
@@ -1532,11 +1545,11 @@ static uint8 start_identify_recognition_request(const control_identify_target_t 
         return 0U;
     }
 
-    g_identify_recog_wait_loops = 0U;
-
     if (target->obj_type == CONTROL_IDENTIFY_OBJ_BOX)
     {
-        if (!uart_send_vision_img_request_by_distance(distance))
+        if (!uart_send_vision_request_with_sequence(VISION_RECOGNITION_IMG,
+                                                    distance,
+                                                    &g_identify_recog_expected_sequence))
         {
             return 0U;
         }
@@ -1544,7 +1557,9 @@ static uint8 start_identify_recognition_request(const control_identify_target_t 
     }
     else
     {
-        if (!uart_send_vision_num_request_by_distance(distance))
+        if (!uart_send_vision_request_with_sequence(VISION_RECOGNITION_NUM,
+                                                    distance,
+                                                    &g_identify_recog_expected_sequence))
         {
             return 0U;
         }
@@ -1552,6 +1567,7 @@ static uint8 start_identify_recognition_request(const control_identify_target_t 
     }
 
     g_identify_recog_waiting = 1U;
+    g_identify_recog_wait_start_tick = g_control_tick_10ms;
     return 1U;
 }
 
@@ -1621,10 +1637,20 @@ static uint8 identify_action_stub(const control_identify_target_t *target)
 
     if (!g_identify_recog_waiting)
     {
-        /*
-         * Clear stale vision data before a new request so this target only consumes
-         * the response generated for the current IMG/NUM command.
-         */
+        if (!g_identify_recog_settle_waiting)
+        {
+            g_identify_recog_settle_waiting = 1U;
+            g_identify_recog_settle_start_tick = g_control_tick_10ms;
+            return 0U;
+        }
+
+        if ((uint32)(g_control_tick_10ms - g_identify_recog_settle_start_tick) <
+            CONTROL_IDENTIFY_RECOG_SETTLE_TICKS)
+        {
+            return 0U;
+        }
+
+        g_identify_recog_settle_waiting = 0U;
         if (!start_identify_recognition_request(target, distance))
         {
             return 1U;
@@ -1636,6 +1662,10 @@ static uint8 identify_action_stub(const control_identify_target_t *target)
     {
         if (vision_take_img_result(&result))
         {
+            if (result.request_seq != g_identify_recog_expected_sequence)
+            {
+                return 0U;
+            }
             valid_id = identify_result_to_valid_id(&result, &recognized_id);
             report_identify_result_bluetooth(target, &result, valid_id, recognized_id);
             return finish_or_retry_identify_result(target,
@@ -1649,6 +1679,10 @@ static uint8 identify_action_stub(const control_identify_target_t *target)
     {
         if (vision_take_num_result(&result))
         {
+            if (result.request_seq != g_identify_recog_expected_sequence)
+            {
+                return 0U;
+            }
             valid_id = identify_result_to_valid_id(&result, &recognized_id);
             report_identify_result_bluetooth(target, &result, valid_id, recognized_id);
             return finish_or_retry_identify_result(target,
@@ -1659,31 +1693,17 @@ static uint8 identify_action_stub(const control_identify_target_t *target)
         }
     }
 
-    g_identify_recog_wait_loops++;
-    if (g_identify_recog_wait_loops >= CONTROL_IDENTIFY_RECOG_TIMEOUT_LOOPS)
+    if ((uint32)(g_control_tick_10ms - g_identify_recog_wait_start_tick) >=
+        CONTROL_IDENTIFY_RECOG_TIMEOUT_TICKS)
     {
         if (g_identify_recog_retry_count < CONTROL_IDENTIFY_RECOG_MAX_RETRIES)
         {
             g_identify_recog_retry_count++;
-            /*
-             * OpenMV TFLite 推理耗时长（~300-800ms），主循环轮询 250 次可能远小于
-             * 一次识别耗时。连续超时前不要清 FIFO 重发命令，否则会把摄像头刚发回
-             * 的响应字节丢弃，导致永远收不到结果。
-             *
-             * 只在连续多次超时后才真正重发，应对摄像头确实丢命令的极端情况。
-             */
-            if (g_identify_recog_retry_count >= CONTROL_IDENTIFY_RECOG_MAX_RETRIES)
+            if (!start_identify_recognition_request(target, distance))
             {
-                if (!start_identify_recognition_request(target, distance))
-                {
-                    return 1U;
-                }
-                return 0U;
+                reset_identify_recognition_wait();
+                return 1U;
             }
-            /* 不重发：只重置计数器，清除可能残留的旧 updated 标志，继续等待。 */
-            g_identify_recog_wait_loops = 0U;
-            vision_num_result_updated = false;
-            vision_img_result_updated = false;
             return 0U;
         }
         reset_identify_recognition_wait();
@@ -1819,157 +1839,6 @@ static uint8 identify_cell_blocks_near_half_step(uint8 row, uint8 col)
             return 1U;
     }
     return 0U;
-}
-
-static uint8 identify_wall_at(uint8 row, uint8 col)
-{
-    size_t i = 0U;
-
-    for (i = 0U; i < Obstacles_count; i++)
-    {
-        if (obstacles[i].row == row && obstacles[i].col == col)
-            return 1U;
-    }
-    return 0U;
-}
-
-/**
- * @brief 判断格子自身及四邻域是否没有墙；允许邻近箱子和目标点。
- */
-static uint8 identify_safe_localization_cell(uint8 row, uint8 col)
-{
-    static const int8 d_row[5] = {0, -1, 0, 1, 0};
-    static const int8 d_col[5] = {0, 0, 1, 0, -1};
-    size_t i = 0U;
-
-    if (row >= MAP_ROWS || col >= MAP_COLS ||
-        identify_cell_has_blocker(row, col))
-    {
-        return 0U;
-    }
-    for (i = 0U; i < 5U; i++)
-    {
-        int32 check_row = (int32)row + (int32)d_row[i];
-        int32 check_col = (int32)col + (int32)d_col[i];
-
-        if (check_row < 0 || check_col < 0 ||
-            check_row >= (int32)MAP_ROWS || check_col >= (int32)MAP_COLS)
-        {
-            continue;
-        }
-        if (identify_wall_at((uint8)check_row, (uint8)check_col))
-        {
-            return 0U;
-        }
-    }
-    return 1U;
-}
-
-/**
- * @brief 用四邻域 BFS 构建到最近安全定位格的可达路径。
- */
-static uint8 build_identify_safe_localization_path(Position start_map,
-                                                   Position *out_exec_path,
-                                                   size_t capacity,
-                                                   size_t *out_steps)
-{
-    static int16 prev[CONTROL_IDENTIFY_SAFE_PATH_CAPACITY];
-    static uint16 queue[CONTROL_IDENTIFY_SAFE_PATH_CAPACITY];
-    static uint16 reverse_indices[CONTROL_IDENTIFY_SAFE_PATH_CAPACITY];
-    static const int8 d_row[4] = {0, -1, 0, 1};
-    static const int8 d_col[4] = {1, 0, -1, 0};
-    size_t i = 0U;
-    size_t head = 0U;
-    size_t tail = 0U;
-    size_t reverse_count = 0U;
-    int32 start_index = 0;
-    int32 target_index = -1;
-
-    if (out_steps != NULL)
-    {
-        *out_steps = 0U;
-    }
-    if (out_exec_path == NULL || out_steps == NULL ||
-        capacity < 1U || start_map.row >= MAP_ROWS || start_map.col >= MAP_COLS)
-    {
-        return 0U;
-    }
-
-    for (i = 0U; i < CONTROL_IDENTIFY_SAFE_PATH_CAPACITY; i++)
-    {
-        prev[i] = -2;
-    }
-    start_index = (int32)start_map.row * (int32)MAP_COLS + (int32)start_map.col;
-    prev[start_index] = -1;
-    queue[tail++] = (uint16)start_index;
-
-    while (head < tail)
-    {
-        int32 current = (int32)queue[head++];
-        uint8 row = (uint8)(current / (int32)MAP_COLS);
-        uint8 col = (uint8)(current % (int32)MAP_COLS);
-
-        if (identify_safe_localization_cell(row, col))
-        {
-            target_index = current;
-            break;
-        }
-
-        for (i = 0U; i < 4U; i++)
-        {
-            int32 next_row = (int32)row + (int32)d_row[i];
-            int32 next_col = (int32)col + (int32)d_col[i];
-            int32 next_index = 0;
-
-            if (next_row < 0 || next_col < 0 ||
-                next_row >= (int32)MAP_ROWS || next_col >= (int32)MAP_COLS)
-            {
-                continue;
-            }
-            if (identify_cell_has_blocker((uint8)next_row, (uint8)next_col))
-            {
-                continue;
-            }
-            next_index = next_row * (int32)MAP_COLS + next_col;
-            if (prev[next_index] != -2)
-            {
-                continue;
-            }
-            if (tail >= CONTROL_IDENTIFY_SAFE_PATH_CAPACITY)
-            {
-                return 0U;
-            }
-            prev[next_index] = (int16)current;
-            queue[tail++] = (uint16)next_index;
-        }
-    }
-
-    if (target_index < 0)
-    {
-        return 0U;
-    }
-    while (target_index >= 0 && reverse_count < CONTROL_IDENTIFY_SAFE_PATH_CAPACITY)
-    {
-        reverse_indices[reverse_count++] = (uint16)target_index;
-        target_index = (int32)prev[target_index];
-    }
-    if (reverse_count == 0U || reverse_count > capacity)
-    {
-        return 0U;
-    }
-
-    for (i = 0U; i < reverse_count; i++)
-    {
-        uint16 map_index = reverse_indices[reverse_count - 1U - i];
-        Position point = {0U, 0U, 0U};
-
-        point.row = (uint8)(map_index / MAP_COLS);
-        point.col = (uint8)(map_index % MAP_COLS);
-        path_remap_exec_point(&point);
-        out_exec_path[i] = point;
-    }
-    *out_steps = reverse_count;
-    return 1U;
 }
 
 static void map_float_grid_to_exec_meter(float map_row_f,
@@ -2990,6 +2859,7 @@ static void handle_prestart_move(void)
 static void handle_identify_return_heading_stage(void)
 {
     path_follow_status_t st = {0};
+    static path_map_snapshot_t runtime_map;
     float start_base_yaw_deg = map_dir_to_yaw_deg(CONTROL_MAP_DIR_RIGHT);
 
     if (!g_identify_safe_move_prepared)
@@ -2997,12 +2867,15 @@ static void handle_identify_return_heading_stage(void)
         g_identify_safe_move_prepared = 1U;
         g_identify_safe_move_steps = 0U;
         memset(g_identify_safe_move_path, 0, sizeof(g_identify_safe_move_path));
+        memset(&runtime_map, 0, sizeof(runtime_map));
+        snapshot_take(&runtime_map);
 
         if (g_identify_return_start_valid &&
-            build_identify_safe_localization_path(g_identify_return_start_map,
-                                                  g_identify_safe_move_path,
-                                                  CONTROL_IDENTIFY_SAFE_PATH_CAPACITY,
-                                                  &g_identify_safe_move_steps) &&
+            path_build_nearest_wall_clear_exec(&g_identify_return_start_map,
+                                               &runtime_map,
+                                               g_identify_safe_move_path,
+                                               PATH_SAFE_RELOCATION_MAX_POINTS,
+                                               &g_identify_safe_move_steps) &&
             g_identify_safe_move_steps >= 2U)
         {
             path_follow_set_pause_indices(NULL, 0U, 0U);

@@ -1,6 +1,7 @@
 #include "data_handle.h"
 #include "zf_common_interrupt.h"
 #include <stdlib.h>
+#include <stdio.h>
 #include <string.h>
 
 /*
@@ -88,6 +89,7 @@ uint8_t vision_bad_line_count = 0U;
 bool vision_uart_rx_overflow_flag = false;
 bool vision_line_overflow_flag = false;
 bool vision_parse_error_flag = false;
+static uint16 vision_next_request_sequence = 0U;
 
 /* 在字节缓冲区内查找 pattern，返回首下标，失败返回 -1 */
 static int find_pattern(const uint8_t *buf, uint16_t len, const char *pattern, uint16_t pattern_len)
@@ -791,7 +793,7 @@ static char *vision_trim_ascii_in_place(char *text)
     return text;
 }
 
-/* 新右侧摄像头用 B=<label> 表示图像结果、T=<label> 表示数字结果。 */
+/* 新右侧摄像头用 B=<seq>,<label>,<score> 表示图像结果，T= 对应数字结果。 */
 static VisionRecognitionType vision_parse_type_tag(const char *tag)
 {
     if (tag == NULL || '\0' == tag[0] || '\0' != tag[1]) {
@@ -850,6 +852,7 @@ static void vision_reset_result(VisionRecognitionResult *result, VisionRecogniti
 
     memset(result, 0, sizeof(*result));
     result->type = type;
+    result->request_seq = 0U;
     result->label_value = -1;
     result->score = -1;
     result->mode_marker = false;
@@ -858,6 +861,7 @@ static void vision_reset_result(VisionRecognitionResult *result, VisionRecogniti
 
 /* 提交一条已经校验过的 B=/T= 结果，更新对应的 ready/updated 标志。 */
 static void vision_store_result(VisionRecognitionType type,
+                                uint16 request_seq,
                                 const char *label,
                                 int32 label_value,
                                 bool label_is_number,
@@ -876,6 +880,7 @@ static void vision_store_result(VisionRecognitionType type,
     }
 
     vision_reset_result(dst, type);
+    dst->request_seq = request_seq;
     if (label != NULL) {
         strncpy(dst->label, label, VISION_LABEL_MAX_LEN - 1U);
         dst->label[VISION_LABEL_MAX_LEN - 1U] = '\0';
@@ -901,20 +906,26 @@ static void vision_store_result(VisionRecognitionType type,
  * 解析 main(视觉).py 返回的一整行：
  *
  * 正常格式：
- *   B=<标签>  图像识别
- *   T=<标签>  数字识别
+ *   B=<序号>,<标签>,<置信度>  图像识别
+ *   T=<序号>,<标签>,<置信度>  数字识别
  *
- * 摄像头只在其内部置信度超过阈值时回包，因此没有旧协议中的 score 或失败帧。
+ * 摄像头对每个 SNAP 请求都会回包；低置信度时也保留 score 供主控决定重试策略。
  * 注意：这里不解析地图帧，也不查找 $MAP/$END。视觉识别是行协议，
  * 地图/车姿是包协议，两者保持独立，避免互相误判。
  */
 static void vision_parse_line(char *line)
 {
     char *tag = NULL;
+    char *sequence_text = NULL;
     char *label = NULL;
+    char *score_text = NULL;
     char *equal_sign = NULL;
+    char *comma1 = NULL;
+    char *comma2 = NULL;
     VisionRecognitionType type = VISION_RECOGNITION_NONE;
+    int32 sequence_value = 0;
     int32 label_value = -1;
+    int32 score_value = 0;
     bool label_is_number = false;
 
     if (line == NULL) {
@@ -932,11 +943,30 @@ static void vision_parse_line(char *line)
         return;
     }
     *equal_sign = '\0';
-    label = equal_sign + 1U;
+    sequence_text = equal_sign + 1U;
+
+    comma1 = strchr(sequence_text, ',');
+    if (comma1 == NULL) {
+        vision_note_bad_line();
+        return;
+    }
+    *comma1 = '\0';
+    label = comma1 + 1U;
+
+    comma2 = strchr(label, ',');
+    if (comma2 == NULL || strchr(comma2 + 1U, ',') != NULL) {
+        vision_note_bad_line();
+        return;
+    }
+    *comma2 = '\0';
+    score_text = comma2 + 1U;
 
     tag = vision_trim_ascii_in_place(tag);
+    sequence_text = vision_trim_ascii_in_place(sequence_text);
     label = vision_trim_ascii_in_place(label);
-    if (tag == NULL || label == NULL || '\0' == *label) {
+    score_text = vision_trim_ascii_in_place(score_text);
+    if (tag == NULL || sequence_text == NULL || label == NULL || score_text == NULL ||
+        '\0' == *sequence_text || '\0' == *label || '\0' == *score_text) {
         vision_note_bad_line();
         return;
     }
@@ -947,12 +977,25 @@ static void vision_parse_line(char *line)
         return;
     }
 
+    if (!vision_parse_int32_text(sequence_text, &sequence_value) ||
+        sequence_value < 0 || sequence_value > 65535) {
+        vision_note_bad_line();
+        return;
+    }
+
+    if (!vision_parse_int32_text(score_text, &score_value) ||
+        score_value < 0 || score_value > 100) {
+        vision_note_bad_line();
+        return;
+    }
+
     label_is_number = vision_parse_int32_text(label, &label_value);
     if (!label_is_number) {
         label_value = -1;
     }
 
-    vision_store_result(type, label, label_value, label_is_number, -1, true, false);
+    vision_store_result(type, (uint16)sequence_value, label, label_value, label_is_number,
+                        (int16)score_value, true, false);
 }
 
 /*
@@ -1104,7 +1147,7 @@ void uart_blob_clear_pending_data(void)
 /*
  * 视觉识别数据处理入口：
  * - 从视觉识别专用 FIFO 取出 UART4 中断收到的字节；
- * - 按行拼接 NUM/IMG 返回结果；
+ * - 按行拼接 B=/T= 返回结果；
  * - 解析成功后只更新 vision_num_result 或 vision_img_result；
  * - 不访问 map_data/car_pose，也不调用 parse_packets。
  */
@@ -1166,31 +1209,40 @@ void vision_uart_rx_interrupt_handler(void)
 /*
  * 根据识别类型和识别距离选择主控要发送给摄像头的命令。
  *
- * 新摄像头使用 SNAP=<模式>\n 请求：
+ * 新摄像头使用 SNAP=<模式>,<序号>\n 请求：
  * - SNAP=0：近距离图像识别；   SNAP=1：近距离数字识别；
  * - SNAP=2：远距离图像识别；   SNAP=3：远距离数字识别。
- * 摄像头只在置信度达标时回传一行：图像为 B=<标签>，数字为 T=<标签>。
+ * 摄像头必定回传一行：图像为 B=<序号>,<标签>,<置信度>，数字为 T=<序号>,<标签>,<置信度>。
  */
-static const char *vision_get_request_command(VisionRecognitionType type,
-                                              VisionRecognitionDistance distance)
+static bool vision_get_request_mode(VisionRecognitionType type,
+                                    VisionRecognitionDistance distance,
+                                    uint8 *mode)
 {
+    if (mode == NULL) {
+        return false;
+    }
+
     if (VISION_RECOGNITION_IMG == type) {
         if (VISION_RECOGNITION_DISTANCE_TWO_GRID == distance) {
-            return UART_CMD_VISION_IMG_TWO_GRID;
+            *mode = VISION_SNAP_MODE_IMG_TWO_GRID;
+            return true;
         }
         if (VISION_RECOGNITION_DISTANCE_ONE_GRID == distance) {
-            return UART_CMD_VISION_IMG_ONE_GRID;
+            *mode = VISION_SNAP_MODE_IMG_ONE_GRID;
+            return true;
         }
     } else if (VISION_RECOGNITION_NUM == type) {
         if (VISION_RECOGNITION_DISTANCE_TWO_GRID == distance) {
-            return UART_CMD_VISION_NUM_TWO_GRID;
+            *mode = VISION_SNAP_MODE_NUM_TWO_GRID;
+            return true;
         }
         if (VISION_RECOGNITION_DISTANCE_ONE_GRID == distance) {
-            return UART_CMD_VISION_NUM_ONE_GRID;
+            *mode = VISION_SNAP_MODE_NUM_ONE_GRID;
+            return true;
         }
     }
 
-    return NULL;
+    return false;
 }
 
 /* 发送地图请求命令（"MAP"） */
@@ -1216,11 +1268,26 @@ void uart_stop_car_stream(void)
 }
 
 /* 向视觉识别端请求一次数字识别。发送前清掉半包数据，避免旧残留误触发本次结果。 */
-bool uart_send_vision_request(VisionRecognitionType type, VisionRecognitionDistance distance)
+bool uart_send_vision_request_with_sequence(VisionRecognitionType type,
+                                            VisionRecognitionDistance distance,
+                                            uint16 *out_sequence)
 {
-    const char *cmd = vision_get_request_command(type, distance);
+    char cmd[24];
+    uint8 mode = 0U;
+    uint16 sequence = 0U;
 
-    if (cmd == NULL) {
+    if (!vision_get_request_mode(type, distance, &mode)) {
+        return false;
+    }
+
+    sequence = (uint16)(vision_next_request_sequence + 1U);
+    if (0U == sequence) {
+        sequence = 1U;
+    }
+    vision_next_request_sequence = sequence;
+
+    if (snprintf(cmd, sizeof(cmd), "SNAP=%u,%u\n", (unsigned int)mode,
+                 (unsigned int)sequence) <= 0) {
         return false;
     }
 
@@ -1230,7 +1297,15 @@ bool uart_send_vision_request(VisionRecognitionType type, VisionRecognitionDista
      */
     vision_clear_pending_data();
     uart_write_string(VISION_UART_INDEX, cmd);
+    if (out_sequence != NULL) {
+        *out_sequence = sequence;
+    }
     return true;
+}
+
+bool uart_send_vision_request(VisionRecognitionType type, VisionRecognitionDistance distance)
+{
+    return uart_send_vision_request_with_sequence(type, distance, NULL);
 }
 
 bool uart_send_vision_num_request_by_distance(VisionRecognitionDistance distance)

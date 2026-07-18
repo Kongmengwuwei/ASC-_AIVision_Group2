@@ -112,6 +112,10 @@ extern const char map_text5[]; // 预设地图文本5
 extern const char map_text6[]; // 预设地图文本6
 extern const char map_text7[]; // 预设地图文本7（1-3.txt）
 extern const char map_text8[]; // 预设地图文本8（2-3.txt）
+extern const char map_text9[]; // 预设地图文本9（-1-1.txt）
+extern const char map_text10[]; // 预设地图文本10（1-2.txt）
+extern const char map_text11[]; // 预设地图文本11（-2-1.txt）
+extern const char map_text12[]; // 预设地图文本12（2-2.txt）
 
 extern const MapPresetTextConfig map_preset_texts[];
 extern const size_t Map_preset_count;

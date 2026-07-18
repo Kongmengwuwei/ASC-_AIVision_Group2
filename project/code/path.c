@@ -973,14 +973,23 @@ static void path_prepare_prefix(const Position *path, size_t count)
     uint16 last_required_index = PATH_INDEX_NONE;
     uint8 push_active = 0U;
 
-    memset(s_mandatory_prefix, 0, sizeof(s_mandatory_prefix));
-    memset(s_push_edge_prefix, 0, sizeof(s_push_edge_prefix));
-    memset(s_last_required_before, 0xFF, sizeof(s_last_required_before));
-
     if (path == NULL || count == 0U)
     {
         return;
     }
+    if (count > MAX_CAR_PATH)
+    {
+        count = MAX_CAR_PATH;
+    }
+
+    /* 候选识别点会反复重建前缀表，只清理本次实际使用区间。
+     * 原实现每次都清空 MAX_CAR_PATH，复杂图候选较多时浪费明显。 */
+    memset(s_mandatory_prefix, 0,
+           (count + 1U) * sizeof(s_mandatory_prefix[0]));
+    memset(s_push_edge_prefix, 0,
+           (count + 1U) * sizeof(s_push_edge_prefix[0]));
+    memset(s_last_required_before, 0xFF,
+           count * sizeof(s_last_required_before[0]));
 
     for (i = 0U; i < count; i++)
     {
@@ -1069,7 +1078,6 @@ static uint8 path_exec_segment_allowed(const Position *path,
     {
         return 0U;
     }
-
     seg_start = &path[start_idx];
     seg_end = &path[end_idx];
     if (!path_is_map_cell_valid(seg_start) ||
@@ -1216,7 +1224,12 @@ static uint8 path_extract_exec_from_raw(size_t raw_steps,
     if (rebuild_count < 2U || s_rebuild_indices[rebuild_count - 1U] != 0U)
         return 0U;
 
-    memset(exec_path, 0, sizeof(Position) * exec_capacity);
+    /* 内部候选缓冲只按 candidate_exec_steps 读取，无需为每个候选反复
+     * 清空整个数组；外部输出仍保持原有的尾部清零语义。 */
+    if (exec_path != s_identify_candidate_exec)
+    {
+        memset(exec_path, 0, sizeof(Position) * exec_capacity);
+    }
     for (i = 0U; i < rebuild_count; i++)
     {
         Position mapped = s_raw_path[s_rebuild_indices[rebuild_count - 1U - i]];
@@ -1306,30 +1319,18 @@ static uint8 path_identify_score_is_better(const path_identify_metrics_t *candid
     return 0U;
 }
 
-static int32 path_identify_direction(const Position *stand, const Position *object)
-{
-    int32 d_row;
-    int32 d_col;
-    if (stand == NULL || object == NULL)
-        return -1;
-    d_row = (int32)object->row - (int32)stand->row;
-    d_col = (int32)object->col - (int32)stand->col;
-    if (d_row < 0 && d_col == 0) return 0;
-    if (d_row > 0 && d_col == 0) return 1;
-    if (d_row == 0 && d_col < 0) return 2;
-    if (d_row == 0 && d_col > 0) return 3;
-    return -1;
-}
-
-static uint8 path_identify_view_distance(const path_map_snapshot_t *stage_map,
-                                         const Position *stand,
-                                         const Position *object)
+static uint8 path_identify_view(const path_map_snapshot_t *stage_map,
+                                const Position *stand,
+                                const Position *object,
+                                int32 *direction_out)
 {
     int32 d_row;
     int32 d_col;
     int32 distance;
     Position middle;
 
+    if (direction_out != NULL)
+        *direction_out = -1;
     if (!path_snapshot_counts_valid(stage_map) ||
         !path_is_map_cell_valid(stand) || !path_is_map_cell_valid(object))
     {
@@ -1340,6 +1341,13 @@ static uint8 path_identify_view_distance(const path_map_snapshot_t *stage_map,
     distance = path_abs_i32(d_row) + path_abs_i32(d_col);
     if ((distance != 1 && distance != 2) || (d_row != 0 && d_col != 0))
         return 0U;
+    if (direction_out != NULL)
+    {
+        if (d_row < 0) *direction_out = 0;
+        else if (d_row > 0) *direction_out = 1;
+        else if (d_col < 0) *direction_out = 2;
+        else *direction_out = 3;
+    }
     if (distance == 1)
         return 1U;
 
@@ -1378,8 +1386,8 @@ static void path_identify_collect_at_marker(const path_map_snapshot_t *pre_map,
         {
             continue;
         }
-        distance = path_identify_view_distance(stage_map, stand, &pre_map->boxes_buf[i]);
-        direction = path_identify_direction(stand, &pre_map->boxes_buf[i]);
+        distance = path_identify_view(stage_map, stand,
+                                      &pre_map->boxes_buf[i], &direction);
         if (distance != 0U && direction >= 0 &&
             distance < chosen_distance[direction])
         {
@@ -1402,8 +1410,8 @@ static void path_identify_collect_at_marker(const path_map_snapshot_t *pre_map,
         {
             continue;
         }
-        distance = path_identify_view_distance(stage_map, stand, &pre_map->targets_buf[i]);
-        direction = path_identify_direction(stand, &pre_map->targets_buf[i]);
+        distance = path_identify_view(stage_map, stand,
+                                      &pre_map->targets_buf[i], &direction);
         if (distance != 0U && direction >= 0 &&
             distance < chosen_distance[direction])
         {
@@ -1762,11 +1770,7 @@ uint8 path_build_exec_from_planner(const Position *planner_path,
     }
 
     memset(exec_path, 0, sizeof(Position) * exec_capacity);
-    memset(s_raw_path, 0, sizeof(s_raw_path));
-    memset(s_path_cost, 0, sizeof(s_path_cost));
-    memset(s_prev_index, 0, sizeof(s_prev_index));
-    memset(s_rebuild_indices, 0, sizeof(s_rebuild_indices));
-    memset(s_last_required_before, 0xFF, sizeof(s_last_required_before));
+    /* 以下工作缓冲都会按 raw_steps 完整覆盖，不再固定清空 1000 项。 */
     s_stage_model_valid = 0U;
 
     /* 第一步：复制原始规划点，并合并连续重复格子的事件 id。 */

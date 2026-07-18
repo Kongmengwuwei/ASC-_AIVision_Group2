@@ -259,18 +259,15 @@ static int check_push_destination_blocked(uint8_t *grid, int row_cnt, int col_cn
                                           int pushing_box_index,
                                           int row, int col)
 {
+    (void)boxes;
+    (void)boxes_cnt;
     if (row < 0 || row >= row_cnt || col < 0 || col >= col_cnt)
         return 1;
     if (check_obstacle(grid, col_cnt, row, col))
         return 1;
-    for (int i = 0; i < boxes_cnt; i++)
-    {
-        if (i == pushing_box_index)
-            continue;
-        if (boxes[i].row == row && boxes[i].col == col)
-            return 1;
-    }
-    return 0;
+    return BOX_EXCLUDING(grid, col_cnt, row, col,
+                         (pushing_box_index >= 0) ?
+                         (size_t)pushing_box_index : SIZE_MAX);
 }
 /*
  * 以下是 2D A* 使用的最小堆工具：
@@ -706,6 +703,30 @@ static void car_walk_lengths_to_box_faces(int row_cnt, int col_cnt,
  * - 同一个箱子格子有 4 个朝向状态，因此容量是 grid_size * 4。
  */
 a_star_3d_param a_star_3d[grid_size * 4];
+static uint8 s_a_star_3d_generation[grid_size * 4];
+static uint8 s_a_star_3d_current_generation;
+
+static void a_star_3d_begin_search(void)
+{
+    s_a_star_3d_current_generation++;
+    if (s_a_star_3d_current_generation == 0U)
+    {
+        memset(s_a_star_3d_generation, 0, sizeof(s_a_star_3d_generation));
+        s_a_star_3d_current_generation = 1U;
+    }
+}
+
+static inline void a_star_3d_touch(int node_index)
+{
+    if (s_a_star_3d_generation[node_index] != s_a_star_3d_current_generation)
+    {
+        /* 未访问节点只通过 open_or_close 判定；首次入堆时其余字段都会
+         * 被完整赋值，因此无需清空整个节点结构。 */
+        a_star_3d[node_index].open_or_close = 0U;
+        heap_pos_3d[node_index] = -1;
+        s_a_star_3d_generation[node_index] = s_a_star_3d_current_generation;
+    }
+}
 
 /* 3D A* 的堆交换 */
 static inline void heap_swap_3d(binary_heap_3d *heap, int i, int j)
@@ -825,12 +846,10 @@ static void heap_update_3d(binary_heap_3d *heap, int node_index)
  *   COST_REORIENT_PENALTY 约束频繁换向。
  * - 输出：返回完整"小车路径"，不是仅箱子轨迹。
  */
-static int push_geometry_reachable(int row_cnt, int col_cnt,
-                                   const Position *obstacles, int obstacles_cnt,
-                                   const Position *bombs, int bombs_cnt,
-                                   const Position *boxes, int boxes_cnt,
-                                   int moving_box_index,
-                                   Position start, Position target);
+static int push_geometry_reachable_on_grid(int row_cnt, int col_cnt,
+                                           uint8_t *grid,
+                                           int moving_box_index,
+                                           Position start, Position target);
 
 int a_star_path_plan_3d(int row_cnt, int col_cnt,
                         const Position *obstacles, int obstacles_cnt,
@@ -853,17 +872,20 @@ int a_star_path_plan_3d(int row_cnt, int col_cnt,
     for (int i = 0; i < boxes_cnt; i++)
         local_boxes[i] = boxes[i];
     Position box_start = local_boxes[box_index];
+    uint8_t grid[grid_size];
+
+    grid_build(row_cnt, col_cnt, obstacles, obstacles_cnt,
+               bombs, bombs_cnt, local_boxes, boxes_cnt, grid);
 
     {
         int geometry_possible = 0;
         for (int target_index = 0; target_index < targets_cnt; target_index++)
         {
-            if (push_geometry_reachable(row_cnt, col_cnt,
-                                        obstacles, obstacles_cnt,
-                                        bombs, bombs_cnt,
-                                        local_boxes, boxes_cnt,
-                                        box_index,
-                                        box_start, targets[target_index]))
+            if (push_geometry_reachable_on_grid(row_cnt, col_cnt,
+                                                grid,
+                                                box_index,
+                                                box_start,
+                                                targets[target_index]))
             {
                 geometry_possible = 1;
                 break;
@@ -873,20 +895,15 @@ int a_star_path_plan_3d(int row_cnt, int col_cnt,
             return -1;
     }
 
-    uint8_t grid[grid_size];
     uint8_t car_static_grid[grid_size];
-    grid_build(row_cnt, col_cnt, obstacles, obstacles_cnt, bombs, bombs_cnt, local_boxes, boxes_cnt, grid);
     memcpy(car_static_grid, grid, sizeof(car_static_grid));
     car_static_grid[(int)box_start.row * col_cnt + (int)box_start.col] &= (uint8_t)~BOX;
 
-    memset(a_star_3d, 0, sizeof(a_star_3d));
+    /* 延迟初始化实际访问到的状态，避免每次搜索固定清空 560 个节点。 */
+    a_star_3d_begin_search();
 
     binary_heap_3d open_set;
     open_set.size = 0;
-    for (int i = 0; i < (grid_size * 4); i++)
-    {
-        heap_pos_3d[i] = -1;
-    }
 
     int target_3d_index = -1;
 
@@ -925,11 +942,12 @@ int a_star_path_plan_3d(int row_cnt, int col_cnt,
     if (min_target_distance_from_start == 999999)
         return -1;
 
-    // 从 4 个方向中选择推向
+    /* 起始四个推面共享同一占据图。一次 BFS 同时得到所有可达推面的
+     * 最短距离，等价于原先最多四次独立 2D BFS。 */
+    uint8_t initial_requested_faces = 0U;
+    uint8_t initial_walk_len[4] = {0U, 0U, 0U, 0U};
     for (int f = 0; f < 4; f++)
     {
-        int push_point_row = box_start.row - dir_row_3d[f];
-        int push_point_col = box_start.col - dir_col_3d[f];
         int first_push_row = box_start.row + dir_row_3d[f];
         int first_push_col = box_start.col + dir_col_3d[f];
 
@@ -940,20 +958,30 @@ int a_star_path_plan_3d(int row_cnt, int col_cnt,
                                            box_index,
                                            first_push_row, first_push_col))
             continue;
-        //计算小车到推点的路径
-        int walk_len = a_star_path_plan(row_cnt, col_cnt,
-                                        obstacles, obstacles_cnt, bombs, bombs_cnt,
-                                        local_boxes, boxes_cnt,
-                                        car_start, (Position){push_point_row, push_point_col},
-                                        1,
-                                        0);
+        initial_requested_faces |= (uint8_t)(1U << f);
+    }
 
-        if (walk_len >= 0)
+    car_walk_lengths_to_box_faces(row_cnt, col_cnt,
+                                  car_static_grid,
+                                  car_start,
+                                  box_start.row, box_start.col,
+                                  initial_requested_faces,
+                                  initial_walk_len);
+
+    for (int f = 0; f < 4; f++)
+    {
+        int walk_len;
+        if ((initial_requested_faces & (uint8_t)(1U << f)) == 0U)
+            continue;
+        walk_len = (int)initial_walk_len[f];
+
+        if (walk_len > 0)
         {
             // 如果小车能到达这个推面，初始化该状态
             int state_index = (box_start.row * col_cnt + box_start.col) * 4 + f;
 
             // 计算到达目标点的距离
+            a_star_3d_touch(state_index);
             a_star_3d[state_index].g_cost = walk_len * COST_WALK;
             a_star_3d[state_index].h_cost = min_target_distance_from_start * COST_PUSH; // 调整比例，优先考虑箱子终点
             a_star_3d[state_index].f_cost = a_star_3d[state_index].g_cost + a_star_3d[state_index].h_cost;
@@ -1008,6 +1036,7 @@ int a_star_path_plan_3d(int row_cnt, int col_cnt,
                                             next_row, next_col))
         {
             int next_index = (next_row * col_cnt + next_col) * 4 + face; // face 不变，没换推面
+            a_star_3d_touch(next_index);
             if (a_star_3d[next_index].open_or_close != 2)
             {
                 int tentative_g = a_star_3d[curr_index].g_cost + COST_PUSH; // 离开原路径，添加偏移代价
@@ -1049,6 +1078,7 @@ int a_star_path_plan_3d(int row_cnt, int col_cnt,
             if (candidate_face == face)
                 continue;
             candidate_index = (row * col_cnt + col) * 4 + candidate_face;
+            a_star_3d_touch(candidate_index);
             if (a_star_3d[candidate_index].open_or_close == 2)
                 continue;
             candidate_row = row - dir_row_3d[candidate_face];
@@ -1078,6 +1108,7 @@ int a_star_path_plan_3d(int row_cnt, int col_cnt,
                 continue; // 跳过相同方向
 
             int next_index = (row * col_cnt + col) * 4 + next_face; // 只改变了推向
+            a_star_3d_touch(next_index);
             if (a_star_3d[next_index].open_or_close == 2)
                 continue; // 跳过已关闭的路径
 
@@ -1319,14 +1350,11 @@ static void annotate_path_special_ids(Position *path, int path_len, int bomb_eve
 /* Cheap necessary condition for a movable object to reach a cell.  It ignores
  * whether the car can walk between successive push faces, so a rejection is
  * conclusive while an acceptance is intentionally optimistic. */
-static int push_geometry_reachable(int row_cnt, int col_cnt,
-                                   const Position *obstacles, int obstacles_cnt,
-                                   const Position *bombs, int bombs_cnt,
-                                   const Position *boxes, int boxes_cnt,
-                                   int moving_box_index,
-                                   Position start, Position target)
+static int push_geometry_reachable_on_grid(int row_cnt, int col_cnt,
+                                           uint8_t *grid,
+                                           int moving_box_index,
+                                           Position start, Position target)
 {
-    uint8_t grid[grid_size];
     uint8_t visited[grid_size];
     uint16_t queue[grid_size];
     int queue_head = 0;
@@ -1337,8 +1365,6 @@ static int push_geometry_reachable(int row_cnt, int col_cnt,
     if (start.row >= row_cnt || start.col >= col_cnt ||
         target.row >= row_cnt || target.col >= col_cnt)
         return 0;
-    grid_build(row_cnt, col_cnt, obstacles, obstacles_cnt,
-               bombs, bombs_cnt, boxes, boxes_cnt, grid);
     memset(visited, 0, sizeof(visited));
     visited[(int)start.row * col_cnt + (int)start.col] = 1U;
     queue[queue_tail++] = (uint16_t)((int)start.row * col_cnt + (int)start.col);
@@ -1361,11 +1387,11 @@ static int push_geometry_reachable(int row_cnt, int col_cnt,
             int next_index;
 
             if (check_push_destination_blocked(grid, row_cnt, col_cnt,
-                                               boxes, boxes_cnt,
+                                               NULL, 0,
                                                moving_box_index,
                                                next_row, next_col) ||
                 check_push_destination_blocked(grid, row_cnt, col_cnt,
-                                               boxes, boxes_cnt,
+                                               NULL, 0,
                                                moving_box_index,
                                                support_row, support_col))
                 continue;

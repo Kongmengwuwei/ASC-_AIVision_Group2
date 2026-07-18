@@ -122,6 +122,58 @@ const char map_text8[] =
     "..##.#..#.#.#.\n"
     "..............\n";
 
+/* Imported from -1-1.txt. The source border is omitted; '-' becomes empty. */
+const char map_text9[] =
+    "..............\n"
+    "..#T....#.#...\n"
+    "..#...B.....#.\n"
+    "......##..B...\n"
+    "..........TT..\n"
+    "C.B...#..B..T.\n"
+    ".#.#.....#..#.\n"
+    "...........#..\n"
+    ".#....#.......\n"
+    "..............\n";
+
+/* Imported from 1-2.txt. The source border is omitted; '-' becomes empty. */
+const char map_text10[] =
+    "..............\n"
+    "............#.\n"
+    "...........##.\n"
+    ".#..B.B...#.#.\n"
+    ".........#....\n"
+    "C..B......#...\n"
+    ".....B...##...\n"
+    ".##...........\n"
+    ".....TTTT#.##.\n"
+    ".##...........\n";
+
+/* Imported from -2-1.txt. The source border is omitted; '-' becomes empty. */
+const char map_text11[] =
+    "..............\n"
+    ".#...#...#....\n"
+    ".T...B......#.\n"
+    ".........B.T#.\n"
+    "....###..B....\n"
+    "C...T#........\n"
+    "....#.##......\n"
+    "...B.......T#.\n"
+    "....#.......#.\n"
+    "..............\n";
+
+/* Imported from 2-2.txt. The source border is omitted; '-' becomes empty. */
+const char map_text12[] =
+    "..............\n"
+    ".#.#.....#.#..\n"
+    "........B##...\n"
+    "....B......#..\n"
+    "..#........#..\n"
+    "C.#..B........\n"
+    ".......B......\n"
+    "........#.###.\n"
+    ".....TTTT...#.\n"
+    "..............\n";
+
 const MapPresetTextConfig map_preset_texts[] = {
     {"map0", map_text0, MAP_PRESET_PLAN_MODE1, 0.0f, 0, 0U, 0, 0U},
     {"map1", map_text1, MAP_PRESET_PLAN_MODE2, 0.0f, 0, 0U, 0, 0U},
@@ -132,6 +184,10 @@ const MapPresetTextConfig map_preset_texts[] = {
     {"map6", map_text6, MAP_PRESET_PLAN_MODE2, 0.0f, 0, 0U, 0, 0U},
     {"map7", map_text7, MAP_PRESET_PLAN_MODE2, 0.0f, 0, 0U, 0, 0U},
     {"map8", map_text8, MAP_PRESET_PLAN_MODE2, 0.0f, 0, 0U, 0, 0U},
+    {"map9_-1-1", map_text9, MAP_PRESET_PLAN_MODE2, 0.0f, 0, 0U, 0, 0U},
+    {"map10_1-2", map_text10, MAP_PRESET_PLAN_MODE2, 0.0f, 0, 0U, 0, 0U},
+    {"map11_-2-1", map_text11, MAP_PRESET_PLAN_MODE2, 0.0f, 0, 0U, 0, 0U},
+    {"map12_2-2", map_text12, MAP_PRESET_PLAN_MODE2, 0.0f, 0, 0U, 0, 0U},
 };
 
 const size_t Map_preset_count = sizeof(map_preset_texts) / sizeof(map_preset_texts[0]);

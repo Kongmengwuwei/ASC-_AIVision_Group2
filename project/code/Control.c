@@ -65,6 +65,8 @@ float g_control_prestart_depart_compensate_m = -0.025f;
 #define CONTROL_CONTINUOUS_LEVEL_COUNT 3U
 #define CONTROL_CONTINUOUS_STOP_ENCODER_TOL 5
 #define CONTROL_CONTINUOUS_STOP_STABLE_LOOPS 3U
+/* 10 ms 控制节拍；检测到仍有未推进箱子时，下一关发车前额外等待 300 ms。 */
+#define CONTROL_CONTINUOUS_EXTRA_DEPART_WAIT_TICKS 30U
 
 
 /**
@@ -225,6 +227,9 @@ static control_flow_phase_t g_control_flow_phase = CONTROL_FLOW_IDENTIFY;
 static uint8 g_continuous_run_active = 0U;
 static uint8 g_continuous_level_index = 0U;
 static uint8 g_continuous_stop_stable_count = 0U;
+static uint8 g_continuous_extra_depart_wait_required = 0U;
+static uint8 g_continuous_extra_depart_wait_started = 0U;
+static uint32 g_continuous_extra_depart_wait_start_tick = 0U;
 static uint8 g_level_start_localization_required = 0U;
 static uint8 g_continuous_preset_base_index = 0U;
 static uint8 g_return_heading_rotate_started = 0U;
@@ -267,6 +272,8 @@ static uint8 g_pushbox_checkpoint_localized = 0U;
 
 /* 识别和推箱检查点共用的一次性视觉定位运行状态。 */
 static uint8 g_checkpoint_visual_localization_active = 0U;
+static uint8 g_checkpoint_visual_pose_completed = 0U;
+static uint8 g_checkpoint_map_refresh_required = 0U;
 
 static uint8 g_identified_box_flags[MAX_BOXES] = {0U};
 static uint8 g_identified_target_flags[MAX_TARGETS] = {0U};
@@ -994,12 +1001,17 @@ static void reset_level_runtime_state_for_launch(void)
     g_identify_safe_move_steps = 0U;
     memset(g_identify_safe_move_path, 0, sizeof(g_identify_safe_move_path));
     g_continuous_stop_stable_count = 0U;
+    g_continuous_extra_depart_wait_required = 0U;
+    g_continuous_extra_depart_wait_started = 0U;
+    g_continuous_extra_depart_wait_start_tick = 0U;
     memset(g_exec_path, 0, sizeof(g_exec_path));
     memset(g_pushbox_segment_path, 0, sizeof(g_pushbox_segment_path));
     g_pushbox_segment_end_idx = 0U;
     g_pushbox_segment_running = 0U;
     g_pushbox_checkpoint_localized = 0U;
     g_checkpoint_visual_localization_active = 0U;
+    g_checkpoint_visual_pose_completed = 0U;
+    g_checkpoint_map_refresh_required = 0U;
 
     reset_localization_accumulator();
     g_prestart_move_started = 0U;
@@ -2670,7 +2682,10 @@ static uint8 get_camera_position_meter(float *x_m, float *y_m)
     return 1U;
 }
 
-static void begin_checkpoint_visual_localization(void)
+static void start_localization_map_prefetch_once(void);
+static uint8 localization_prefetched_map_ready(void);
+
+static void begin_checkpoint_visual_localization(uint8 request_map_refresh)
 {
     if (g_checkpoint_visual_localization_active)
     {
@@ -2682,11 +2697,13 @@ static void begin_checkpoint_visual_localization(void)
     clear_car_request_wait();
     car_pose_updated = false;
     g_checkpoint_visual_localization_active = 1U;
+    g_checkpoint_visual_pose_completed = 0U;
+    g_checkpoint_map_refresh_required = request_map_refresh ? 1U : 0U;
     car_go_flag = 1U;
     car_stop_flag = 1U;
 }
 
-/* 检查点定位不请求新地图，只在车辆停稳并排空运动旧帧后采集 CARPOS。 */
+/* 检查点先停车并排空运动旧帧；末次推箱检查点还会并行预取新地图。 */
 static uint8 settle_camera_before_checkpoint_localization(void)
 {
     uint32 now_tick = g_control_tick_10ms;
@@ -2698,6 +2715,10 @@ static uint8 settle_camera_before_checkpoint_localization(void)
 
     if (Algorithm_Test_PresetInput_IsEnabled())
     {
+        if (g_checkpoint_map_refresh_required)
+        {
+            start_localization_map_prefetch_once();
+        }
         (void)Algorithm_Test_PresetInput_ProvideCarPoseFrame();
         g_localize_camera_settled = 1U;
         return 1U;
@@ -2711,6 +2732,10 @@ static uint8 settle_camera_before_checkpoint_localization(void)
         uart_blob_clear_pending_data();
         g_localize_stop_sequence_started = 1U;
         g_localize_post_stop_start_tick = now_tick;
+        if (g_checkpoint_map_refresh_required)
+        {
+            start_localization_map_prefetch_once();
+        }
     }
 
     if (!localization_wheels_stopped())
@@ -2739,6 +2764,33 @@ static uint8 settle_camera_before_checkpoint_localization(void)
 }
 
 /* 返回 1 表示本次检查点定位完成，返回 0 表示仍在停车/等待/采样。 */
+static uint8 finish_checkpoint_map_refresh_if_ready(void)
+{
+    if (!g_checkpoint_map_refresh_required)
+    {
+        return 1U;
+    }
+
+    if (!localization_prefetched_map_ready())
+    {
+        service_map_request_wait();
+        return 0U;
+    }
+
+    /* 推到目标的箱子会从游戏地图消失；新地图仍含 BOX 表示仍有未推进箱子。 */
+    g_continuous_extra_depart_wait_required =
+        (!Algorithm_Test_PresetInput_IsEnabled() &&
+         g_continuous_run_active &&
+         g_control_continuous_levels_enabled &&
+         (uint8)(g_continuous_level_index + 1U) < CONTROL_CONTINUOUS_LEVEL_COUNT &&
+         Boxes_count > 0U) ? 1U : 0U;
+
+    map_data_updated = false;
+    clear_map_request_wait();
+    g_checkpoint_map_refresh_required = 0U;
+    return 1U;
+}
+
 static uint8 process_checkpoint_visual_localization(void)
 {
     uint8 accept_sample = 0U;
@@ -2749,6 +2801,15 @@ static uint8 process_checkpoint_visual_localization(void)
 
     if (!g_checkpoint_visual_localization_active)
     {
+        return 1U;
+    }
+    if (g_checkpoint_visual_pose_completed)
+    {
+        if (!finish_checkpoint_map_refresh_if_ready())
+        {
+            return 0U;
+        }
+        g_checkpoint_visual_localization_active = 0U;
         return 1U;
     }
     if (!settle_camera_before_checkpoint_localization())
@@ -2817,6 +2878,11 @@ static uint8 process_checkpoint_visual_localization(void)
     path_follow_reset_pose(corrected_x_m, corrected_y_m, eulerAngle.yaw);
     BlueSerial_ReportPosition();
     control_hold_yaw_closed_loop();
+    g_checkpoint_visual_pose_completed = 1U;
+    if (!finish_checkpoint_map_refresh_if_ready())
+    {
+        return 0U;
+    }
     g_checkpoint_visual_localization_active = 0U;
     return 1U;
 }
@@ -3588,7 +3654,7 @@ static void handle_identify_execute_path(void)
             (g_exec_path[endpoint_idx].id & BOMB_EXPLOSION) != 0U &&
             !g_identify_checkpoint_localized)
         {
-            begin_checkpoint_visual_localization();
+            begin_checkpoint_visual_localization(0U);
             if (!process_checkpoint_visual_localization())
             {
                 return;
@@ -3610,7 +3676,7 @@ static void handle_identify_execute_path(void)
                 if (g_control_checkpoint_vision_localization_enabled &&
                     !g_identify_checkpoint_localized)
                 {
-                    begin_checkpoint_visual_localization();
+                    begin_checkpoint_visual_localization(0U);
                     if (!process_checkpoint_visual_localization())
                     {
                         return;
@@ -3773,6 +3839,26 @@ static uint8 start_pushbox_segment(size_t start_idx)
     return 1U;
 }
 
+static uint8 pushbox_endpoint_is_final_push(size_t endpoint_idx)
+{
+    size_t i;
+
+    if (endpoint_idx >= g_exec_steps ||
+        (g_exec_path[endpoint_idx].id & PUSH_END_POINT) == 0U)
+    {
+        return 0U;
+    }
+
+    for (i = endpoint_idx + 1U; i < g_exec_steps; i++)
+    {
+        if ((g_exec_path[i].id & PUSH_END_POINT) != 0U)
+        {
+            return 0U;
+        }
+    }
+    return 1U;
+}
+
 /**
  * @brief 下发阶段：根据当前大流程，把识别路径或推箱路径装载到 path_follow。
  *
@@ -3855,7 +3941,8 @@ static void handle_pushbox_execute_path(void)
         if ((g_exec_path[g_pushbox_segment_end_idx].id & PUSH_END_POINT) != 0U &&
             !g_pushbox_checkpoint_localized)
         {
-            begin_checkpoint_visual_localization();
+            begin_checkpoint_visual_localization(
+                pushbox_endpoint_is_final_push(g_pushbox_segment_end_idx));
             if (!process_checkpoint_visual_localization())
             {
                 return;
@@ -3924,7 +4011,27 @@ static void handle_pushbox_finished_stage(void)
             {
                 return;
             }
+
+            if (g_continuous_extra_depart_wait_required)
+            {
+                if (!g_continuous_extra_depart_wait_started)
+                {
+                    g_continuous_extra_depart_wait_started = 1U;
+                    g_continuous_extra_depart_wait_start_tick = g_control_tick_10ms;
+                    return;
+                }
+                if ((uint32)(g_control_tick_10ms -
+                             g_continuous_extra_depart_wait_start_tick) <
+                    CONTROL_CONTINUOUS_EXTRA_DEPART_WAIT_TICKS)
+                {
+                    return;
+                }
+            }
+
             g_continuous_stop_stable_count = 0U;
+            g_continuous_extra_depart_wait_required = 0U;
+            g_continuous_extra_depart_wait_started = 0U;
+            g_continuous_extra_depart_wait_start_tick = 0U;
             g_continuous_level_index++;
             start_current_level_launch();
             return;

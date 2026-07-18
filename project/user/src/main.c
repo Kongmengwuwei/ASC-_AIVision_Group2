@@ -71,8 +71,12 @@ int main(void)
   pit_ms_init(PIT_CH2, 2);                                 // PIT2 periodic interrupt: 2 ms.
   interrupt_set_priority(PIT_IRQn, PIT_SHARED_IRQ_PRIORITY); // Shared PIT interrupt priority.
   interrupt_set_priority(LPUART1_IRQn, 3);   // UART1 interrupt priority.
-  interrupt_set_priority(LPUART4_IRQn, 8);   // UART4 vision recognition interrupt priority.
-  /* UART8 priority and RX interrupt state are owned by BlueSerial. */
+#if MOTOR_BOARD_USE_NEW
+  interrupt_set_priority(LPUART4_IRQn, 8);   // New board: UART4 vision recognition.
+  /* New-board UART8 priority and RX interrupt state are owned by BlueSerial. */
+#else
+  interrupt_set_priority(LPUART8_IRQn, 8);   // Old board: UART8/D16/D17 vision recognition.
+#endif
   interrupt_global_enable(0);
 
   control_init();

@@ -218,6 +218,11 @@ void BlueSerial_SetEnabled(uint8 enabled)
     uint8 discard = 0U;
     uint8 normalized = (enabled != 0U) ? 1U : 0U;
 
+#if !MOTOR_BOARD_USE_NEW
+    /* Old board reserves UART8/D16/D17 for the recognition camera. */
+    normalized = 0U;
+#endif
+
     /* 先关外设 RX 中断，再修改被 ISR 和主循环共享的状态。 */
     if (g_blueserial_uart_initialized)
     {
@@ -996,6 +1001,11 @@ static void BlueSerial_EnterRawPwmMode(void)
 
 void Blue_Serial_Init(void)
 {
+#if !MOTOR_BOARD_USE_NEW
+    /* Do not reinitialize or disable the camera-owned UART8 on the old board. */
+    BlueSerial_SetEnabled(0U);
+    return;
+#else
     uint32 primask = interrupt_global_disable();
 
     BlueSerial_ResetRxStateLocked();
@@ -1005,6 +1015,7 @@ void Blue_Serial_Init(void)
     interrupt_set_priority(BLUESERIAL_IRQN, BLUESERIAL_IRQ_PRIORITY);
     uart_rx_interrupt(BLUESERIAL_UART,
                       g_blueserial_enabled ? ZF_ENABLE : ZF_DISABLE);
+#endif
 }
 
 void BlueSerial_SendByte(uint8 Byte)

@@ -5,6 +5,7 @@
 #include "zf_common_typedef.h"
 #include "zf_driver_uart.h"
 #include "Map_Path_Data.h"
+#include "Motor.h"
 
 /* 摄像头通信串口参数 */
 #define UART_INDEX UART_1
@@ -15,14 +16,21 @@
 /*
  * 图案/数字识别摄像头通信串口参数。
  *
- * OpenMV 端使用 UART(12), baudrate=115200，
- * 主控端通过 UART4 与之相连。若实际接线不是 UART4，
- * 只需要改下面 4 个宏，不影响地图/车姿串口 UART1 的解析。
+ * OpenMV 端使用 UART(12), baudrate=115200。
+ * 新主板使用 UART4/C16/C17；旧主板使用 UART8/D16/D17。
+ * 地图/车姿串口 UART1 不受影响。
  */
+#if MOTOR_BOARD_USE_NEW
 #define VISION_UART_INDEX UART_4
 #define VISION_UART_BAUDRATE 115200
 #define VISION_UART_TX_PIN UART4_TX_C16
 #define VISION_UART_RX_PIN UART4_RX_C17
+#else
+#define VISION_UART_INDEX UART_8
+#define VISION_UART_BAUDRATE 115200
+#define VISION_UART_TX_PIN UART8_TX_D16
+#define VISION_UART_RX_PIN UART8_RX_D17
+#endif
 
 /* FIFO 与解析缓冲大小 */
 #define FIFO_SIZE 512

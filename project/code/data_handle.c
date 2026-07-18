@@ -58,7 +58,7 @@ bool uart_rx_overflow_flag = false;
  *
  * 这一组变量只服务右侧识别摄像头的 SNAP 请求、B=/T= 回包协议，和上面的地图/车姿
  * $MAP/$CAR/$END 流式协议完全分开：
- * - 使用独立 UART（默认 UART4）；
+ * - 使用独立 UART（新主板 UART4，旧主板 UART8）；
  * - 使用独立 FIFO；
  * - 使用独立行缓冲；
  * - 使用独立结果结构和 updated 标志。
@@ -1146,7 +1146,7 @@ void uart_blob_clear_pending_data(void)
 
 /*
  * 视觉识别数据处理入口：
- * - 从视觉识别专用 FIFO 取出 UART4 中断收到的字节；
+ * - 从视觉识别专用 FIFO 取出视觉 UART 中断收到的字节；
  * - 按行拼接 B=/T= 返回结果；
  * - 解析成功后只更新 vision_num_result 或 vision_img_result；
  * - 不访问 map_data/car_pose，也不调用 parse_packets。

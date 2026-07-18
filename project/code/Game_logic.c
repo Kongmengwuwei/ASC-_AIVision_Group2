@@ -26,12 +26,21 @@
 #define FAST_BOX_DIRECT_PICK_STEPS 22
 #define FAST_UNLOCK_BOMB_TOPK_PASS1 4
 #define FAST_UNLOCK_WALL_TOPK_PASS1 4
+#define BOX_EXACT_LOOKAHEAD_LIMIT 4
+#define BOX_BOUNDED_LOOKAHEAD_WIDTH 3
+#define ROUTE_COST_INF (INT_MAX / 4)
 #define PAIR_REACH_CACHE_SIZE 96
 #define INFER_WALL_CACHE_SIZE 192
 #define IDENTIFY_NEED_CACHE_SIZE 96
 /* 每项包含完整 path_plan_result（约 3.4 KB）。96 项会占用约 321 KB DTCM，
  * 挤压规划调用栈；循环缓存缩到 16 项只降低命中率，不改变搜索结果。 */
 #define IDENTIFY_BOMB_CACHE_SIZE 16
+#ifndef EXACT_BOX_COST_CACHE_SIZE
+#define EXACT_BOX_COST_CACHE_SIZE 96
+#endif
+#ifndef IDENTIFY_BFS_CACHE_SIZE
+#define IDENTIFY_BFS_CACHE_SIZE 20
+#endif
 
 typedef struct
 {
@@ -125,15 +134,88 @@ typedef struct
     round_action_t action;
 } identify_bomb_cache_entry_t;
 
+typedef struct
+{
+    uint8 valid;
+    uint8 require_same_id;
+    uint32 state_sig;
+    uint32 pairs_sig;
+    planning_state_t state;
+    pair_task_table_t pairs;
+    int cost;
+} exact_box_cost_cache_entry_t;
+
+typedef struct
+{
+    uint8 valid;
+    uint32 state_sig;
+    planning_state_t state;
+    int dist[MAP_ROWS * MAP_COLS];
+    int prev[MAP_ROWS * MAP_COLS];
+} identify_bfs_cache_entry_t;
+
 static pair_reach_cache_entry_t s_pair_reach_cache[PAIR_REACH_CACHE_SIZE];
 static infer_wall_cache_entry_t s_infer_wall_cache[INFER_WALL_CACHE_SIZE];
 static critical_owner_cache_entry_t s_critical_owner_cache;
 static identify_need_cache_entry_t s_identify_need_cache[IDENTIFY_NEED_CACHE_SIZE];
 static identify_bomb_cache_entry_t s_identify_bomb_cache[IDENTIFY_BOMB_CACHE_SIZE];
+static exact_box_cost_cache_entry_t s_exact_box_cost_cache[EXACT_BOX_COST_CACHE_SIZE];
+static identify_bfs_cache_entry_t s_identify_bfs_cache[IDENTIFY_BFS_CACHE_SIZE];
 static int s_pair_reach_cache_next = 0;
 static int s_infer_wall_cache_next = 0;
 static int s_identify_need_cache_next = 0;
 static int s_identify_bomb_cache_next = 0;
+static int s_exact_box_cost_cache_next = 0;
+static int s_identify_bfs_cache_next = 0;
+
+#if defined(GAME_LOGIC_PROFILE)
+uint32 g_profile_bomb_task_calls = 0U;
+uint32 g_profile_bomb_task_duplicate_keys = 0U;
+uint32 g_profile_box_plan_calls = 0U;
+uint32 g_profile_box_plan_duplicate_keys = 0U;
+uint32 g_profile_identify_walk_calls = 0U;
+uint32 g_profile_identify_combo_attempts = 0U;
+uint32 g_profile_identify_combo_successes = 0U;
+uint32 g_profile_identify_bfs_calls = 0U;
+uint32 g_profile_identify_bfs_duplicate_keys = 0U;
+uint32 g_profile_identify_bfs_cache_hits = 0U;
+uint32 g_profile_exact_cost_cache_lookups = 0U;
+uint32 g_profile_exact_cost_cache_hits = 0U;
+uint32 g_profile_exact_cost_cache_stores = 0U;
+uint8 g_profile_identify_best_rank[4];
+uint8 g_profile_identify_best_rank_count = 0U;
+static uint32 s_profile_bomb_keys[2048];
+static uint8 s_profile_bomb_key_valid[2048];
+static uint32 s_profile_box_keys[512];
+static uint8 s_profile_box_key_valid[512];
+static uint32 s_profile_identify_bfs_keys[1024];
+static uint8 s_profile_identify_bfs_key_valid[1024];
+
+static void profile_record_key(uint32 key,
+                               uint32 *keys,
+                               uint8 *valid,
+                               int capacity,
+                               uint32 *duplicate_count)
+{
+    int i;
+    int slot = (int)(key % (uint32)capacity);
+    for (i = 0; i < capacity; i++)
+    {
+        int index = (slot + i) % capacity;
+        if (!valid[index])
+        {
+            valid[index] = 1U;
+            keys[index] = key;
+            return;
+        }
+        if (keys[index] == key)
+        {
+            (*duplicate_count)++;
+            return;
+        }
+    }
+}
+#endif
 
 /* 识别访问顺序：kind 0=箱子、1=目标；识别前 id 可能仍为 0。 */
 uint8 g_identify_seq_kind[MAX_BOXES + MAX_TARGETS];
@@ -143,15 +225,24 @@ Position g_blown_cell[MAX_OBSTACLES];
 int g_blown_count = 0;
 static void reset_planning_caches(void)
 {
+    int i;
+
     memset(s_pair_reach_cache, 0, sizeof(s_pair_reach_cache));
     memset(s_infer_wall_cache, 0, sizeof(s_infer_wall_cache));
     memset(&s_critical_owner_cache, 0, sizeof(s_critical_owner_cache));
     memset(s_identify_need_cache, 0, sizeof(s_identify_need_cache));
-    memset(s_identify_bomb_cache, 0, sizeof(s_identify_bomb_cache));
+    for (i = 0; i < IDENTIFY_BOMB_CACHE_SIZE; i++)
+        s_identify_bomb_cache[i].valid = 0U;
+    for (i = 0; i < EXACT_BOX_COST_CACHE_SIZE; i++)
+        s_exact_box_cost_cache[i].valid = 0U;
+    for (i = 0; i < IDENTIFY_BFS_CACHE_SIZE; i++)
+        s_identify_bfs_cache[i].valid = 0U;
     s_pair_reach_cache_next = 0;
     s_infer_wall_cache_next = 0;
     s_identify_need_cache_next = 0;
     s_identify_bomb_cache_next = 0;
+    s_exact_box_cost_cache_next = 0;
+    s_identify_bfs_cache_next = 0;
 
 }
 
@@ -167,10 +258,38 @@ static void apply_bomb_action_result(planning_state_t *state,
 static int pair_needs_unlock_in_state(const planning_state_t *state,
                                       const pair_task_t *pair,
                                       int require_same_id);
+static int build_shortest_return_path_to_depot(const planning_state_t *state,
+                                                Position *out_path,
+                                                int max_path,
+                                                Position *out_depot,
+                                                int ignore_obstacles);
 
 static int same_cell(Position a, Position b)
 {
     return (a.row == b.row) && (a.col == b.col);
+}
+
+/* 规划器路径允许在同一格叠加多个事件点；路径代价只统计真实跨格移动。 */
+static int path_movement_cost(const Position *path, int path_len)
+{
+    int i;
+    int cost = 0;
+
+    if (!path || path_len <= 1)
+        return 0;
+    for (i = 1; i < path_len; i++)
+    {
+        if (!same_cell(path[i - 1], path[i]))
+            cost++;
+    }
+    return cost;
+}
+
+static int action_movement_cost(const round_action_t *action)
+{
+    if (!action || !action->valid)
+        return ROUTE_COST_INF;
+    return path_movement_cost(action->plan.car_path, action->plan.total_steps);
 }
 
 static int is_valid_cell(Position p)
@@ -525,6 +644,115 @@ static int position_in_set(Position p, const Position *set, int set_cnt)
     return 0;
 }
 
+static int position_list_equal(const Position *a, const Position *b, int count)
+{
+    int i;
+    for (i = 0; i < count; i++)
+    {
+        if (!same_position(a[i], b[i]))
+            return 0;
+    }
+    return 1;
+}
+
+static int planning_state_equal(const planning_state_t *a, const planning_state_t *b)
+{
+    if (!a || !b)
+        return 0;
+    if (a->obstacles_cnt != b->obstacles_cnt ||
+        a->bombs_cnt != b->bombs_cnt ||
+        a->boxes_cnt != b->boxes_cnt ||
+        a->targets_cnt != b->targets_cnt ||
+        !same_position(a->car_state, b->car_state))
+        return 0;
+
+    return position_list_equal(a->obstacles_state, b->obstacles_state, a->obstacles_cnt) &&
+           position_list_equal(a->bombs_state, b->bombs_state, a->bombs_cnt) &&
+           position_list_equal(a->boxes_state, b->boxes_state, a->boxes_cnt) &&
+           position_list_equal(a->targets_state, b->targets_state, a->targets_cnt);
+}
+
+static int pair_task_table_equal(const pair_task_table_t *a, const pair_task_table_t *b)
+{
+    int i;
+
+    if (!a || !b || a->count != b->count)
+        return 0;
+    for (i = 0; i < a->count; i++)
+    {
+        const pair_task_t *pa = &a->item[i];
+        const pair_task_t *pb = &b->item[i];
+        if (pa->valid != pb->valid ||
+            pa->target_done != pb->target_done ||
+            pa->box_id_ref != pb->box_id_ref ||
+            pa->status != pb->status ||
+            !same_position(pa->target_ref, pb->target_ref))
+            return 0;
+    }
+    return 1;
+}
+
+static int lookup_exact_box_cost_cache(const planning_state_t *state,
+                                       const pair_task_table_t *pairs,
+                                       int require_same_id,
+                                       int *out_cost)
+{
+    uint32 state_sig;
+    uint32 pairs_sig;
+    int i;
+
+    if (!state || !pairs || !out_cost)
+        return 0;
+#if defined(GAME_LOGIC_PROFILE)
+    g_profile_exact_cost_cache_lookups++;
+#endif
+    state_sig = hash_state_signature(state);
+    pairs_sig = hash_pairs_signature(pairs);
+    for (i = 0; i < EXACT_BOX_COST_CACHE_SIZE; i++)
+    {
+        const exact_box_cost_cache_entry_t *entry = &s_exact_box_cost_cache[i];
+        if (!entry->valid ||
+            entry->require_same_id != (uint8)(require_same_id ? 1 : 0) ||
+            entry->state_sig != state_sig ||
+            entry->pairs_sig != pairs_sig)
+            continue;
+        if (!planning_state_equal(&entry->state, state) ||
+            !pair_task_table_equal(&entry->pairs, pairs))
+            continue;
+
+        *out_cost = entry->cost;
+#if defined(GAME_LOGIC_PROFILE)
+        g_profile_exact_cost_cache_hits++;
+#endif
+        return 1;
+    }
+    return 0;
+}
+
+static void store_exact_box_cost_cache(const planning_state_t *state,
+                                       const pair_task_table_t *pairs,
+                                       int require_same_id,
+                                       int cost)
+{
+    exact_box_cost_cache_entry_t *entry;
+
+    if (!state || !pairs)
+        return;
+#if defined(GAME_LOGIC_PROFILE)
+    g_profile_exact_cost_cache_stores++;
+#endif
+    entry = &s_exact_box_cost_cache[s_exact_box_cost_cache_next];
+    s_exact_box_cost_cache_next =
+        (s_exact_box_cost_cache_next + 1) % EXACT_BOX_COST_CACHE_SIZE;
+    entry->valid = 1U;
+    entry->require_same_id = (uint8)(require_same_id ? 1 : 0);
+    entry->state_sig = hash_state_signature(state);
+    entry->pairs_sig = hash_pairs_signature(pairs);
+    entry->state = *state;
+    entry->pairs = *pairs;
+    entry->cost = cost;
+}
+
 static void remove_bomb_by_position(Position *bombs_arr, int *bombs_cnt, Position bomb_ref)
 {
     int idx;
@@ -589,9 +817,33 @@ static int plan_box_with_candidates(const planning_state_t *state,
     int has_forbidden_bomb = 0;
     int i;
 
+#if defined(GAME_LOGIC_PROFILE)
+    {
+        uint32 key = hash_state_signature(state);
+        key = hash_mix_u32(key, (uint32)box_index);
+        key = hash_mix_u32(key, (uint32)allowed_bombs_cnt);
+        for (i = 0; i < allowed_bombs_cnt; i++)
+            key = hash_mix_position(key, allowed_bombs[i]);
+        key = hash_mix_u32(key, (uint32)targets_cnt);
+        for (i = 0; i < targets_cnt; i++)
+            key = hash_mix_position(key, targets[i]);
+        key = hash_mix_position(key, car_start);
+        g_profile_box_plan_calls++;
+        profile_record_key(key,
+                           s_profile_box_keys,
+                           s_profile_box_key_valid,
+                           512,
+                           &g_profile_box_plan_duplicate_keys);
+    }
+#endif
+
     if (!state || !targets || targets_cnt <= 0 || !out_plan)
         return -1;
     if (box_index < 0 || box_index >= state->boxes_cnt)
+        return -1;
+    if (allowed_bombs_cnt < 0 || allowed_bombs_cnt > MAX_BOMBS ||
+        targets_cnt > MAX_TARGETS ||
+        (allowed_bombs_cnt > 0 && !allowed_bombs))
         return -1;
 
     for (i = 0; i < state->bombs_cnt; i++)
@@ -822,6 +1074,7 @@ static void build_pair_table(const planning_state_t *state,
                              pair_task_table_t *table)
 {
     int t;
+    uint8 box_used[MAX_BOXES] = {0U};
 
     if (!state || !table)
         return;
@@ -835,11 +1088,23 @@ static void build_pair_table(const planning_state_t *state,
     for (t = 0; t < state->targets_cnt && table->count < MAX_TARGETS; t++)
     {
         Position target = state->targets_state[t];
-        int box_index = find_box_index_by_id(state->boxes_state, state->boxes_cnt, target.id);
+        int box_index = -1;
+        int b;
         pair_task_t pair;
+
+        /* Match each physical box at most once. Extra boxes/targets with the same ID stay unmatched. */
+        for (b = 0; b < state->boxes_cnt; b++)
+        {
+            if (!box_used[b] && state->boxes_state[b].id == target.id)
+            {
+                box_index = b;
+                break;
+            }
+        }
 
         if (box_index < 0)
             continue;
+        box_used[box_index] = 1U;
 
         memset(&pair, 0, sizeof(pair));
         pair.valid = 1;
@@ -913,6 +1178,22 @@ static int count_unfinished_non_late_pairs(const pair_task_table_t *table)
     return cnt;
 }
 
+static int count_unfinished_pairs(const pair_task_table_t *table)
+{
+    int i;
+    int cnt = 0;
+
+    if (!table)
+        return 0;
+    for (i = 0; i < table->count; i++)
+    {
+        const pair_task_t *pair = &table->item[i];
+        if (pair->valid && !pair->target_done)
+            cnt++;
+    }
+    return cnt;
+}
+
 /* 鐢熸垚鈥滈櫎涓荤偢寮瑰鈥濈殑杈呭姪鐐稿脊闆嗗悎銆?*/
 static int build_support_bombs_except_primary(const planning_state_t *state,
                                               Position primary_bomb,
@@ -954,6 +1235,23 @@ static int plan_bomb_task_in_state(const planning_state_t *state,
     int temp_boxes_cnt;
     int i;
     int steps;
+
+#if defined(GAME_LOGIC_PROFILE)
+    {
+        uint32 key = hash_state_signature(state);
+        key = hash_mix_position(key, primary_bomb);
+        key = hash_mix_position(key, wall_ref);
+        key = hash_mix_u32(key, (uint32)support_bombs_cnt);
+        for (i = 0; i < support_bombs_cnt; i++)
+            key = hash_mix_position(key, support_bombs[i]);
+        g_profile_bomb_task_calls++;
+        profile_record_key(key,
+                           s_profile_bomb_keys,
+                           s_profile_bomb_key_valid,
+                           2048,
+                           &g_profile_bomb_task_duplicate_keys);
+    }
+#endif
 
     if (!state || !out_plan)
         return -1;
@@ -1867,12 +2165,10 @@ static int collect_box_action_candidates(const planning_state_t *state,
     int oi;
     int eval_cnt = 0;
     int out_cnt = 0;
-    int best_steps_seen = INT_MAX;
     Position all_bombs[MAX_BOMBS];
     int all_bombs_cnt;
     int pair_order[MAX_TARGETS];
     int pair_box_index[MAX_TARGETS];
-    int pair_lb[MAX_TARGETS];
     int pair_score[MAX_TARGETS];
 
     if (!state || !pairs || !out_actions || max_actions <= 0)
@@ -1904,7 +2200,6 @@ static int collect_box_action_candidates(const planning_state_t *state,
         lb = manhattan_cell_dist(state->boxes_state[box_index], pair->target_ref);
         pair_order[eval_cnt] = p;
         pair_box_index[eval_cnt] = box_index;
-        pair_lb[eval_cnt] = lb;
         pair_score[eval_cnt] = lb + manhattan_cell_dist(state->car_state, state->boxes_state[box_index]);
         eval_cnt++;
     }
@@ -1925,15 +2220,12 @@ static int collect_box_action_candidates(const planning_state_t *state,
         {
             int tmp_order = pair_order[oi];
             int tmp_box = pair_box_index[oi];
-            int tmp_lb = pair_lb[oi];
             int tmp_score = pair_score[oi];
             pair_order[oi] = pair_order[best];
             pair_box_index[oi] = pair_box_index[best];
-            pair_lb[oi] = pair_lb[best];
             pair_score[oi] = pair_score[best];
             pair_order[best] = tmp_order;
             pair_box_index[best] = tmp_box;
-            pair_lb[best] = tmp_lb;
             pair_score[best] = tmp_score;
         }
     }
@@ -1946,9 +2238,6 @@ static int collect_box_action_candidates(const planning_state_t *state,
         path_plan_result plan;
         int steps;
         round_action_t candidate;
-
-        if (best_steps_seen < INT_MAX && pair_lb[oi] >= best_steps_seen)
-            continue;
 
         p = pair_order[oi];
         pair = &pairs->item[p];
@@ -1963,9 +2252,6 @@ static int collect_box_action_candidates(const planning_state_t *state,
                                          &plan);
         if (steps <= 0)
             continue;
-        if (steps < best_steps_seen)
-            best_steps_seen = steps;
-
         memset(&candidate, 0, sizeof(candidate));
         candidate.valid = 1;
         candidate.action_type = ACTION_BOX;
@@ -1994,12 +2280,67 @@ static int collect_box_action_candidates(const planning_state_t *state,
     return out_cnt;
 }
 
-/* 选择最短推箱任务（贪心基线）。 */
-static int pick_best_box_action_greedy(const planning_state_t *state,
-                                       int require_same_id,
-                                       const pair_task_table_t *pairs,
-                                       int skip_late_pairs,
-                                       round_action_t *out_action)
+/* 为指定 pair 生成一次真实推箱动作，供后续顺序搜索复用。 */
+static int build_box_action_for_pair(const planning_state_t *state,
+                                     int require_same_id,
+                                     const pair_task_table_t *pairs,
+                                     int pair_index,
+                                     round_action_t *out_action)
+{
+    const pair_task_t *pair;
+    Position one_target[1];
+    path_plan_result plan;
+    int box_index;
+    int steps;
+
+    if (!state || !pairs || !out_action ||
+        pair_index < 0 || pair_index >= pairs->count)
+        return 0;
+
+    pair = &pairs->item[pair_index];
+    if (!pair->valid || pair->target_done || !state_has_target(state, pair->target_ref))
+        return 0;
+
+    box_index = find_box_index_by_id(state->boxes_state,
+                                     state->boxes_cnt,
+                                     pair->box_id_ref);
+    if (box_index < 0 ||
+        !box_can_match_target(state->boxes_state[box_index], pair->target_ref, require_same_id))
+        return 0;
+
+    one_target[0] = pair->target_ref;
+    steps = plan_box_with_candidates(state,
+                                     box_index,
+                                     state->bombs_state,
+                                     state->bombs_cnt,
+                                     one_target,
+                                     1,
+                                     state->car_state,
+                                     &plan);
+    if (steps <= 0)
+        return 0;
+
+    memset(out_action, 0, sizeof(*out_action));
+    out_action->valid = 1;
+    out_action->action_type = ACTION_BOX;
+    out_action->steps = steps;
+    out_action->box_index = box_index;
+    out_action->pair_index = pair_index;
+    out_action->plan = plan;
+    if (plan.used_bomb && plan.bomb_index >= 0 && plan.bomb_index < state->bombs_cnt)
+    {
+        out_action->has_support_bomb_pos = 1U;
+        out_action->support_bomb_pos = state->bombs_state[plan.bomb_index];
+    }
+    return 1;
+}
+
+/* 旧的一步贪心保留为大地图前瞻中的快速滚动策略。 */
+static int pick_best_box_action_immediate(const planning_state_t *state,
+                                          int require_same_id,
+                                          const pair_task_table_t *pairs,
+                                          int skip_late_pairs,
+                                          round_action_t *out_action)
 {
     round_action_t actions[MAX_TARGETS];
     int action_cnt;
@@ -2058,11 +2399,276 @@ static int pick_best_box_action_greedy(const planning_state_t *state,
     return 1;
 }
 
+/* 剩余任务不超过 4 个时完整枚举任务顺序，并把合法返场计入总代价。 */
+static int exact_box_completion_cost(const planning_state_t *state,
+                                     const pair_task_table_t *pairs,
+                                     int require_same_id)
+{
+    Position return_path[MAP_ROWS * MAP_COLS];
+    Position depot;
+    int best_cost = ROUTE_COST_INF;
+    int cached_cost;
+    int unfinished_pairs;
+    int p;
+
+    if (!state || !pairs)
+        return ROUTE_COST_INF;
+    if (lookup_exact_box_cost_cache(state, pairs, require_same_id, &cached_cost))
+        return cached_cost;
+    unfinished_pairs = count_unfinished_pairs(pairs);
+    if (unfinished_pairs <= 0)
+    {
+        int return_len = build_shortest_return_path_to_depot(state,
+                                                              return_path,
+                                                              MAP_ROWS * MAP_COLS,
+                                                              &depot,
+                                                              (state->boxes_cnt <= 0) ? 1 : 0);
+        best_cost = (return_len > 0) ? (return_len - 1) : ROUTE_COST_INF;
+        store_exact_box_cost_cache(state, pairs, require_same_id, best_cost);
+        return best_cost;
+    }
+    if (state->boxes_cnt <= 0 || state->targets_cnt <= 0)
+    {
+        store_exact_box_cost_cache(state, pairs, require_same_id, ROUTE_COST_INF);
+        return ROUTE_COST_INF;
+    }
+
+    for (p = 0; p < pairs->count; p++)
+    {
+        round_action_t action;
+        planning_state_t next_state;
+        pair_task_table_t next_pairs;
+        int action_cost;
+        int future_cost;
+        int total_cost;
+
+        if (!build_box_action_for_pair(state, require_same_id, pairs, p, &action))
+            continue;
+        action_cost = action_movement_cost(&action);
+        if (action_cost >= best_cost)
+            continue;
+
+        next_state = *state;
+        next_pairs = *pairs;
+        apply_box_action_result(&next_state, &next_pairs, &action, 0, 0);
+        future_cost = exact_box_completion_cost(&next_state,
+                                                &next_pairs,
+                                                require_same_id);
+        if (future_cost >= ROUTE_COST_INF)
+            continue;
+        total_cost = action_cost + future_cost;
+        if (total_cost < best_cost)
+            best_cost = total_cost;
+    }
+    store_exact_box_cost_cache(state, pairs, require_same_id, best_cost);
+    return best_cost;
+}
+
+/* 用一步贪心快速滚动到小规模尾段，再由完整搜索精确收尾。 */
+static int greedy_box_completion_cost(const planning_state_t *state,
+                                      const pair_task_table_t *pairs,
+                                      int require_same_id)
+{
+    planning_state_t shadow_state;
+    pair_task_table_t shadow_pairs;
+    int total_cost = 0;
+    int safety_round = 0;
+
+    if (!state || !pairs)
+        return ROUTE_COST_INF;
+    shadow_state = *state;
+    shadow_pairs = *pairs;
+
+    while (count_unfinished_pairs(&shadow_pairs) > BOX_EXACT_LOOKAHEAD_LIMIT &&
+           safety_round < MAX_BOXES)
+    {
+        round_action_t action;
+        int non_late;
+        int has_action;
+
+        refresh_pair_statuses(&shadow_state, require_same_id, &shadow_pairs);
+        non_late = count_unfinished_non_late_pairs(&shadow_pairs);
+        has_action = pick_best_box_action_immediate(&shadow_state,
+                                                    require_same_id,
+                                                    &shadow_pairs,
+                                                    (non_late > 0) ? 1 : 0,
+                                                    &action);
+        if (!has_action && non_late > 0)
+        {
+            has_action = pick_best_box_action_immediate(&shadow_state,
+                                                        require_same_id,
+                                                        &shadow_pairs,
+                                                        0,
+                                                        &action);
+        }
+        if (!has_action)
+            return ROUTE_COST_INF;
+
+        total_cost += action_movement_cost(&action);
+        if (total_cost >= ROUTE_COST_INF)
+            return ROUTE_COST_INF;
+        apply_box_action_result(&shadow_state, &shadow_pairs, &action, 0, 0);
+        safety_round++;
+    }
+
+    {
+        int tail_cost = exact_box_completion_cost(&shadow_state,
+                                                  &shadow_pairs,
+                                                  require_same_id);
+        if (tail_cost >= ROUTE_COST_INF)
+            return ROUTE_COST_INF;
+        return total_cost + tail_cost;
+    }
+}
+
+/*
+ * 小地图完整搜索；大地图只对当前最短的 3 个候选做两层前瞻，
+ * 在考虑后续代价的同时限制 RT1064 上的规划开销。
+ */
+static int pick_best_box_action_with_future(const planning_state_t *state,
+                                            int require_same_id,
+                                            const pair_task_table_t *pairs,
+                                            int skip_late_pairs,
+                                            round_action_t *out_action)
+{
+    round_action_t actions[MAX_TARGETS];
+    int order[MAX_TARGETS];
+    int critical_owner[MAX_BOMBS];
+    int action_cnt;
+    int best_idx = -1;
+    int best_score = ROUTE_COST_INF;
+    int unfinished_pairs;
+    int i;
+
+    if (!state || !pairs || !out_action)
+        return 0;
+
+    unfinished_pairs = count_unfinished_pairs(pairs);
+
+    action_cnt = collect_box_action_candidates(state,
+                                               require_same_id,
+                                               pairs,
+                                               skip_late_pairs,
+                                               0,
+                                               actions,
+                                               MAX_TARGETS);
+    if (action_cnt <= 0)
+        return 0;
+
+    if (state->bombs_cnt > 0)
+    {
+        int kept = 0;
+        build_critical_owner_for_state(state, require_same_id, pairs, critical_owner);
+        for (i = 0; i < action_cnt; i++)
+        {
+            if (!action_uses_other_pair_critical_bomb(state,
+                                                      &actions[i],
+                                                      critical_owner,
+                                                      actions[i].pair_index))
+                actions[kept++] = actions[i];
+        }
+        if (kept > 0)
+            action_cnt = kept;
+    }
+
+    for (i = 0; i < action_cnt; i++)
+        order[i] = i;
+    for (i = 0; i < action_cnt; i++)
+    {
+        int j;
+        int best = i;
+        for (j = i + 1; j < action_cnt; j++)
+        {
+            int left_cost = action_movement_cost(&actions[order[j]]);
+            int right_cost = action_movement_cost(&actions[order[best]]);
+            if (left_cost < right_cost ||
+                (left_cost == right_cost &&
+                 pairs->item[actions[order[j]].pair_index].box_id_ref <
+                 pairs->item[actions[order[best]].pair_index].box_id_ref))
+                best = j;
+        }
+        if (best != i)
+        {
+            int tmp = order[i];
+            order[i] = order[best];
+            order[best] = tmp;
+        }
+    }
+
+    if (unfinished_pairs <= BOX_EXACT_LOOKAHEAD_LIMIT)
+    {
+        for (i = 0; i < action_cnt; i++)
+        {
+            int idx = order[i];
+            planning_state_t next_state = *state;
+            pair_task_table_t next_pairs = *pairs;
+            int action_cost = action_movement_cost(&actions[idx]);
+            int future_cost;
+            int total_cost;
+
+            apply_box_action_result(&next_state, &next_pairs, &actions[idx], 0, 0);
+            future_cost = exact_box_completion_cost(&next_state,
+                                                    &next_pairs,
+                                                    require_same_id);
+            if (future_cost >= ROUTE_COST_INF)
+                continue;
+            total_cost = action_cost + future_cost;
+            if (total_cost < best_score ||
+                (total_cost == best_score &&
+                 (best_idx < 0 ||
+                  pairs->item[actions[idx].pair_index].box_id_ref <
+                  pairs->item[actions[best_idx].pair_index].box_id_ref)))
+            {
+                best_score = total_cost;
+                best_idx = idx;
+            }
+        }
+    }
+    else
+    {
+        int eval_cnt = action_cnt;
+        if (eval_cnt > BOX_BOUNDED_LOOKAHEAD_WIDTH)
+            eval_cnt = BOX_BOUNDED_LOOKAHEAD_WIDTH;
+
+        for (i = 0; i < eval_cnt; i++)
+        {
+            int idx = order[i];
+            planning_state_t next_state = *state;
+            pair_task_table_t next_pairs = *pairs;
+            int total_cost = action_movement_cost(&actions[idx]);
+            int future_cost;
+
+            apply_box_action_result(&next_state, &next_pairs, &actions[idx], 0, 0);
+            future_cost = greedy_box_completion_cost(&next_state,
+                                                     &next_pairs,
+                                                     require_same_id);
+
+            if (future_cost >= ROUTE_COST_INF)
+                continue;
+            total_cost += future_cost;
+            if (total_cost < best_score ||
+                (total_cost == best_score &&
+                 (best_idx < 0 ||
+                  pairs->item[actions[idx].pair_index].box_id_ref <
+                  pairs->item[actions[best_idx].pair_index].box_id_ref)))
+            {
+                best_score = total_cost;
+                best_idx = idx;
+            }
+        }
+    }
+
+    if (best_idx < 0)
+        best_idx = order[0];
+    *out_action = actions[best_idx];
+    return 1;
+}
+
 /* 每轮统一调度（核心入口）：
  * 1) 先选推箱最优动作；
  * 2) 若推箱动作已经很短，直接执行，减少无意义炸弹评估；
  * 3) 否则再评估炸弹开路动作，与推箱动作同台比较；
- * 4) 最终只看“本轮动作成本”做轻量决策，避免深层前瞻造成指数级耗时。 */
+ * 4) 推箱动作已经包含有界后续代价；炸弹解锁仍按当前动作快速比较。 */
 static int pick_best_round_action_balanced(const planning_state_t *state,
                                            int require_same_id,
                                            const pair_task_table_t *pairs,
@@ -2078,14 +2684,14 @@ static int pick_best_round_action_balanced(const planning_state_t *state,
         return 0;
 
     non_late_unfinished = count_unfinished_non_late_pairs(pairs);
-    has_box = pick_best_box_action_greedy(state,
-                                          require_same_id,
-                                          pairs,
-                                          (non_late_unfinished > 0) ? 1 : 0,
-                                          &box_action);
+    has_box = pick_best_box_action_with_future(state,
+                                               require_same_id,
+                                               pairs,
+                                               (non_late_unfinished > 0) ? 1 : 0,
+                                               &box_action);
     if (!has_box && non_late_unfinished > 0)
     {
-        has_box = pick_best_box_action_greedy(state, require_same_id, pairs, 0, &box_action);
+        has_box = pick_best_box_action_with_future(state, require_same_id, pairs, 0, &box_action);
     }
 
     if (has_box && box_action.steps <= FAST_BOX_DIRECT_PICK_STEPS)
@@ -2504,6 +3110,8 @@ static int append_return_to_depot(planning_state_t *state,
     if (!state || !merged_path || !merged_len)
         return 0;
 
+    /* 规则约定：全部箱子完成后所有墙体消失，最终返场只需避让仍占格的炸弹/箱子。 */
+    /* Walls disappear only after every physical box is gone. */
     ignore_obstacles = (state->boxes_cnt <= 0) ? 1 : 0;
     ret_len = build_shortest_return_path_to_depot(state,
                                                   ret_path,
@@ -2669,6 +3277,49 @@ static int build_car_distance_prev_map(const planning_state_t *state,
 }
 
 /* 由 prev 前驱表回溯一条最短路径。 */
+static int build_identify_car_distance_prev_map(const planning_state_t *state,
+                                                int *dist,
+                                                int *prev)
+{
+    uint32 state_sig;
+    int i;
+    int built;
+    identify_bfs_cache_entry_t *entry;
+
+    if (!state || !dist || !prev)
+        return 0;
+    state_sig = hash_state_signature(state);
+    for (i = 0; i < IDENTIFY_BFS_CACHE_SIZE; i++)
+    {
+        const identify_bfs_cache_entry_t *cached = &s_identify_bfs_cache[i];
+        if (!cached->valid || cached->state_sig != state_sig)
+            continue;
+        if (!planning_state_equal(&cached->state, state))
+            continue;
+
+        memcpy(dist, cached->dist, sizeof(cached->dist));
+        memcpy(prev, cached->prev, sizeof(cached->prev));
+#if defined(GAME_LOGIC_PROFILE)
+        g_profile_identify_bfs_cache_hits++;
+#endif
+        return 1;
+    }
+
+    built = build_car_distance_prev_map(state, state->car_state, dist, prev);
+    if (!built)
+        return 0;
+
+    entry = &s_identify_bfs_cache[s_identify_bfs_cache_next];
+    s_identify_bfs_cache_next =
+        (s_identify_bfs_cache_next + 1) % IDENTIFY_BFS_CACHE_SIZE;
+    entry->valid = 1U;
+    entry->state_sig = state_sig;
+    entry->state = *state;
+    memcpy(entry->dist, dist, sizeof(entry->dist));
+    memcpy(entry->prev, prev, sizeof(entry->prev));
+    return 1;
+}
+
 static int rebuild_car_path_from_prev(Position start,
                                       Position goal,
                                       const int *prev,
@@ -3365,7 +4016,15 @@ static int execute_identify_plan_with_skip(const planning_state_t *initial_state
 
         if (merged_len >= max_len_bound)
             return 0;
-        if (!build_car_distance_prev_map(&state, state.car_state, dist, prev))
+#if defined(GAME_LOGIC_PROFILE)
+        g_profile_identify_bfs_calls++;
+        profile_record_key(hash_state_signature(&state),
+                           s_profile_identify_bfs_keys,
+                           s_profile_identify_bfs_key_valid,
+                           1024,
+                           &g_profile_identify_bfs_duplicate_keys);
+#endif
+        if (!build_identify_car_distance_prev_map(&state, dist, prev))
             break;
 
         for (i = 0; i < state.boxes_cnt; i++)
@@ -3590,10 +4249,16 @@ static int build_identify_walk_plan(const planning_state_t *start_state,
     int box_score[MAX_BOXES];
     int target_score[MAX_TARGETS];
     int b_skip, t_skip;
+#if defined(GAME_LOGIC_PROFILE)
+    int best_rank = -1;
+#endif
     int i;
 
     if (!start_state || !out_path || !out_len || !out_state)
         return 0;
+#if defined(GAME_LOGIC_PROFILE)
+    g_profile_identify_walk_calls++;
+#endif
     init_state = *start_state;
     if (init_state.boxes_cnt <= 0 || init_state.targets_cnt <= 0)
         return 0;
@@ -3664,6 +4329,9 @@ static int build_identify_walk_plan(const planning_state_t *start_state,
         planning_state_t tmp_state;
         int tmp_len = 0;
 
+#if defined(GAME_LOGIC_PROFILE)
+        g_profile_identify_combo_attempts++;
+#endif
         if (!execute_identify_plan_with_skip(&init_state,
                                              (int)combos[i].b_skip,
                                              (int)combos[i].t_skip,
@@ -3677,6 +4345,9 @@ static int build_identify_walk_plan(const planning_state_t *start_state,
         {
             continue;
         }
+#if defined(GAME_LOGIC_PROFILE)
+        g_profile_identify_combo_successes++;
+#endif
 
         if (!has_best || tmp_len < best_len)
         {
@@ -3687,6 +4358,9 @@ static int build_identify_walk_plan(const planning_state_t *start_state,
             memcpy(best_seq_kind, tmp_seq_kind, sizeof(best_seq_kind));
             memcpy(best_seq_id, tmp_seq_id, sizeof(best_seq_id));
             best_seq_len = tmp_seq_len;
+#if defined(GAME_LOGIC_PROFILE)
+            best_rank = i;
+#endif
         }
     }
 
@@ -3712,6 +4386,12 @@ static int build_identify_walk_plan(const planning_state_t *start_state,
 
     if (!has_best)
         return 0;
+
+#if defined(GAME_LOGIC_PROFILE)
+    if (g_profile_identify_best_rank_count < 4U)
+        g_profile_identify_best_rank[g_profile_identify_best_rank_count++] =
+            (uint8)((best_rank >= 0) ? best_rank : 255);
+#endif
 
     adjust_identify_end_avoid_target_overlap(&best_state, out_path, &best_len);
 
@@ -3748,6 +4428,7 @@ static void plan_mode_identify_auto(void)
     uint8 seq_id[MAX_BOXES + MAX_TARGETS];
     int identify_len = 0;
     int seq_len = 0;
+    int identify_cost;
     int i;
 
     reset_planning_caches();
@@ -3767,6 +4448,80 @@ static void plan_mode_identify_auto(void)
     {
         Car_path_count = 0;
         return;
+    }
+
+    identify_cost = path_movement_cost(identify_path, identify_len);
+
+    /*
+     * 可选炸弹捷径：即使所有识别点都能绕行到达，也比较
+     * “先炸一堵候选墙 + 完整识别”与原完整识别路径的总代价。
+     * 只评估当前最短的一次炸弹动作，避免在 RT1064 上展开炸弹×墙×跳过组合的乘积搜索。
+     */
+    if (init_state.bombs_cnt > 0)
+    {
+        uint8 box_done[MAX_BOXES] = {0};
+        uint8 target_done[MAX_TARGETS] = {0};
+        round_action_t bomb_action;
+
+        if (pick_best_unlock_bomb_action_for_identify(&init_state,
+                                                       box_done,
+                                                       init_state.boxes_cnt,
+                                                       target_done,
+                                                       init_state.targets_cnt,
+                                                       &bomb_action))
+        {
+            planning_state_t shortcut_state = init_state;
+            planning_state_t shortcut_end_state;
+            Position shortcut_path[MAX_CAR_PATH];
+            Position shortcut_identify_path[MAX_CAR_PATH];
+            uint8 shortcut_seq_kind[MAX_BOXES + MAX_TARGETS];
+            uint8 shortcut_seq_id[MAX_BOXES + MAX_TARGETS];
+            int shortcut_len = 0;
+            int shortcut_identify_len = 0;
+            int shortcut_seq_len = 0;
+
+            apply_bomb_action_result(&shortcut_state,
+                                     &bomb_action,
+                                     shortcut_path,
+                                     &shortcut_len);
+            if (shortcut_len > 0 && shortcut_len < MAX_CAR_PATH &&
+                build_identify_walk_plan(&shortcut_state,
+                                         shortcut_identify_path,
+                                         &shortcut_identify_len,
+                                         &shortcut_end_state,
+                                         shortcut_seq_kind,
+                                         shortcut_seq_id,
+                                         &shortcut_seq_len))
+            {
+                int shortcut_cost;
+                int combined_required = shortcut_len + shortcut_identify_len;
+                if (shortcut_identify_len > 0 &&
+                    same_cell(shortcut_path[shortcut_len - 1], shortcut_identify_path[0]))
+                {
+                    combined_required--;
+                }
+                if (combined_required <= MAX_CAR_PATH)
+                {
+                    append_segment_path(shortcut_path,
+                                        &shortcut_len,
+                                        shortcut_identify_path,
+                                        shortcut_identify_len);
+                    shortcut_cost = path_movement_cost(shortcut_path, shortcut_len);
+                    if (shortcut_len > 0 && shortcut_cost < identify_cost)
+                    {
+                        identify_len = shortcut_len;
+                        identify_cost = shortcut_cost;
+                        end_state = shortcut_end_state;
+                        seq_len = shortcut_seq_len;
+                        memcpy(identify_path,
+                               shortcut_path,
+                               (size_t)shortcut_len * sizeof(Position));
+                        memcpy(seq_kind, shortcut_seq_kind, sizeof(seq_kind));
+                        memcpy(seq_id, shortcut_seq_id, sizeof(seq_id));
+                    }
+                }
+            }
+        }
     }
 
     if (seq_len > (MAX_BOXES + MAX_TARGETS))
@@ -3916,6 +4671,12 @@ static void plan_mode1_simple(void)
         safety_round++;
     }
 
+    /* 任何未完成任务都视为规划失败，禁止生成“部分完成后返场”的可执行路径。 */
+    if (state.boxes_cnt > 0 || state.targets_cnt > 0)
+    {
+        Car_path_count = 0U;
+        return;
+    }
     if (!append_return_to_depot(&state, merged_path, &merged_len))
     {
         Car_path_count = 0U;
@@ -3942,7 +4703,14 @@ static void plan_mode2_pair_first(void)
     load_state_from_globals(&state);
     build_pair_table(&state, 1, &pairs);
 
-    while (state.boxes_cnt > 0 && state.targets_cnt > 0 && safety_round < 256)
+    /* No valid ID pair means there is no safe push task to execute. */
+    if (pairs.count <= 0)
+    {
+        Car_path_count = 0U;
+        return;
+    }
+
+    while (count_unfinished_pairs(&pairs) > 0 && safety_round < 256)
     {
         round_action_t action;
         int picked = 0;
@@ -3968,6 +4736,11 @@ static void plan_mode2_pair_first(void)
         safety_round++;
     }
 
+    if (count_unfinished_pairs(&pairs) > 0)
+    {
+        Car_path_count = 0U;
+        return;
+    }
     if (!append_return_to_depot(&state, merged_path, &merged_len))
     {
         Car_path_count = 0U;

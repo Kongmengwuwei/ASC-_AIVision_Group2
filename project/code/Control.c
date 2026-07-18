@@ -14,16 +14,6 @@
 #include <string.h>
 
 /*
- * 手动开关：初始定位之后，是否继续使用视觉 CAR 位置修正定位。
- *
- * 注意：起步后的第一次定位始终强制使用视觉，因为系统需要先拿到小车真实位置，
- * 方向基准只取发车时的 IMU yaw；该开关只控制后续流程：
- * - 识别结束进入推箱子阶段前是否二次视觉定位；
- * - 等待地图阶段收到新 CAR 位置时是否顺带同步 path_follow。
- */
-static uint8 g_control_use_followup_vision_localization = 1U;
-
-/*
  * 手动选择起步发车方向。
  * 0：起步临时右，对应车前方；
  * 1：起步临时上，对应车左方；
@@ -42,6 +32,10 @@ static uint8 g_control_prestart_depart_dir = 0U;
  */
 static uint8 g_control_identify_prerotate_enabled = 1U;
 static uint8 g_control_continuous_levels_enabled = 0U;
+/* Risky ID repair is opt-in. Normal recognition results are not rewritten by default. */
+static uint8 g_control_identify_id_fallback_enabled = 0U;
+/* 每个识别驻车点、每次推箱结束后的视觉位置校正，默认关闭以保持原流程。 */
+static uint8 g_control_checkpoint_vision_localization_enabled = 0U;
 
 /*
  * Extra compensation for the first power-on departure move.
@@ -59,7 +53,7 @@ float g_control_prestart_depart_compensate_m = -0.025f;
 #define CONTROL_REQ_MAP_RETRY_TIMEOUT_TICKS 500U
 #define CONTROL_REQ_CAR_RETRY_TIMEOUT_TICKS 200U
 #define CONTROL_LOCALIZE_STOP_STABLE_TICKS 20U
-#define CONTROL_LOCALIZE_POST_STOP_DRAIN_TICKS 40U
+#define CONTROL_LOCALIZE_POST_STOP_DRAIN_TICKS 20U
 #define CONTROL_LOCALIZE_WHEEL_STOP_ENCODER_TOL 5
 #define CONTROL_LOCALIZE_MAX_SAMPLES 5U
 #define CONTROL_LOCALIZE_TWO_SAMPLE_MATCH_M 0.03f
@@ -71,6 +65,8 @@ float g_control_prestart_depart_compensate_m = -0.025f;
 #define CONTROL_CONTINUOUS_LEVEL_COUNT 3U
 #define CONTROL_CONTINUOUS_STOP_ENCODER_TOL 5
 #define CONTROL_CONTINUOUS_STOP_STABLE_LOOPS 3U
+/* 10 ms 控制节拍；检测到仍有未推进箱子时，下一关发车前额外等待 300 ms。 */
+#define CONTROL_CONTINUOUS_EXTRA_DEPART_WAIT_TICKS 30U
 
 
 /**
@@ -112,7 +108,6 @@ float g_control_prestart_depart_compensate_m = -0.025f;
 #define CONTROL_IDENTIFY_RECOG_TIMEOUT_TICKS 80U
 #define CONTROL_IDENTIFY_RECOG_ACCEPT_SCORE 85
 #define CONTROL_IDENTIFY_RECOG_CONFIRM_SCORE 70
-#define CONTROL_IDENTIFY_HALF_GRID_M (GRID_SIZE_M * 0.5f)
 /* 连续超时多少次之后才真正重发识别命令（避免在摄像头处理过程中频繁清 FIFO 重发）。 */
 #define CONTROL_IDENTIFY_RECOG_MAX_RETRIES 1U
 #define CONTROL_IDENTIFY_ID_UNASSIGNED 0xFFU
@@ -158,9 +153,6 @@ typedef struct
     control_identify_obj_t obj_type;
     VisionRecognitionDistance recog_distance;
     uint8 obj_index;
-    uint8 near_half_step_enabled;
-    float near_half_step_x_m;
-    float near_half_step_y_m;
 } control_identify_target_t;
 
 typedef struct
@@ -177,7 +169,6 @@ typedef enum
     CONTROL_IDENTIFY_EXEC_ROTATE_BEFORE_SEGMENT,
     CONTROL_IDENTIFY_EXEC_MOVE_SEGMENT,
     CONTROL_IDENTIFY_EXEC_ROTATE_TO_TARGET,
-    CONTROL_IDENTIFY_EXEC_NEAR_HALF_STEP,
     CONTROL_IDENTIFY_EXEC_DO_RECOGNIZE,
     CONTROL_IDENTIFY_EXEC_ADVANCE_ENDPOINT
 } control_identify_exec_state_t;
@@ -236,6 +227,9 @@ static control_flow_phase_t g_control_flow_phase = CONTROL_FLOW_IDENTIFY;
 static uint8 g_continuous_run_active = 0U;
 static uint8 g_continuous_level_index = 0U;
 static uint8 g_continuous_stop_stable_count = 0U;
+static uint8 g_continuous_extra_depart_wait_required = 0U;
+static uint8 g_continuous_extra_depart_wait_started = 0U;
+static uint32 g_continuous_extra_depart_wait_start_tick = 0U;
 static uint8 g_level_start_localization_required = 0U;
 static uint8 g_continuous_preset_base_index = 0U;
 static uint8 g_return_heading_rotate_started = 0U;
@@ -266,13 +260,27 @@ static control_identify_target_t g_identify_targets[CONTROL_IDENTIFY_MAX_TARGETS
 static size_t g_identify_target_count = 0U;
 static size_t g_identify_target_cursor = 0U;
 static uint8 g_identify_rotate_started = 0U;
-static uint8 g_identify_near_half_step_started = 0U;
+static uint8 g_identify_checkpoint_localized = 0U;
+static uint8 g_identify_targets_collected_at_endpoint = 0U;
 static control_identify_exec_state_t g_identify_exec_state = CONTROL_IDENTIFY_EXEC_IDLE;
+
+/* 推箱阶段按 PUSH_END_POINT 分段，段间可插入视觉定位。 */
+static Position g_pushbox_segment_path[MAX_CAR_PATH] = {{0}};
+static size_t g_pushbox_segment_end_idx = 0U;
+static uint8 g_pushbox_segment_running = 0U;
+static uint8 g_pushbox_checkpoint_localized = 0U;
+
+/* 识别和推箱检查点共用的一次性视觉定位运行状态。 */
+static uint8 g_checkpoint_visual_localization_active = 0U;
+static uint8 g_checkpoint_visual_pose_completed = 0U;
+static uint8 g_checkpoint_map_refresh_required = 0U;
 
 static uint8 g_identified_box_flags[MAX_BOXES] = {0U};
 static uint8 g_identified_target_flags[MAX_TARGETS] = {0U};
 static uint8 g_identify_box_id_assigned[MAX_BOXES] = {0U};
 static uint8 g_identify_target_id_assigned[MAX_TARGETS] = {0U};
+static int16 g_identify_box_confidence[MAX_BOXES] = {0};
+static int16 g_identify_target_confidence[MAX_TARGETS] = {0};
 static uint8 g_identify_recog_waiting = 0U;
 static uint8 g_identify_recog_retry_count = 0U;
 static VisionRecognitionType g_identify_recog_wait_type = VISION_RECOGNITION_NONE;
@@ -282,6 +290,7 @@ static uint8 g_identify_recog_settle_waiting = 0U;
 static uint32 g_identify_recog_settle_start_tick = 0U;
 static uint8 g_identify_recog_confirm_pending = 0U;
 static uint8 g_identify_recog_confirm_id = 0U;
+static int16 g_identify_recog_confirm_score = -1;
 
 static control_identify_id_record_t g_saved_box_id_records[MAX_BOXES] = {{0}};
 static control_identify_id_record_t g_saved_target_id_records[MAX_TARGETS] = {{0}};
@@ -441,25 +450,6 @@ static void set_control_phase_stage(control_phase_step_t step)
     g_control_stage = make_control_phase_stage(g_control_flow_phase, step);
 }
 
-/**
- * @brief 当前大阶段是否需要进入视觉定位状态。
- *
- * 识别阶段的第一次定位不能被菜单开关关闭，否则规划起点无法可靠落到地图坐标。
- * 推箱子阶段属于后续重定位，由菜单开关控制是否继续使用视觉修正。
- */
-static uint8 should_enter_vision_localization_stage(void)
-{
-    if (g_level_start_localization_required)
-    {
-        return 1U;
-    }
-    if (g_control_flow_phase == CONTROL_FLOW_IDENTIFY)
-    {
-        return 1U;
-    }
-    return g_control_use_followup_vision_localization;
-}
-
 static void reset_localization_accumulator(void)
 {
     g_localize_sample_count = 0U;
@@ -563,6 +553,7 @@ static void reset_identify_recognition_wait(void)
     g_identify_recog_settle_start_tick = 0U;
     g_identify_recog_confirm_pending = 0U;
     g_identify_recog_confirm_id = 0U;
+    g_identify_recog_confirm_score = -1;
 }
 
 static void reset_identify_runtime_state(void)
@@ -580,7 +571,8 @@ static void reset_identify_runtime_state(void)
     g_identify_target_count = 0U;
     g_identify_target_cursor = 0U;
     g_identify_rotate_started = 0U;
-    g_identify_near_half_step_started = 0U;
+    g_identify_checkpoint_localized = 0U;
+    g_identify_targets_collected_at_endpoint = 0U;
     g_identify_exec_state = CONTROL_IDENTIFY_EXEC_IDLE;
     reset_identify_recognition_wait();
 
@@ -588,6 +580,8 @@ static void reset_identify_runtime_state(void)
     memset(g_identified_target_flags, 0, sizeof(g_identified_target_flags));
     memset(g_identify_box_id_assigned, 0, sizeof(g_identify_box_id_assigned));
     memset(g_identify_target_id_assigned, 0, sizeof(g_identify_target_id_assigned));
+    memset(g_identify_box_confidence, 0xFF, sizeof(g_identify_box_confidence));
+    memset(g_identify_target_confidence, 0xFF, sizeof(g_identify_target_confidence));
 }
 
 static void inverse_remap_exec_path_point(Position *p)
@@ -772,15 +766,6 @@ static void configure_bomb_pause_for_path(const Position *path,
                                           size_t steps,
                                           size_t first_scan_index);
 static uint8 identify_cell_has_blocker(uint8 row, uint8 col);
-static uint8 identify_cell_blocks_near_half_step(uint8 row, uint8 col);
-static void map_float_grid_to_exec_meter(float map_row_f,
-                                         float map_col_f,
-                                         float *x_m,
-                                         float *y_m);
-static uint8 identify_try_make_near_half_step(const Position *stand_pos,
-                                              const Position *object_pos,
-                                              float *x_m,
-                                              float *y_m);
 
 static uint8 is_identification_marker(uint8 marker_id)
 {
@@ -1016,7 +1001,17 @@ static void reset_level_runtime_state_for_launch(void)
     g_identify_safe_move_steps = 0U;
     memset(g_identify_safe_move_path, 0, sizeof(g_identify_safe_move_path));
     g_continuous_stop_stable_count = 0U;
+    g_continuous_extra_depart_wait_required = 0U;
+    g_continuous_extra_depart_wait_started = 0U;
+    g_continuous_extra_depart_wait_start_tick = 0U;
     memset(g_exec_path, 0, sizeof(g_exec_path));
+    memset(g_pushbox_segment_path, 0, sizeof(g_pushbox_segment_path));
+    g_pushbox_segment_end_idx = 0U;
+    g_pushbox_segment_running = 0U;
+    g_pushbox_checkpoint_localized = 0U;
+    g_checkpoint_visual_localization_active = 0U;
+    g_checkpoint_visual_pose_completed = 0U;
+    g_checkpoint_map_refresh_required = 0U;
 
     reset_localization_accumulator();
     g_prestart_move_started = 0U;
@@ -1205,14 +1200,53 @@ static void report_identify_result_bluetooth(const control_identify_target_t *ta
                       (unsigned int)recognized_id);
 }
 
+static int16 normalize_identify_confidence(int16 score)
+{
+    if (score < 0)
+    {
+        return -1;
+    }
+    if (score > 100)
+    {
+        return 100;
+    }
+    return score;
+}
+
+static void record_identify_confidence(const control_identify_target_t *target,
+                                       int16 score)
+{
+    if (target == NULL)
+    {
+        return;
+    }
+
+    score = normalize_identify_confidence(score);
+    if (target->obj_type == CONTROL_IDENTIFY_OBJ_BOX &&
+        target->obj_index < MAX_BOXES &&
+        target->obj_index < Boxes_count)
+    {
+        g_identify_box_confidence[target->obj_index] = score;
+    }
+    else if (target->obj_type == CONTROL_IDENTIFY_OBJ_TARGET &&
+             target->obj_index < MAX_TARGETS &&
+             target->obj_index < Targets_count)
+    {
+        g_identify_target_confidence[target->obj_index] = score;
+    }
+}
+
 static void apply_identify_result_to_map(const control_identify_target_t *target,
                                          uint8 valid_id,
-                                         uint8 recognized_id)
+                                         uint8 recognized_id,
+                                         int16 confidence)
 {
     if (target == NULL || !valid_id)
     {
         return;
     }
+
+    record_identify_confidence(target, confidence);
 
     if (target->obj_type == CONTROL_IDENTIFY_OBJ_BOX &&
         target->obj_index < MAX_BOXES &&
@@ -1243,9 +1277,32 @@ static uint8 finish_or_retry_identify_result(const control_identify_target_t *ta
     }
 
     /* 高置信度单帧直接采用，保证停车后的识别流程足够快。 */
+    /* A medium-confidence first frame always requires the confirming frame to agree. */
+    if (g_identify_recog_confirm_pending)
+    {
+        int16 confidence = result->score;
+        if (g_identify_recog_confirm_score < confidence)
+        {
+            confidence = g_identify_recog_confirm_score;
+        }
+
+        if (valid_id &&
+            result->score >= CONTROL_IDENTIFY_RECOG_CONFIRM_SCORE &&
+            recognized_id == g_identify_recog_confirm_id)
+        {
+            apply_identify_result_to_map(target, valid_id, recognized_id, confidence);
+        }
+        else
+        {
+            record_identify_confidence(target, confidence);
+        }
+        reset_identify_recognition_wait();
+        return 1U;
+    }
+
     if (valid_id && result->score >= CONTROL_IDENTIFY_RECOG_ACCEPT_SCORE)
     {
-        apply_identify_result_to_map(target, valid_id, recognized_id);
+        apply_identify_result_to_map(target, valid_id, recognized_id, result->score);
         reset_identify_recognition_wait();
         return 1U;
     }
@@ -1253,22 +1310,14 @@ static uint8 finish_or_retry_identify_result(const control_identify_target_t *ta
     /* 中等置信度必须用第二帧同标签确认，避免一帧偶然误判写入地图。 */
     if (valid_id && result->score >= CONTROL_IDENTIFY_RECOG_CONFIRM_SCORE)
     {
-        if (g_identify_recog_confirm_pending)
-        {
-            if (recognized_id == g_identify_recog_confirm_id)
-            {
-                apply_identify_result_to_map(target, valid_id, recognized_id);
-            }
-            reset_identify_recognition_wait();
-            return 1U;
-        }
-
         g_identify_recog_confirm_pending = 1U;
         g_identify_recog_confirm_id = recognized_id;
+        g_identify_recog_confirm_score = normalize_identify_confidence(result->score);
         if (start_identify_recognition_request(target, distance))
         {
             return 0U;
         }
+        record_identify_confidence(target, result->score);
         reset_identify_recognition_wait();
         return 1U;
     }
@@ -1284,6 +1333,7 @@ static uint8 finish_or_retry_identify_result(const control_identify_target_t *ta
         }
     }
 
+    record_identify_confidence(target, result->score);
     reset_identify_recognition_wait();
     return 1U;
 }
@@ -1391,6 +1441,418 @@ static void apply_saved_identify_ids_to_current_map(void)
     }
 }
 
+typedef struct
+{
+    uint8 index;
+    uint8 id;
+    int16 confidence;
+    uint8 active;
+} control_identify_id_candidate_t;
+
+static void count_current_identify_ids(size_t box_cnt,
+                                       size_t target_cnt,
+                                       uint8 box_id_count[256],
+                                       uint8 target_id_count[256])
+{
+    size_t i = 0U;
+
+    memset(box_id_count, 0, 256U * sizeof(box_id_count[0]));
+    memset(target_id_count, 0, 256U * sizeof(target_id_count[0]));
+    for (i = 0U; i < box_cnt; i++)
+    {
+        box_id_count[boxes[i].id]++;
+    }
+    for (i = 0U; i < target_cnt; i++)
+    {
+        target_id_count[targets[i].id]++;
+    }
+}
+
+static uint8 identify_ids_are_strictly_one_to_one(size_t box_cnt,
+                                                   size_t target_cnt)
+{
+    uint8 box_id_count[256];
+    uint8 target_id_count[256];
+    uint16 id = 0U;
+
+    if (box_cnt != target_cnt)
+    {
+        return 0U;
+    }
+
+    count_current_identify_ids(box_cnt, target_cnt, box_id_count, target_id_count);
+    for (id = 0U; id < 256U; id++)
+    {
+        if (box_id_count[id] != target_id_count[id] || box_id_count[id] > 1U)
+        {
+            return 0U;
+        }
+    }
+    return 1U;
+}
+
+static int select_candidate_with_score(const control_identify_id_candidate_t *candidates,
+                                       size_t count,
+                                       uint8 select_highest)
+{
+    size_t i = 0U;
+    int selected = -1;
+
+    for (i = 0U; i < count; i++)
+    {
+        if (!candidates[i].active)
+        {
+            continue;
+        }
+        if (selected < 0 ||
+            (select_highest && candidates[i].confidence > candidates[selected].confidence) ||
+            (!select_highest && candidates[i].confidence < candidates[selected].confidence) ||
+            (candidates[i].confidence == candidates[selected].confidence &&
+             candidates[i].index < candidates[selected].index))
+        {
+            selected = (int)i;
+        }
+    }
+    return selected;
+}
+
+static uint8 split_duplicate_identify_ids(size_t box_cnt,
+                                          size_t target_cnt)
+{
+    uint8 box_id_count[256];
+    uint8 target_id_count[256];
+    uint8 box_used[MAX_BOXES];
+    uint8 target_used[MAX_TARGETS];
+    uint16 id = 0U;
+    uint16 next_auto_id = CONTROL_IDENTIFY_ID_ELIMINATE;
+
+    count_current_identify_ids(box_cnt, target_cnt, box_id_count, target_id_count);
+    for (id = 0U; id < 256U; id++)
+    {
+        uint8 duplicate_count = 0U;
+        size_t i = 0U;
+        int keep_box = -1;
+        int keep_target = -1;
+
+        if (box_id_count[id] <= 1U || box_id_count[id] != target_id_count[id])
+        {
+            continue;
+        }
+
+        memset(box_used, 0, sizeof(box_used));
+        memset(target_used, 0, sizeof(target_used));
+        for (i = 0U; i < box_cnt; i++)
+        {
+            if (boxes[i].id == (uint8)id &&
+                (keep_box < 0 || g_identify_box_confidence[i] > g_identify_box_confidence[keep_box]))
+            {
+                keep_box = (int)i;
+            }
+        }
+        for (i = 0U; i < target_cnt; i++)
+        {
+            if (targets[i].id == (uint8)id &&
+                (keep_target < 0 || g_identify_target_confidence[i] > g_identify_target_confidence[keep_target]))
+            {
+                keep_target = (int)i;
+            }
+        }
+        if (keep_box < 0 || keep_target < 0)
+        {
+            return 0U;
+        }
+        box_used[keep_box] = 1U;
+        target_used[keep_target] = 1U;
+        duplicate_count = (uint8)(box_id_count[id] - 1U);
+
+        while (duplicate_count > 0U)
+        {
+            int box_index = -1;
+            int target_index = -1;
+            uint16 new_id = 0U;
+
+            for (i = 0U; i < box_cnt; i++)
+            {
+                if (!box_used[i] && boxes[i].id == (uint8)id &&
+                    (box_index < 0 ||
+                     g_identify_box_confidence[i] < g_identify_box_confidence[box_index]))
+                {
+                    box_index = (int)i;
+                }
+            }
+            for (i = 0U; i < target_cnt; i++)
+            {
+                if (!target_used[i] && targets[i].id == (uint8)id &&
+                    (target_index < 0 ||
+                     g_identify_target_confidence[i] < g_identify_target_confidence[target_index]))
+                {
+                    target_index = (int)i;
+                }
+            }
+            if (box_index < 0 || target_index < 0)
+            {
+                return 0U;
+            }
+
+            while (next_auto_id < 255U &&
+                   (box_id_count[next_auto_id] > 0U || target_id_count[next_auto_id] > 0U))
+            {
+                next_auto_id++;
+            }
+            if (next_auto_id >= 255U)
+            {
+                return 0U;
+            }
+            new_id = next_auto_id++;
+            box_used[box_index] = 1U;
+            target_used[target_index] = 1U;
+            boxes[box_index].id = (uint8)new_id;
+            targets[target_index].id = (uint8)new_id;
+            box_id_count[id]--;
+            target_id_count[id]--;
+            box_id_count[new_id] = 1U;
+            target_id_count[new_id] = 1U;
+            BlueSerial_Printf("IDSAFE duplicate id=%u B%u T%u -> id=%u\r\n",
+                              (unsigned int)id,
+                              (unsigned int)box_index,
+                              (unsigned int)target_index,
+                              (unsigned int)new_id);
+            duplicate_count--;
+        }
+    }
+    return 1U;
+}
+
+static uint8 repair_identify_ids_by_confidence_impl(size_t box_cnt,
+                                                    size_t target_cnt)
+{
+    uint8 box_id_count[256];
+    uint8 target_id_count[256];
+    uint8 box_selected[MAX_BOXES] = {0U};
+    uint8 target_selected[MAX_TARGETS] = {0U};
+    control_identify_id_candidate_t box_candidates[MAX_BOXES];
+    control_identify_id_candidate_t target_candidates[MAX_TARGETS];
+    size_t box_candidate_count = 0U;
+    size_t target_candidate_count = 0U;
+    uint16 id = 0U;
+    size_t i = 0U;
+
+    if (identify_ids_are_strictly_one_to_one(box_cnt, target_cnt))
+    {
+        return 1U;
+    }
+    if (!g_control_identify_id_fallback_enabled)
+    {
+        BlueSerial_Printf("IDSAFE off: IDs are not one-to-one (B%u T%u)\r\n",
+                          (unsigned int)box_cnt,
+                          (unsigned int)target_cnt);
+        return 0U;
+    }
+    if (box_cnt != target_cnt)
+    {
+        BlueSerial_Printf("IDSAFE abort: object count mismatch B%u T%u\r\n",
+                          (unsigned int)box_cnt,
+                          (unsigned int)target_cnt);
+        return 0U;
+    }
+
+    memset(box_candidates, 0, sizeof(box_candidates));
+    memset(target_candidates, 0, sizeof(target_candidates));
+    count_current_identify_ids(box_cnt, target_cnt, box_id_count, target_id_count);
+
+    /* Odd totals for one ID necessarily produce a surplus on one side and enter this list. */
+    for (id = 0U; id < 256U; id++)
+    {
+        uint8 needed = 0U;
+
+        if (box_id_count[id] > target_id_count[id])
+        {
+            needed = (uint8)(box_id_count[id] - target_id_count[id]);
+            while (needed > 0U)
+            {
+                int selected = -1;
+                for (i = 0U; i < box_cnt; i++)
+                {
+                    if (!box_selected[i] && boxes[i].id == (uint8)id &&
+                        (selected < 0 ||
+                         g_identify_box_confidence[i] < g_identify_box_confidence[selected]))
+                    {
+                        selected = (int)i;
+                    }
+                }
+                if (selected < 0 || box_candidate_count >= MAX_BOXES)
+                {
+                    return 0U;
+                }
+                box_selected[selected] = 1U;
+                box_candidates[box_candidate_count].index = (uint8)selected;
+                box_candidates[box_candidate_count].id = (uint8)id;
+                box_candidates[box_candidate_count].confidence = g_identify_box_confidence[selected];
+                box_candidates[box_candidate_count].active = 1U;
+                box_candidate_count++;
+                needed--;
+            }
+        }
+        else if (target_id_count[id] > box_id_count[id])
+        {
+            needed = (uint8)(target_id_count[id] - box_id_count[id]);
+            while (needed > 0U)
+            {
+                int selected = -1;
+                for (i = 0U; i < target_cnt; i++)
+                {
+                    if (!target_selected[i] && targets[i].id == (uint8)id &&
+                        (selected < 0 ||
+                         g_identify_target_confidence[i] < g_identify_target_confidence[selected]))
+                    {
+                        selected = (int)i;
+                    }
+                }
+                if (selected < 0 || target_candidate_count >= MAX_TARGETS)
+                {
+                    return 0U;
+                }
+                target_selected[selected] = 1U;
+                target_candidates[target_candidate_count].index = (uint8)selected;
+                target_candidates[target_candidate_count].id = (uint8)id;
+                target_candidates[target_candidate_count].confidence = g_identify_target_confidence[selected];
+                target_candidates[target_candidate_count].active = 1U;
+                target_candidate_count++;
+                needed--;
+            }
+        }
+    }
+
+    if (box_candidate_count != target_candidate_count)
+    {
+        BlueSerial_Printf("IDSAFE abort: surplus mismatch B%u T%u\r\n",
+                          (unsigned int)box_candidate_count,
+                          (unsigned int)target_candidate_count);
+        return 0U;
+    }
+
+    for (i = 0U; i < box_candidate_count; i++)
+    {
+        int low_box = select_candidate_with_score(box_candidates, box_candidate_count, 0U);
+        int low_target = select_candidate_with_score(target_candidates, target_candidate_count, 0U);
+        uint8 change_box = 0U;
+
+        if (low_box < 0 || low_target < 0)
+        {
+            return 0U;
+        }
+        if (box_candidates[low_box].confidence <= target_candidates[low_target].confidence)
+        {
+            change_box = 1U;
+        }
+
+        if (change_box)
+        {
+            int trusted_target = select_candidate_with_score(target_candidates,
+                                                               target_candidate_count,
+                                                               1U);
+            uint8 box_index = box_candidates[low_box].index;
+            uint8 target_index;
+            uint8 old_id = boxes[box_index].id;
+
+            if (trusted_target < 0)
+            {
+                return 0U;
+            }
+            target_index = target_candidates[trusted_target].index;
+            boxes[box_index].id = targets[target_index].id;
+            BlueSerial_Printf("IDSAFE B%u id=%u->%u s=%d via T%u s=%d\r\n",
+                              (unsigned int)box_index,
+                              (unsigned int)old_id,
+                              (unsigned int)boxes[box_index].id,
+                              (int)box_candidates[low_box].confidence,
+                              (unsigned int)target_index,
+                              (int)target_candidates[trusted_target].confidence);
+            box_candidates[low_box].active = 0U;
+            target_candidates[trusted_target].active = 0U;
+        }
+        else
+        {
+            int trusted_box = select_candidate_with_score(box_candidates,
+                                                           box_candidate_count,
+                                                           1U);
+            uint8 target_index = target_candidates[low_target].index;
+            uint8 box_index;
+            uint8 old_id = targets[target_index].id;
+
+            if (trusted_box < 0)
+            {
+                return 0U;
+            }
+            box_index = box_candidates[trusted_box].index;
+            targets[target_index].id = boxes[box_index].id;
+            BlueSerial_Printf("IDSAFE T%u id=%u->%u s=%d via B%u s=%d\r\n",
+                              (unsigned int)target_index,
+                              (unsigned int)old_id,
+                              (unsigned int)targets[target_index].id,
+                              (int)target_candidates[low_target].confidence,
+                              (unsigned int)box_index,
+                              (int)box_candidates[trusted_box].confidence);
+            target_candidates[low_target].active = 0U;
+            box_candidates[trusted_box].active = 0U;
+        }
+    }
+
+    count_current_identify_ids(box_cnt, target_cnt, box_id_count, target_id_count);
+    for (id = 0U; id < 256U; id++)
+    {
+        if (box_id_count[id] != target_id_count[id])
+        {
+            BlueSerial_Printf("IDSAFE abort: repair check failed at id=%u\r\n",
+                              (unsigned int)id);
+            return 0U;
+        }
+    }
+
+    if (!split_duplicate_identify_ids(box_cnt, target_cnt) ||
+        !identify_ids_are_strictly_one_to_one(box_cnt, target_cnt))
+    {
+        BlueSerial_Printf("IDSAFE abort: final one-to-one check failed\r\n");
+        return 0U;
+    }
+    BlueSerial_Printf("IDSAFE applied: one-to-one verified (B%u T%u)\r\n",
+                      (unsigned int)box_cnt,
+                      (unsigned int)target_cnt);
+    return 1U;
+}
+
+static uint8 repair_identify_ids_by_confidence(size_t box_cnt,
+                                               size_t target_cnt)
+{
+    uint8 original_box_ids[MAX_BOXES] = {0U};
+    uint8 original_target_ids[MAX_TARGETS] = {0U};
+    size_t i = 0U;
+    uint8 repaired = 0U;
+
+    for (i = 0U; i < box_cnt; i++)
+    {
+        original_box_ids[i] = boxes[i].id;
+    }
+    for (i = 0U; i < target_cnt; i++)
+    {
+        original_target_ids[i] = targets[i].id;
+    }
+
+    repaired = repair_identify_ids_by_confidence_impl(box_cnt, target_cnt);
+    if (!repaired)
+    {
+        for (i = 0U; i < box_cnt; i++)
+        {
+            boxes[i].id = original_box_ids[i];
+        }
+        for (i = 0U; i < target_cnt; i++)
+        {
+            targets[i].id = original_target_ids[i];
+        }
+    }
+    return repaired;
+}
+
 static void finalize_identify_ids_for_pushbox(void)
 {
     uint8 box_id_count[256] = {0U};
@@ -1471,6 +1933,7 @@ static void finalize_identify_ids_for_pushbox(void)
             targets[idx].id = CONTROL_IDENTIFY_ID_ELIMINATE;
             g_identify_target_id_assigned[idx] = 1U;
         }
+        (void)repair_identify_ids_by_confidence(box_cnt, target_cnt);
         save_identify_ids_from_current_map();
         return;
     }
@@ -1534,6 +1997,7 @@ static void finalize_identify_ids_for_pushbox(void)
         g_identify_target_id_assigned[target_idx] = 1U;
     }
 
+    (void)repair_identify_ids_by_confidence(box_cnt, target_cnt);
     save_identify_ids_from_current_map();
 }
 
@@ -1630,7 +2094,7 @@ static uint8 identify_action_stub(const control_identify_target_t *target)
         }
 
         report_identify_result_bluetooth(target, &result, valid_id, recognized_id);
-        apply_identify_result_to_map(target, valid_id, recognized_id);
+        apply_identify_result_to_map(target, valid_id, recognized_id, result.score);
         reset_identify_recognition_wait();
         return 1U;
     }
@@ -1776,14 +2240,6 @@ static void add_identify_target_if_nearest(Position stand_pos,
     candidate.recog_distance = (manhattan == 2) ? VISION_RECOGNITION_DISTANCE_TWO_GRID :
                                                  VISION_RECOGNITION_DISTANCE_ONE_GRID;
     candidate.obj_index = obj_index;
-    if (manhattan == 1 &&
-        identify_try_make_near_half_step(&stand_pos,
-                                         &object_pos,
-                                         &candidate.near_half_step_x_m,
-                                         &candidate.near_half_step_y_m))
-    {
-        candidate.near_half_step_enabled = 1U;
-    }
     g_identify_targets[slot] = candidate;
 }
 
@@ -1812,116 +2268,6 @@ static uint8 identify_cell_has_blocker(uint8 row, uint8 col)
             return 1U;
     }
     return 0U;
-}
-
-static uint8 identify_cell_blocks_near_half_step(uint8 row, uint8 col)
-{
-    size_t i = 0U;
-
-    /*
-     * 这里只服务于“近距离识别前后退半格”的可行性判断。
-     * 目标点本身可穿过，因此不把 targets[] 当成阻挡；但墙/障碍、炸弹、箱子
-     * 仍然不能穿过，保持原来的安全限制。
-     */
-    for (i = 0U; i < Obstacles_count; i++)
-    {
-        if (obstacles[i].row == row && obstacles[i].col == col)
-            return 1U;
-    }
-    for (i = 0U; i < Bombs_count; i++)
-    {
-        if (bombs[i].row == row && bombs[i].col == col)
-            return 1U;
-    }
-    for (i = 0U; i < Boxes_count; i++)
-    {
-        if (boxes[i].row == row && boxes[i].col == col)
-            return 1U;
-    }
-    return 0U;
-}
-
-static void map_float_grid_to_exec_meter(float map_row_f,
-                                         float map_col_f,
-                                         float *x_m,
-                                         float *y_m)
-{
-    float exec_row_f = map_row_f;
-    float exec_col_f = map_col_f;
-
-    if (x_m == NULL || y_m == NULL)
-    {
-        return;
-    }
-
-    /*
-     * 半格偏移不是整数 Position，不能直接调用 path_remap_exec_point()。
-     * 这里按同一套坐标映射开关做浮点版转换，保证临时识别点和执行路径坐标系一致。
-     */
-#if CONTROL_COORD_TRANSPOSE_COMPENSATE
-    exec_row_f = map_col_f;
-    exec_col_f = map_row_f;
-#endif
-
-#if CONTROL_COORD_FLIP_VERTICAL
-    exec_col_f = (float)(MAP_ROWS - 1U) - exec_col_f;
-#endif
-
-    *x_m = clampf_local(exec_row_f * GRID_SIZE_M, 0.0f, CONTROL_WORLD_X_MAX_M);
-    *y_m = clampf_local(exec_col_f * GRID_SIZE_M, 0.0f, CONTROL_WORLD_Y_MAX_M);
-}
-
-static uint8 identify_try_make_near_half_step(const Position *stand_pos,
-                                              const Position *object_pos,
-                                              float *x_m,
-                                              float *y_m)
-{
-    int32 d_row = 0;
-    int32 d_col = 0;
-    int32 back_row = 0;
-    int32 back_col = 0;
-    float half_row_f = 0.0f;
-    float half_col_f = 0.0f;
-
-    if (stand_pos == NULL || object_pos == NULL || x_m == NULL || y_m == NULL)
-    {
-        return 0U;
-    }
-
-    /*
-     * 只对一格近距离识别后退半格；两格远距离识别完全保持原逻辑。
-     * 后退方向取“站位 -> 远离目标”的方向，背后整格必须在地图内且没有墙/障碍/
-     * 箱子/炸弹等不可穿过对象。目标点可穿过，不会阻止半格后退。
-     */
-    d_row = (int32)object_pos->row - (int32)stand_pos->row;
-    d_col = (int32)object_pos->col - (int32)stand_pos->col;
-    if (((d_row == 0) ? 0 : ((d_row > 0) ? d_row : -d_row)) +
-            ((d_col == 0) ? 0 : ((d_col > 0) ? d_col : -d_col)) !=
-        1)
-    {
-        return 0U;
-    }
-    if (d_row != 0 && d_col != 0)
-    {
-        return 0U;
-    }
-
-    back_row = (int32)stand_pos->row - d_row;
-    back_col = (int32)stand_pos->col - d_col;
-    if (back_row < 0 || back_col < 0 ||
-        back_row >= (int32)MAP_ROWS || back_col >= (int32)MAP_COLS)
-    {
-        return 0U;
-    }
-    if (identify_cell_blocks_near_half_step((uint8)back_row, (uint8)back_col))
-    {
-        return 0U;
-    }
-
-    half_row_f = (float)stand_pos->row - 0.5f * (float)d_row;
-    half_col_f = (float)stand_pos->col - 0.5f * (float)d_col;
-    map_float_grid_to_exec_meter(half_row_f, half_col_f, x_m, y_m);
-    return 1U;
 }
 
 static uint8 identify_target_has_clear_view(const Position *map_point,
@@ -2044,84 +2390,6 @@ static uint8 collect_identify_targets_on_exec_point(const Position *exec_point)
     return (g_identify_target_count > 0U) ? 1U : 0U;
 }
 
-static uint8 identify_exec_grid_to_half_path_point(const Position *src, Position *dst)
-{
-    uint16 row = 0U;
-    uint16 col = 0U;
-
-    if (src == NULL || dst == NULL)
-    {
-        return 0U;
-    }
-
-    row = (uint16)src->row * 2U;
-    col = (uint16)src->col * 2U;
-    if (row > 0xFFU || col > 0xFFU)
-    {
-        return 0U;
-    }
-
-    dst->row = (uint8)row;
-    dst->col = (uint8)col;
-    dst->id = src->id;
-    return 1U;
-}
-
-static uint8 identify_meter_to_half_path_point(float x_m,
-                                               float y_m,
-                                               uint8 marker_id,
-                                               Position *dst)
-{
-    int32 row = 0;
-    int32 col = 0;
-
-    if (dst == NULL)
-    {
-        return 0U;
-    }
-
-    row = (int32)lroundf(x_m / CONTROL_IDENTIFY_HALF_GRID_M);
-    col = (int32)lroundf(y_m / CONTROL_IDENTIFY_HALF_GRID_M);
-    if (row < 0 || col < 0 || row > 0xFF || col > 0xFF)
-    {
-        return 0U;
-    }
-
-    dst->row = (uint8)row;
-    dst->col = (uint8)col;
-    dst->id = marker_id;
-    return 1U;
-}
-
-static uint8 identify_get_segment_half_endpoint(size_t end_idx, Position *half_endpoint)
-{
-    const control_identify_target_t *target = NULL;
-
-    if (half_endpoint == NULL ||
-        g_identify_endpoint_cursor >= g_identify_endpoint_count ||
-        !g_identify_endpoint_need_action[g_identify_endpoint_cursor] ||
-        g_identify_target_count == 0U ||
-        end_idx >= g_exec_steps)
-    {
-        return 0U;
-    }
-
-    target = &g_identify_targets[g_identify_target_cursor];
-    if (!target->near_half_step_enabled)
-    {
-        return 0U;
-    }
-
-    /*
-     * 将原识别端点替换为半格识别点。路径仍保留 IDENTIFICATION 标记，
-     * 但坐标改用 0.1m 网格表示，让 path_follow 从一开始就追向半格位置。
-     */
-    return identify_meter_to_half_path_point(target->near_half_step_x_m,
-                                             target->near_half_step_y_m,
-                                             g_exec_path[end_idx].id,
-                                             half_endpoint);
-}
-
 static uint8 prepare_identify_endpoints(void)
 {
     size_t i = 0U;
@@ -2174,8 +2442,6 @@ static uint8 begin_identify_segment_motion(size_t end_idx)
 {
     size_t i = 0U;
     size_t seg_steps = 0U;
-    uint8 use_half_grid_path = 0U;
-    Position half_endpoint = {0};
 
     if (end_idx >= g_exec_steps || end_idx < g_identify_segment_start_idx)
     {
@@ -2184,7 +2450,6 @@ static uint8 begin_identify_segment_motion(size_t end_idx)
 
     seg_steps = end_idx - g_identify_segment_start_idx + 1U;
     g_identify_segment_running = 0U;
-    use_half_grid_path = identify_get_segment_half_endpoint(end_idx, &half_endpoint);
 
     if (seg_steps >= 2U)
     {
@@ -2195,23 +2460,7 @@ static uint8 begin_identify_segment_motion(size_t end_idx)
 
         for (i = 0U; i < seg_steps; i++)
         {
-            if (use_half_grid_path)
-            {
-                if (!identify_exec_grid_to_half_path_point(&g_exec_path[g_identify_segment_start_idx + i],
-                                                           &g_identify_segment_path[i]))
-                {
-                    return 0U;
-                }
-            }
-            else
-            {
-                g_identify_segment_path[i] = g_exec_path[g_identify_segment_start_idx + i];
-            }
-        }
-
-        if (use_half_grid_path)
-        {
-            g_identify_segment_path[seg_steps - 1U] = half_endpoint;
+            g_identify_segment_path[i] = g_exec_path[g_identify_segment_start_idx + i];
         }
 
         /* 分段首点是上一事件的已处理端点，不应再次触发爆炸停留。 */
@@ -2219,23 +2468,12 @@ static uint8 begin_identify_segment_motion(size_t end_idx)
                                       seg_steps,
                                       (g_identify_segment_start_idx > 0U) ? 1U : 0U);
         control_hold_yaw_closed_loop();
-        if (use_half_grid_path)
-        {
-            path_follow_set_path_with_grid(g_identify_segment_path,
-                                           seg_steps,
-                                           CONTROL_IDENTIFY_HALF_GRID_M,
-                                           1U);
-        }
-        else
-        {
-            path_follow_set_path(g_identify_segment_path, seg_steps);
-        }
+        path_follow_set_path(g_identify_segment_path, seg_steps);
         g_identify_segment_running = 1U;
     }
 
     car_go_flag = 1U;
     car_stop_flag = 0U;
-    g_identify_near_half_step_started = 0U;
     g_identify_exec_state = CONTROL_IDENTIFY_EXEC_MOVE_SEGMENT;
     return 1U;
 }
@@ -2250,7 +2488,8 @@ static uint8 start_identify_segment(size_t end_idx)
     }
 
     g_identify_rotate_started = 0U;
-    g_identify_near_half_step_started = 0U;
+    g_identify_checkpoint_localized = 0U;
+    g_identify_targets_collected_at_endpoint = 0U;
     g_identify_segment_map_event_applied = 0U;
     memset(g_identify_targets, 0, sizeof(g_identify_targets));
     g_identify_target_count = 0U;
@@ -2440,6 +2679,211 @@ static uint8 get_camera_position_meter(float *x_m, float *y_m)
 
     *x_m = row_f * GRID_SIZE_M;
     *y_m = col_f * GRID_SIZE_M;
+    return 1U;
+}
+
+static void start_localization_map_prefetch_once(void);
+static uint8 localization_prefetched_map_ready(void);
+
+static void begin_checkpoint_visual_localization(uint8 request_map_refresh)
+{
+    if (g_checkpoint_visual_localization_active)
+    {
+        return;
+    }
+
+    path_follow_set_path(NULL, 0U);
+    reset_localization_accumulator();
+    clear_car_request_wait();
+    car_pose_updated = false;
+    g_checkpoint_visual_localization_active = 1U;
+    g_checkpoint_visual_pose_completed = 0U;
+    g_checkpoint_map_refresh_required = request_map_refresh ? 1U : 0U;
+    car_go_flag = 1U;
+    car_stop_flag = 1U;
+}
+
+/* 检查点先停车并排空运动旧帧；末次推箱检查点还会并行预取新地图。 */
+static uint8 settle_camera_before_checkpoint_localization(void)
+{
+    uint32 now_tick = g_control_tick_10ms;
+
+    if (g_localize_camera_settled)
+    {
+        return 1U;
+    }
+
+    if (Algorithm_Test_PresetInput_IsEnabled())
+    {
+        if (g_checkpoint_map_refresh_required)
+        {
+            start_localization_map_prefetch_once();
+        }
+        (void)Algorithm_Test_PresetInput_ProvideCarPoseFrame();
+        g_localize_camera_settled = 1U;
+        return 1U;
+    }
+
+    car_go_flag = 1U;
+    car_stop_flag = 1U;
+    if (!g_localize_stop_sequence_started)
+    {
+        uart_stop_car_stream();
+        uart_blob_clear_pending_data();
+        g_localize_stop_sequence_started = 1U;
+        g_localize_post_stop_start_tick = now_tick;
+        if (g_checkpoint_map_refresh_required)
+        {
+            start_localization_map_prefetch_once();
+        }
+    }
+
+    if (!localization_wheels_stopped())
+    {
+        g_localize_stop_stable_start_tick = 0U;
+        return 0U;
+    }
+    if (g_localize_stop_stable_start_tick == 0U)
+    {
+        g_localize_stop_stable_start_tick = now_tick;
+        return 0U;
+    }
+    if ((uint32)(now_tick - g_localize_stop_stable_start_tick) <
+        CONTROL_LOCALIZE_STOP_STABLE_TICKS)
+    {
+        return 0U;
+    }
+    if ((uint32)(now_tick - g_localize_post_stop_start_tick) <
+        CONTROL_LOCALIZE_POST_STOP_DRAIN_TICKS)
+    {
+        return 0U;
+    }
+
+    g_localize_camera_settled = 1U;
+    return 1U;
+}
+
+/* 返回 1 表示本次检查点定位完成，返回 0 表示仍在停车/等待/采样。 */
+static uint8 finish_checkpoint_map_refresh_if_ready(void)
+{
+    if (!g_checkpoint_map_refresh_required)
+    {
+        return 1U;
+    }
+
+    if (!localization_prefetched_map_ready())
+    {
+        service_map_request_wait();
+        return 0U;
+    }
+
+    /* 推到目标的箱子会从游戏地图消失；新地图仍含 BOX 表示仍有未推进箱子。 */
+    g_continuous_extra_depart_wait_required =
+        (!Algorithm_Test_PresetInput_IsEnabled() &&
+         g_continuous_run_active &&
+         g_control_continuous_levels_enabled &&
+         (uint8)(g_continuous_level_index + 1U) < CONTROL_CONTINUOUS_LEVEL_COUNT &&
+         Boxes_count > 0U) ? 1U : 0U;
+
+    map_data_updated = false;
+    clear_map_request_wait();
+    g_checkpoint_map_refresh_required = 0U;
+    return 1U;
+}
+
+static uint8 process_checkpoint_visual_localization(void)
+{
+    uint8 accept_sample = 0U;
+    float cam_x_m = 0.0f;
+    float cam_y_m = 0.0f;
+    float corrected_x_m = 0.0f;
+    float corrected_y_m = 0.0f;
+
+    if (!g_checkpoint_visual_localization_active)
+    {
+        return 1U;
+    }
+    if (g_checkpoint_visual_pose_completed)
+    {
+        if (!finish_checkpoint_map_refresh_if_ready())
+        {
+            return 0U;
+        }
+        g_checkpoint_visual_localization_active = 0U;
+        return 1U;
+    }
+    if (!settle_camera_before_checkpoint_localization())
+    {
+        return 0U;
+    }
+
+    if (!g_localize_fresh_pose_request_started)
+    {
+        g_localize_car_frame_base = car_frame_count;
+        car_pose_updated = false;
+        g_localize_fresh_pose_request_started = 1U;
+        send_car_request_once();
+        return 0U;
+    }
+
+    if (car_pose_updated)
+    {
+        car_pose_updated = false;
+        if (car_frame_count != g_localize_car_frame_base)
+        {
+            clear_car_request_wait();
+            accept_sample = 1U;
+        }
+    }
+    if (!accept_sample)
+    {
+        service_car_request_wait();
+        return 0U;
+    }
+    if (!get_camera_position_meter(&cam_x_m, &cam_y_m))
+    {
+        service_car_request_wait();
+        return 0U;
+    }
+
+    if (g_localize_sample_count >= CONTROL_LOCALIZE_MAX_SAMPLES)
+    {
+        g_localize_sample_count = (uint8)(CONTROL_LOCALIZE_MAX_SAMPLES - 1U);
+    }
+    g_localize_samples_x_m[g_localize_sample_count] = cam_x_m;
+    g_localize_samples_y_m[g_localize_sample_count] = cam_y_m;
+    g_localize_sample_count++;
+
+    if (g_localize_sample_count == 2U && localization_first_two_samples_match())
+    {
+        corrected_x_m = 0.5f * (g_localize_samples_x_m[0] + g_localize_samples_x_m[1]);
+        corrected_y_m = 0.5f * (g_localize_samples_y_m[0] + g_localize_samples_y_m[1]);
+    }
+    else if (g_localize_sample_count < CONTROL_RELOCALIZE_MIN_SAMPLES_PUSHBOX)
+    {
+        g_localize_car_frame_base = car_frame_count;
+        car_pose_updated = false;
+        send_car_request_once();
+        return 0U;
+    }
+    else
+    {
+        corrected_x_m = localization_median(g_localize_samples_x_m,
+                                             g_localize_sample_count);
+        corrected_y_m = localization_median(g_localize_samples_y_m,
+                                             g_localize_sample_count);
+    }
+
+    clear_car_request_wait();
+    path_follow_reset_pose(corrected_x_m, corrected_y_m, eulerAngle.yaw);
+    BlueSerial_ReportPosition();
+    control_hold_yaw_closed_loop();
+    g_checkpoint_visual_pose_completed = 1U;
+    if (!finish_checkpoint_map_refresh_if_ready())
+    {
+        return 0U;
+    }
+    g_checkpoint_visual_localization_active = 0U;
     return 1U;
 }
 
@@ -2838,15 +3282,7 @@ static void handle_prestart_move(void)
         }
         control_hold_yaw_closed_loop();
         reset_localization_accumulator();
-        if (should_enter_vision_localization_stage())
-        {
-            set_control_phase_stage(CONTROL_PHASE_STEP_LOCALIZE);
-        }
-        else
-        {
-            mark_wait_new_map_frame();
-            set_control_phase_stage(CONTROL_PHASE_STEP_WAIT_CAMERA_DATA);
-        }
+        set_control_phase_stage(CONTROL_PHASE_STEP_LOCALIZE);
     }
 }
 
@@ -2931,16 +3367,7 @@ static void handle_identify_return_heading_stage(void)
     g_identify_return_start_valid = 0U;
     control_hold_yaw_closed_loop();
     reset_localization_accumulator();
-
-    if (should_enter_vision_localization_stage())
-    {
-        set_control_phase_stage(CONTROL_PHASE_STEP_LOCALIZE);
-    }
-    else
-    {
-        mark_wait_new_map_frame();
-        set_control_phase_stage(CONTROL_PHASE_STEP_WAIT_CAMERA_DATA);
-    }
+    set_control_phase_stage(CONTROL_PHASE_STEP_LOCALIZE);
 }
 
 /**
@@ -2958,19 +3385,6 @@ static void handle_localization_stage(void)
     float avg_x_m = 0.0f;
     float avg_y_m = 0.0f;
     float start_base_yaw_deg = map_dir_to_yaw_deg(CONTROL_MAP_DIR_RIGHT);
-
-    if (!should_enter_vision_localization_stage())
-    {
-        /* 后续视觉定位关闭时，推箱子阶段重定位直接降级为“等地图->规划”。 */
-        if (g_control_flow_phase == CONTROL_FLOW_IDENTIFY)
-        {
-        }
-        g_level_start_localization_required = 0U;
-        clear_car_request_wait();
-        mark_wait_new_map_frame();
-        set_control_phase_stage(CONTROL_PHASE_STEP_WAIT_CAMERA_DATA);
-        return;
-    }
 
     if (g_control_flow_phase == CONTROL_FLOW_PUSHBOX)
     {
@@ -3058,34 +3472,13 @@ static void handle_localization_stage(void)
  * @brief 处理“等待地图”阶段�?
  *
  * 阶段目标�?
- * - 按需请求地图，并顺带消费可能到达的车位置
+ * - 按需请求地图；本阶段不使用相机 CAR 位姿修正里程计
  * - 收到有效地图后切换到规划阶段
  */
 static void handle_wait_camera_data(void)
 {
-    float cam_x_m = 0.0f;
-    float cam_y_m = 0.0f;
-
-    if (g_control_use_followup_vision_localization)
-    {
-        if (car_pose_updated)
-        {
-            car_pose_updated = false;
-            if (get_camera_position_meter(&cam_x_m, &cam_y_m))
-            {
-                /* 等地图阶段若拿到新位置，顺带轻量同步一次里程计；方向仍使用发车基准。 */
-                path_follow_reset_pose(cam_x_m,
-                                       cam_y_m,
-                                       map_dir_to_yaw_deg(CONTROL_MAP_DIR_RIGHT));
-                BlueSerial_ReportPosition();
-            }
-        }
-    }
-    else
-    {
-        /* 后续视觉修正关闭时丢弃旧 CAR 更新标志，避免重新开启后误吃关闭期间的缓存帧。 */
-        car_pose_updated = false;
-    }
+    /* 丢弃等待地图期间到达的 CAR 更新，避免旧帧被后续定位流程使用。 */
+    car_pose_updated = false;
 
     if (map_data_ready && map_frame_count > 0U)
     {
@@ -3127,14 +3520,12 @@ static uint8 load_identify_path_for_execution(void)
 static void finish_identify_rotation(void)
 {
     g_identify_rotate_started = 0U;
-    g_identify_near_half_step_started = 0U;
     reset_identify_recognition_wait();
 }
 
-static void enter_identify_pre_recognition_state(void)
+static void enter_identify_recognition_state(void)
 {
-    g_identify_near_half_step_started = 0U;
-    g_identify_exec_state = CONTROL_IDENTIFY_EXEC_NEAR_HALF_STEP;
+    g_identify_exec_state = CONTROL_IDENTIFY_EXEC_DO_RECOGNIZE;
 }
 
 static void finish_current_identify_target(const control_identify_target_t *target)
@@ -3158,7 +3549,6 @@ static void finish_current_identify_target(const control_identify_target_t *targ
         g_identify_target_cursor++;
     }
 
-    g_identify_near_half_step_started = 0U;
     if (g_identify_target_cursor < g_identify_target_count)
     {
         g_identify_exec_state = CONTROL_IDENTIFY_EXEC_ROTATE_TO_TARGET;
@@ -3258,27 +3648,52 @@ static void handle_identify_execute_path(void)
             }
             g_identify_segment_map_event_applied = 1U;
         }
+
+        /* 炸弹推动发生在识别路径内，不会进入普通推箱分段；到达爆炸点后单独校正。 */
+        if (g_control_checkpoint_vision_localization_enabled &&
+            (g_exec_path[endpoint_idx].id & BOMB_EXPLOSION) != 0U &&
+            !g_identify_checkpoint_localized)
+        {
+            begin_checkpoint_visual_localization(0U);
+            if (!process_checkpoint_visual_localization())
+            {
+                return;
+            }
+            g_identify_checkpoint_localized = 1U;
+        }
+
         if (g_identify_endpoint_need_action[g_identify_endpoint_cursor])
         {
+            if (g_identify_target_count == 0U)
+            {
+                g_identify_targets_collected_at_endpoint =
+                    collect_identify_targets_on_exec_point(&g_exec_path[endpoint_idx]);
+            }
+
             if (g_identify_target_count > 0U)
             {
-                if (g_control_identify_prerotate_enabled)
+                /* 每个识别驻车点只定位一次，多目标原地转向不会重复请求 CARPOS。 */
+                if (g_control_checkpoint_vision_localization_enabled &&
+                    !g_identify_checkpoint_localized)
                 {
-                    enter_identify_pre_recognition_state();
+                    begin_checkpoint_visual_localization(0U);
+                    if (!process_checkpoint_visual_localization())
+                    {
+                        return;
+                    }
+                    g_identify_checkpoint_localized = 1U;
+                }
+
+                if (g_control_identify_prerotate_enabled &&
+                    !g_identify_targets_collected_at_endpoint)
+                {
+                    enter_identify_recognition_state();
                 }
                 else
                 {
                     g_identify_rotate_started = 0U;
                     g_identify_exec_state = CONTROL_IDENTIFY_EXEC_ROTATE_TO_TARGET;
                 }
-                return;
-            }
-
-            if (collect_identify_targets_on_exec_point(&g_exec_path[endpoint_idx]))
-            {
-                /* 兜底：若段前未拿到目标，则到点后仍按旧逻辑原地转向识别。 */
-                g_identify_rotate_started = 0U;
-                g_identify_exec_state = CONTROL_IDENTIFY_EXEC_ROTATE_TO_TARGET;
                 return;
             }
         }
@@ -3303,7 +3718,7 @@ static void handle_identify_execute_path(void)
         if (fabsf(yaw_err_deg) <= CONTROL_IDENTIFY_YAW_ALIGN_TOL_DEG)
         {
             finish_identify_rotation();
-            enter_identify_pre_recognition_state();
+            enter_identify_recognition_state();
             return;
         }
 
@@ -3323,50 +3738,7 @@ static void handle_identify_execute_path(void)
         }
 
         finish_identify_rotation();
-        enter_identify_pre_recognition_state();
-        break;
-
-    case CONTROL_IDENTIFY_EXEC_NEAR_HALF_STEP:
-        if (g_identify_target_cursor >= g_identify_target_count)
-        {
-            g_identify_near_half_step_started = 0U;
-            g_identify_exec_state = CONTROL_IDENTIFY_EXEC_ADVANCE_ENDPOINT;
-            return;
-        }
-
-        curr_target = &g_identify_targets[g_identify_target_cursor];
-        if (!curr_target->near_half_step_enabled)
-        {
-            g_identify_near_half_step_started = 0U;
-            g_identify_exec_state = CONTROL_IDENTIFY_EXEC_DO_RECOGNIZE;
-            return;
-        }
-
-        if (!g_identify_near_half_step_started)
-        {
-            /*
-             * 正常情况下识别段路径已经把端点替换成半格识别点；这里保留一次
-             * 到半格点的轻量修正，处理未提前收集目标或多目标切换时的补充移动。
-             * 识别串口请求必须等该位置修正结束后再发，避免车还在动时开始识别。
-             */
-            control_hold_yaw_closed_loop();
-            path_follow_start_pose_correction(curr_target->near_half_step_x_m,
-                                              curr_target->near_half_step_y_m);
-            car_go_flag = 1U;
-            car_stop_flag = 0U;
-            g_identify_near_half_step_started = 1U;
-            return;
-        }
-
-        path_follow_get_status(&st);
-        if (st.active)
-        {
-            return;
-        }
-
-        control_hold_yaw_closed_loop();
-        g_identify_near_half_step_started = 0U;
-        g_identify_exec_state = CONTROL_IDENTIFY_EXEC_DO_RECOGNIZE;
+        enter_identify_recognition_state();
         break;
 
     case CONTROL_IDENTIFY_EXEC_DO_RECOGNIZE:
@@ -3421,6 +3793,72 @@ static void handle_plan_path_stage(void)
     end_path_plan_pause();
 }
 
+static uint8 start_pushbox_segment(size_t start_idx)
+{
+    size_t end_idx;
+    size_t scan_idx;
+    size_t segment_steps;
+    size_t i;
+
+    if (start_idx >= g_exec_steps)
+    {
+        return 0U;
+    }
+
+    end_idx = g_exec_steps - 1U;
+    scan_idx = (start_idx == 0U) ? 0U : (start_idx + 1U);
+    for (; scan_idx < g_exec_steps; scan_idx++)
+    {
+        if ((g_exec_path[scan_idx].id & PUSH_END_POINT) != 0U)
+        {
+            end_idx = scan_idx;
+            break;
+        }
+    }
+
+    segment_steps = end_idx - start_idx + 1U;
+    if (segment_steps == 0U || segment_steps > MAX_CAR_PATH)
+    {
+        return 0U;
+    }
+    for (i = 0U; i < segment_steps; i++)
+    {
+        g_pushbox_segment_path[i] = g_exec_path[start_idx + i];
+    }
+
+    configure_bomb_pause_for_path(g_pushbox_segment_path,
+                                  segment_steps,
+                                  (start_idx > 0U) ? 1U : 0U);
+    control_hold_yaw_closed_loop();
+    path_follow_set_path(g_pushbox_segment_path, segment_steps);
+    g_pushbox_segment_end_idx = end_idx;
+    g_pushbox_segment_running = 1U;
+    g_pushbox_checkpoint_localized = 0U;
+    car_go_flag = 1U;
+    car_stop_flag = 0U;
+    return 1U;
+}
+
+static uint8 pushbox_endpoint_is_final_push(size_t endpoint_idx)
+{
+    size_t i;
+
+    if (endpoint_idx >= g_exec_steps ||
+        (g_exec_path[endpoint_idx].id & PUSH_END_POINT) == 0U)
+    {
+        return 0U;
+    }
+
+    for (i = endpoint_idx + 1U; i < g_exec_steps; i++)
+    {
+        if ((g_exec_path[i].id & PUSH_END_POINT) != 0U)
+        {
+            return 0U;
+        }
+    }
+    return 1U;
+}
+
 /**
  * @brief 下发阶段：根据当前大流程，把识别路径或推箱路径装载到 path_follow。
  *
@@ -3446,9 +3884,20 @@ static void handle_load_path_stage(void)
         return;
     }
 
-    configure_bomb_pause_for_path(g_exec_path, g_exec_steps, 0U);
-    control_hold_yaw_closed_loop();
-    path_follow_set_path(g_exec_path, g_exec_steps);
+    if (g_control_checkpoint_vision_localization_enabled)
+    {
+        if (!start_pushbox_segment(0U))
+        {
+            g_control_stage = CONTROL_STAGE_ERROR;
+            return;
+        }
+    }
+    else
+    {
+        configure_bomb_pause_for_path(g_exec_path, g_exec_steps, 0U);
+        control_hold_yaw_closed_loop();
+        path_follow_set_path(g_exec_path, g_exec_steps);
+    }
 
     car_go_flag = 1U;
     car_stop_flag = 0U;
@@ -3471,10 +3920,52 @@ static void handle_pushbox_execute_path(void)
     float return_yaw_deg = 0.0f;
     float yaw_err_deg = 0.0f;
 
-    path_follow_get_status(&st);
-    if (st.active)
+    if (g_control_checkpoint_vision_localization_enabled)
     {
-        return;
+        if (g_pushbox_segment_running)
+        {
+            path_follow_get_status(&st);
+            if (st.active)
+            {
+                return;
+            }
+            g_pushbox_segment_running = 0U;
+        }
+
+        if (g_pushbox_segment_end_idx >= g_exec_steps)
+        {
+            g_control_stage = CONTROL_STAGE_ERROR;
+            return;
+        }
+
+        if ((g_exec_path[g_pushbox_segment_end_idx].id & PUSH_END_POINT) != 0U &&
+            !g_pushbox_checkpoint_localized)
+        {
+            begin_checkpoint_visual_localization(
+                pushbox_endpoint_is_final_push(g_pushbox_segment_end_idx));
+            if (!process_checkpoint_visual_localization())
+            {
+                return;
+            }
+            g_pushbox_checkpoint_localized = 1U;
+        }
+
+        if (g_pushbox_segment_end_idx < (g_exec_steps - 1U))
+        {
+            if (!start_pushbox_segment(g_pushbox_segment_end_idx))
+            {
+                g_control_stage = CONTROL_STAGE_ERROR;
+            }
+            return;
+        }
+    }
+    else
+    {
+        path_follow_get_status(&st);
+        if (st.active)
+        {
+            return;
+        }
     }
 
     return_yaw_deg = map_dir_to_yaw_deg(CONTROL_MAP_DIR_RIGHT);
@@ -3520,7 +4011,27 @@ static void handle_pushbox_finished_stage(void)
             {
                 return;
             }
+
+            if (g_continuous_extra_depart_wait_required)
+            {
+                if (!g_continuous_extra_depart_wait_started)
+                {
+                    g_continuous_extra_depart_wait_started = 1U;
+                    g_continuous_extra_depart_wait_start_tick = g_control_tick_10ms;
+                    return;
+                }
+                if ((uint32)(g_control_tick_10ms -
+                             g_continuous_extra_depart_wait_start_tick) <
+                    CONTROL_CONTINUOUS_EXTRA_DEPART_WAIT_TICKS)
+                {
+                    return;
+                }
+            }
+
             g_continuous_stop_stable_count = 0U;
+            g_continuous_extra_depart_wait_required = 0U;
+            g_continuous_extra_depart_wait_started = 0U;
+            g_continuous_extra_depart_wait_start_tick = 0U;
             g_continuous_level_index++;
             start_current_level_launch();
             return;
@@ -3715,14 +4226,14 @@ uint8 control_get_diagonal_path_enabled(void)
     return path_get_diagonal_enabled();
 }
 
-void control_set_followup_vision_localization_enabled(uint8 enabled)
+void control_set_checkpoint_vision_localization_enabled(uint8 enabled)
 {
-    g_control_use_followup_vision_localization = (enabled != 0U) ? 1U : 0U;
+    g_control_checkpoint_vision_localization_enabled = (enabled != 0U) ? 1U : 0U;
 }
 
-uint8 control_get_followup_vision_localization_enabled(void)
+uint8 control_get_checkpoint_vision_localization_enabled(void)
 {
-    return g_control_use_followup_vision_localization;
+    return g_control_checkpoint_vision_localization_enabled;
 }
 
 void control_set_identify_prerotate_enabled(uint8 enabled)
@@ -3733,6 +4244,16 @@ void control_set_identify_prerotate_enabled(uint8 enabled)
 uint8 control_get_identify_prerotate_enabled(void)
 {
     return g_control_identify_prerotate_enabled;
+}
+
+void control_set_identify_id_fallback_enabled(uint8 enabled)
+{
+    g_control_identify_id_fallback_enabled = (enabled != 0U) ? 1U : 0U;
+}
+
+uint8 control_get_identify_id_fallback_enabled(void)
+{
+    return g_control_identify_id_fallback_enabled;
 }
 
 void control_set_continuous_levels_enabled(uint8 enabled)

@@ -28,6 +28,14 @@ static int heap_pos_3d[grid_size * 4];
 #define FAST_BOMB_MAX_WALLS_WHEN_REACHABLE    8
 #define FAST_BOMB_MAX_WALLS_WHEN_BLOCKED      18
 
+#if defined(GAME_LOGIC_PROFILE)
+uint32 g_profile_integrated_output_calls = 0U;
+uint32 g_profile_integrated_exists_calls = 0U;
+uint32 g_profile_astar_2d_calls = 0U;
+uint32 g_profile_astar_3d_calls = 0U;
+uint32 g_profile_bomb_shortcut_calls = 0U;
+#endif
+
 static int abs_i(int x)
 {
     return (x < 0) ? -x : x;
@@ -391,7 +399,9 @@ static inline int manhattan_distance_cells(Position p1, Position p2)
 }
 
 /* 2D A* 节点池。*/
+#ifdef ALGORITHM_USE_LEGACY_2D_ASTAR
 a_star_param a_star[grid_size];
+#endif
 
 /*
  * 2D A*：小车从起点到目标的路径规划
@@ -405,7 +415,95 @@ static int a_star_path_plan(int row_cnt, int col_cnt,
                             int allow_diagonal,
                             Position *out_path)
 {
+#ifdef GAME_LOGIC_PROFILE
+    g_profile_astar_2d_calls++;
+#endif
     (void)allow_diagonal;
+
+#ifndef ALGORITHM_USE_LEGACY_2D_ASTAR
+    /*
+     * Four-neighbour car moves all have identical cost. Breadth-first search
+     * therefore preserves the optimal step count while removing the binary
+     * heap overhead that dominates bomb-heavy maps.
+     */
+    if (start.row >= row_cnt || start.col >= col_cnt)
+        return -1;
+    if (target.row >= row_cnt || target.col >= col_cnt)
+        return -1;
+
+    {
+        uint8_t grid[grid_size];
+        uint16_t queue[grid_size];
+        uint8_t distance[grid_size];
+        int16_t parent[grid_size];
+        int queue_head = 0;
+        int queue_tail = 0;
+        int start_index = start.row * col_cnt + start.col;
+        int target_index = target.row * col_cnt + target.col;
+        const int dir_row[] = {-1, 1, 0, 0};
+        const int dir_col[] = {0, 0, -1, 1};
+
+        grid_build(row_cnt, col_cnt, obstacles, obstacles_cnt,
+                   bombs, bombs_cnt, boxes, boxes_cnt, grid);
+        memset(distance, 0, sizeof(distance));
+
+        if (out_path)
+            parent[start_index] = -1;
+        distance[start_index] = 1U;
+        queue[queue_tail++] = (uint16_t)start_index;
+
+        while (queue_head < queue_tail)
+        {
+            int current_index = (int)queue[queue_head++];
+            int r = current_index / col_cnt;
+            int c = current_index % col_cnt;
+
+            if (current_index == target_index)
+            {
+                int path_len = (int)distance[current_index];
+                if (out_path)
+                {
+                    int curr = current_index;
+                    int out_index = path_len - 1;
+                    while (curr != -1 && out_index >= 0)
+                    {
+                        out_path[out_index].row = (uint8)(curr / col_cnt);
+                        out_path[out_index].col = (uint8)(curr % col_cnt);
+                        out_path[out_index].id = 0;
+                        out_index--;
+                        curr = (int)parent[curr];
+                    }
+                }
+                return path_len;
+            }
+
+            for (int i = 0; i < 4; i++)
+            {
+                int nr = r + dir_row[i];
+                int nc = c + dir_col[i];
+                int neighbor_index;
+
+                if (nr < 0 || nr >= row_cnt || nc < 0 || nc >= col_cnt)
+                    continue;
+                neighbor_index = nr * col_cnt + nc;
+                if (distance[neighbor_index] != 0U)
+                    continue;
+                if (check_obstacle(grid, col_cnt, nr, nc) ||
+                    (grid[neighbor_index] & BOX))
+                    continue;
+                if (nr == (int)g_car_forbidden_cell.row &&
+                    nc == (int)g_car_forbidden_cell.col)
+                    continue;
+
+                if (out_path)
+                    parent[neighbor_index] = (int16_t)current_index;
+                distance[neighbor_index] = (uint8_t)(distance[current_index] + 1U);
+                queue[queue_tail++] = (uint16_t)neighbor_index;
+            }
+        }
+    }
+    return -1;
+#else
 
     // 校验起点/目标
     if (start.row >= row_cnt || start.col >= col_cnt)
@@ -525,6 +623,80 @@ static int a_star_path_plan(int row_cnt, int col_cnt,
         }
     }
     return -1; // 未找到路径
+#endif
+}
+
+/* Resolve every useful face change for one 3D state with one BFS. */
+static void car_walk_lengths_to_box_faces(int row_cnt, int col_cnt,
+                                          const uint8_t *static_grid,
+                                          Position start,
+                                          int box_row, int box_col,
+                                          uint8_t requested_faces,
+                                          uint8_t *face_walk_len)
+{
+    uint8_t distance[grid_size];
+    uint16_t queue[grid_size];
+    int queue_head = 0;
+    int queue_tail = 0;
+    const int walk_dir_row[] = {-1, 1, 0, 0};
+    const int walk_dir_col[] = {0, 0, -1, 1};
+    const int push_dir_row[] = {1, -1, 0, 0};
+    const int push_dir_col[] = {0, 0, 1, -1};
+
+    memset(face_walk_len, 0, 4U * sizeof(face_walk_len[0]));
+    if (requested_faces == 0U || start.row >= row_cnt || start.col >= col_cnt)
+        return;
+
+#ifdef GAME_LOGIC_PROFILE
+    g_profile_astar_2d_calls++;
+#endif
+    memset(distance, 0, sizeof(distance));
+    distance[(int)start.row * col_cnt + (int)start.col] = 1U;
+    queue[queue_tail++] = (uint16_t)((int)start.row * col_cnt + (int)start.col);
+
+    while (queue_head < queue_tail && requested_faces != 0U)
+    {
+        int current_index = (int)queue[queue_head++];
+        int r = current_index / col_cnt;
+        int c = current_index % col_cnt;
+
+        for (int face = 0; face < 4; face++)
+        {
+            uint8_t face_bit = (uint8_t)(1U << face);
+            if ((requested_faces & face_bit) != 0U &&
+                r == box_row - push_dir_row[face] &&
+                c == box_col - push_dir_col[face])
+            {
+                face_walk_len[face] = distance[current_index];
+                requested_faces &= (uint8_t)~face_bit;
+            }
+        }
+        if (requested_faces == 0U)
+            break;
+
+        for (int i = 0; i < 4; i++)
+        {
+            int nr = r + walk_dir_row[i];
+            int nc = c + walk_dir_col[i];
+            int neighbor_index;
+
+            if (nr < 0 || nr >= row_cnt || nc < 0 || nc >= col_cnt)
+                continue;
+            neighbor_index = nr * col_cnt + nc;
+            if (distance[neighbor_index] != 0U)
+                continue;
+            if (check_obstacle((uint8_t *)static_grid, col_cnt, nr, nc) ||
+                (static_grid[neighbor_index] & BOX) ||
+                (nr == box_row && nc == box_col))
+                continue;
+            if (nr == (int)g_car_forbidden_cell.row &&
+                nc == (int)g_car_forbidden_cell.col)
+                continue;
+
+            distance[neighbor_index] = (uint8_t)(distance[current_index] + 1U);
+            queue[queue_tail++] = (uint16_t)neighbor_index;
+        }
+    }
 }
 
 /*
@@ -653,6 +825,13 @@ static void heap_update_3d(binary_heap_3d *heap, int node_index)
  *   COST_REORIENT_PENALTY 约束频繁换向。
  * - 输出：返回完整"小车路径"，不是仅箱子轨迹。
  */
+static int push_geometry_reachable(int row_cnt, int col_cnt,
+                                   const Position *obstacles, int obstacles_cnt,
+                                   const Position *bombs, int bombs_cnt,
+                                   const Position *boxes, int boxes_cnt,
+                                   int moving_box_index,
+                                   Position start, Position target);
+
 int a_star_path_plan_3d(int row_cnt, int col_cnt,
                         const Position *obstacles, int obstacles_cnt,
                         const Position *bombs, int bombs_cnt,
@@ -663,6 +842,9 @@ int a_star_path_plan_3d(int row_cnt, int col_cnt,
                         Position *full_car_path,
                         Position *best_target_out)
 {
+#ifdef GAME_LOGIC_PROFILE
+    g_profile_astar_3d_calls++;
+#endif
     const int COST_WALK = 10;
     const int COST_PUSH = 50;
     const int COST_REORIENT_PENALTY = 30;
@@ -672,8 +854,30 @@ int a_star_path_plan_3d(int row_cnt, int col_cnt,
         local_boxes[i] = boxes[i];
     Position box_start = local_boxes[box_index];
 
+    {
+        int geometry_possible = 0;
+        for (int target_index = 0; target_index < targets_cnt; target_index++)
+        {
+            if (push_geometry_reachable(row_cnt, col_cnt,
+                                        obstacles, obstacles_cnt,
+                                        bombs, bombs_cnt,
+                                        local_boxes, boxes_cnt,
+                                        box_index,
+                                        box_start, targets[target_index]))
+            {
+                geometry_possible = 1;
+                break;
+            }
+        }
+        if (!geometry_possible)
+            return -1;
+    }
+
     uint8_t grid[grid_size];
+    uint8_t car_static_grid[grid_size];
     grid_build(row_cnt, col_cnt, obstacles, obstacles_cnt, bombs, bombs_cnt, local_boxes, boxes_cnt, grid);
+    memcpy(car_static_grid, grid, sizeof(car_static_grid));
+    car_static_grid[(int)box_start.row * col_cnt + (int)box_start.col] &= (uint8_t)~BOX;
 
     memset(a_star_3d, 0, sizeof(a_star_3d));
 
@@ -831,8 +1035,45 @@ int a_star_path_plan_3d(int row_cnt, int col_cnt,
             }
         }
         // 将小车重新定位到另一个推面，不移动箱子
+        uint8_t requested_reorient_faces = 0U;
+        uint8_t reorient_walk_len[4];
+        Position reorient_car_from = {row - dir_row_3d[face], col - dir_col_3d[face]};
+
+        local_boxes[box_index] = (Position){row, col};
+        for (int candidate_face = 0; candidate_face < 4; candidate_face++)
+        {
+            int candidate_index;
+            int candidate_row;
+            int candidate_col;
+
+            if (candidate_face == face)
+                continue;
+            candidate_index = (row * col_cnt + col) * 4 + candidate_face;
+            if (a_star_3d[candidate_index].open_or_close == 2)
+                continue;
+            candidate_row = row - dir_row_3d[candidate_face];
+            candidate_col = col - dir_col_3d[candidate_face];
+            if (candidate_row < 0 || candidate_row >= row_cnt ||
+                candidate_col < 0 || candidate_col >= col_cnt)
+                continue;
+            if (check_push_destination_blocked(grid, row_cnt, col_cnt,
+                                               local_boxes, boxes_cnt,
+                                               box_index,
+                                               candidate_row, candidate_col))
+                continue;
+            requested_reorient_faces |= (uint8_t)(1U << candidate_face);
+        }
+        car_walk_lengths_to_box_faces(row_cnt, col_cnt,
+                                      car_static_grid,
+                                      reorient_car_from,
+                                      row, col,
+                                      requested_reorient_faces,
+                                      reorient_walk_len);
+
         for (int next_face = 0; next_face < 4; next_face++)
         {
+            if ((requested_reorient_faces & (uint8_t)(1U << next_face)) == 0U)
+                continue;
             if (next_face == face)
                 continue; // 跳过相同方向
 
@@ -854,14 +1095,9 @@ int a_star_path_plan_3d(int row_cnt, int col_cnt,
                                                target_face_row, target_face_col))
                 continue;
 
-            Position car_from = {row - dir_row_3d[face], col - dir_col_3d[face]};
-
-            int walk_len = a_star_path_plan(row_cnt, col_cnt,
-                                            obstacles, obstacles_cnt, bombs, bombs_cnt,
-                                            local_boxes, boxes_cnt,
-                                            car_from, (Position){target_face_row, target_face_col},
-                                            1,
-                                            0);
+            int walk_len = (int)reorient_walk_len[next_face];
+            if (walk_len == 0)
+                walk_len = -1;
 
             if (walk_len >= 0)
             {
@@ -1080,6 +1316,69 @@ static void annotate_path_special_ids(Position *path, int path_len, int bomb_eve
  * Phase1：把 bomb_index 对应炸弹当作可推对象，推到 wall_target；
  * Phase2：在爆破后的新地图上继续推目标箱子到目标点；
  * 成功时返回两阶段总步数，并输出拼接后的完整小车路径。 */
+/* Cheap necessary condition for a movable object to reach a cell.  It ignores
+ * whether the car can walk between successive push faces, so a rejection is
+ * conclusive while an acceptance is intentionally optimistic. */
+static int push_geometry_reachable(int row_cnt, int col_cnt,
+                                   const Position *obstacles, int obstacles_cnt,
+                                   const Position *bombs, int bombs_cnt,
+                                   const Position *boxes, int boxes_cnt,
+                                   int moving_box_index,
+                                   Position start, Position target)
+{
+    uint8_t grid[grid_size];
+    uint8_t visited[grid_size];
+    uint16_t queue[grid_size];
+    int queue_head = 0;
+    int queue_tail = 0;
+    const int dir_row[] = {1, -1, 0, 0};
+    const int dir_col[] = {0, 0, 1, -1};
+
+    if (start.row >= row_cnt || start.col >= col_cnt ||
+        target.row >= row_cnt || target.col >= col_cnt)
+        return 0;
+    grid_build(row_cnt, col_cnt, obstacles, obstacles_cnt,
+               bombs, bombs_cnt, boxes, boxes_cnt, grid);
+    memset(visited, 0, sizeof(visited));
+    visited[(int)start.row * col_cnt + (int)start.col] = 1U;
+    queue[queue_tail++] = (uint16_t)((int)start.row * col_cnt + (int)start.col);
+
+    while (queue_head < queue_tail)
+    {
+        int current_index = (int)queue[queue_head++];
+        int row = current_index / col_cnt;
+        int col = current_index % col_cnt;
+
+        if (row == (int)target.row && col == (int)target.col)
+            return 1;
+
+        for (int direction = 0; direction < 4; direction++)
+        {
+            int next_row = row + dir_row[direction];
+            int next_col = col + dir_col[direction];
+            int support_row = row - dir_row[direction];
+            int support_col = col - dir_col[direction];
+            int next_index;
+
+            if (check_push_destination_blocked(grid, row_cnt, col_cnt,
+                                               boxes, boxes_cnt,
+                                               moving_box_index,
+                                               next_row, next_col) ||
+                check_push_destination_blocked(grid, row_cnt, col_cnt,
+                                               boxes, boxes_cnt,
+                                               moving_box_index,
+                                               support_row, support_col))
+                continue;
+            next_index = next_row * col_cnt + next_col;
+            if (visited[next_index] != 0U)
+                continue;
+            visited[next_index] = 1U;
+            queue[queue_tail++] = (uint16_t)next_index;
+        }
+    }
+    return 0;
+}
+
 int evaluate_bomb_shortcut(int row_cnt, int col_cnt,
                            const Position *obstacles, int obstacles_cnt,
                            const Position *bombs, int bombs_cnt,
@@ -1095,6 +1394,9 @@ int evaluate_bomb_shortcut(int row_cnt, int col_cnt,
                            Position *out_box_target,
                            int *out_bomb_event_index)
 {
+#ifdef GAME_LOGIC_PROFILE
+    g_profile_bomb_shortcut_calls++;
+#endif
     // 把炸弹加入箱子数组进行 A* 计算
     Position temp_boxes[MAX_BOXES + 1];
     for (int i = 0; i < boxes_cnt; i++)
@@ -1187,6 +1489,9 @@ int integrated_path_exists(int row_cnt, int col_cnt,
                            int box_index,
                            Position car_start)
 {
+#ifdef GAME_LOGIC_PROFILE
+    g_profile_integrated_exists_calls++;
+#endif
     Position simple_target;
     int simple_len;
 
@@ -1395,6 +1700,9 @@ int integrated_path_output(int row_cnt, int col_cnt,
                            Position car_start,
                            path_plan_result *result)
 {
+#ifdef GAME_LOGIC_PROFILE
+    g_profile_integrated_output_calls++;
+#endif
     if (!result)
         return -1;
     /* 初始化输出结构体，默认不可达。 */

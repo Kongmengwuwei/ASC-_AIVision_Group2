@@ -37,9 +37,8 @@
 #include <stdio.h>
 #include <string.h>
 
-#define PIT_PRIORITY_0 (PIT_IRQn)
-#define PIT_PRIORITY_1 (PIT_IRQn)
-#define PIT_PRIORITY_2 (PIT_IRQn)
+/* RT1064 的四个 PIT 通道共用同一个 PIT_IRQn，优先级只能统一设置一次。 */
+#define PIT_SHARED_IRQ_PRIORITY 2U
 
 int main(void)
 {
@@ -67,15 +66,13 @@ int main(void)
   path_follow_init(GRID_SIZE_M, (float)pulse_per_meter);
 
   // Interrupt initialization.
-  pit_ms_init(PIT_CH0, 20);                  // PIT0 periodic interrupt: 20 ms.
-  interrupt_set_priority(PIT_PRIORITY_0, 2); // PIT0 interrupt priority.
-  pit_ms_init(PIT_CH1, 10);                  // PIT1 periodic interrupt: 10 ms.
-  interrupt_set_priority(PIT_PRIORITY_1, 1); // PIT1 interrupt priority.
-  pit_ms_init(PIT_CH2, 2);                   // PIT2 periodic interrupt: 2 ms.
-  interrupt_set_priority(PIT_PRIORITY_2, 0); // PIT2 interrupt priority.
+  pit_ms_init(PIT_CH0, 20);                                // PIT0 periodic interrupt: 20 ms.
+  pit_ms_init(PIT_CH1, 10);                                // PIT1 periodic interrupt: 10 ms.
+  pit_ms_init(PIT_CH2, 2);                                 // PIT2 periodic interrupt: 2 ms.
+  interrupt_set_priority(PIT_IRQn, PIT_SHARED_IRQ_PRIORITY); // Shared PIT interrupt priority.
   interrupt_set_priority(LPUART1_IRQn, 3);   // UART1 interrupt priority.
   interrupt_set_priority(LPUART4_IRQn, 8);   // UART4 vision recognition interrupt priority.
-  interrupt_set_priority(LPUART8_IRQn, 8);   // UART8 Bluetooth/debug serial interrupt priority.
+  /* UART8 priority and RX interrupt state are owned by BlueSerial. */
   interrupt_global_enable(0);
 
   control_init();

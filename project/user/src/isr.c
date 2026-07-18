@@ -49,27 +49,33 @@ void CSI_IRQHandler(void)
 
 void PIT_IRQHandler(void)
 {
+    /*
+     * PIT0/1/2 share one IRQ. Service the shortest-period, most timing-sensitive
+     * attitude task first, followed by chassis control and finally key scan.
+     * Clear each flag before its handler so a new period can pend another IRQ
+     * while the current handler is still running.
+     */
+    if(pit_flag_get(PIT_CH2))
+    {
+        pit_flag_clear(PIT_CH2);
+        extern void pit_2_handler(void);
+        pit_2_handler();
+    }
+
+    if(pit_flag_get(PIT_CH1))
+    {
+        pit_flag_clear(PIT_CH1);
+        extern void pit_1_handler(void);
+        pit_1_handler();
+    }
+
     if(pit_flag_get(PIT_CH0))
     {
 		extern void pit_0_handler (void);
-		pit_0_handler();
         pit_flag_clear(PIT_CH0);
+		pit_0_handler();
     }
-    
-    if(pit_flag_get(PIT_CH1))
-    {
-        extern void pit_1_handler(void);
-        pit_1_handler();
-        pit_flag_clear(PIT_CH1);
-    }
-    
-    if(pit_flag_get(PIT_CH2))
-    {
-        extern void pit_2_handler(void);
-        pit_2_handler();
-        pit_flag_clear(PIT_CH2);
-    }
-    
+
     if(pit_flag_get(PIT_CH3))
     {
         pit_flag_clear(PIT_CH3);

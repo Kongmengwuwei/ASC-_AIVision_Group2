@@ -96,6 +96,32 @@ const char map_text6[] =
     "..............\n"
     "T.......#.....\n";
 
+/* Imported from 1-3.txt. Source legend: .=target, $=box, *=bomb, -=empty. */
+const char map_text7[] =
+    "..............\n"
+    "..##.###......\n"
+    "..#...#..#..#.\n"
+    "..D#..#.#.TB.#\n"
+    "...#.#T.T.TB.#\n"
+    "C..#....B.TT..\n"
+    "#..#.B.......#\n"
+    "..#...B.B.....\n"
+    "..##..#..#....\n"
+    "..............\n";
+
+/* Imported from 2-3.txt. Source legend: .=target, $=box, *=bomb, -=empty. */
+const char map_text8[] =
+    "..............\n"
+    "..##..#..#...#\n"
+    "..#..#..B....#\n"
+    "...#.......TT.\n"
+    ".#.#...TBT..#.\n"
+    "C..#.BT.#.B..#\n"
+    "..D#.T....B...\n"
+    "..#.....B....#\n"
+    "..##.#..#.#.#.\n"
+    "..............\n";
+
 const MapPresetTextConfig map_preset_texts[] = {
     {"map0", map_text0, MAP_PRESET_PLAN_MODE1, 0.0f, 0, 0U, 0, 0U},
     {"map1", map_text1, MAP_PRESET_PLAN_MODE2, 0.0f, 0, 0U, 0, 0U},
@@ -104,6 +130,8 @@ const MapPresetTextConfig map_preset_texts[] = {
     {"map4", map_text4, MAP_PRESET_PLAN_MODE2, 0.0f, 0, 0U, 0, 0U},
     {"map5", map_text5, MAP_PRESET_PLAN_MODE2, 0.0f, 0, 0U, 0, 0U},
     {"map6", map_text6, MAP_PRESET_PLAN_MODE2, 0.0f, 0, 0U, 0, 0U},
+    {"map7", map_text7, MAP_PRESET_PLAN_MODE2, 0.0f, 0, 0U, 0, 0U},
+    {"map8", map_text8, MAP_PRESET_PLAN_MODE2, 0.0f, 0, 0U, 0, 0U},
 };
 
 const size_t Map_preset_count = sizeof(map_preset_texts) / sizeof(map_preset_texts[0]);

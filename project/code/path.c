@@ -13,6 +13,27 @@
 #define PATH_DYNAMIC_OBJECT_NONE 0U
 #define PATH_DYNAMIC_OBJECT_BOX  1U
 #define PATH_DYNAMIC_OBJECT_BOMB 2U
+#define PATH_IDENTIFY_OBJECT_MASK_CAPACITY 16U
+#define PATH_IDENTIFY_DISTANCE_EPSILON 0.0001f
+/* 防止异常超长输入触发候选验证的平方级开销；正常 10x14 识别路线远低于该值。 */
+#define PATH_IDENTIFY_POSTPROCESS_MAX_RAW_STEPS (MAP_ROWS * MAP_COLS * 2U)
+
+typedef struct
+{
+    uint16 box_mask;
+    uint16 target_mask;
+    uint16 far_box_mask;
+    uint16 far_target_mask;
+} path_identify_event_t;
+
+typedef struct
+{
+    uint16 box_mask;
+    uint16 target_mask;
+    uint16 near_count;
+    uint16 far_count;
+    uint16 marker_count;
+} path_identify_metrics_t;
 
 /* 以下缓冲只在 path_build_exec_from_planner() 中使用。
  * 做成静态全局，是为了避免在嵌入式栈上临时申请较大的 DP 表。 */
@@ -23,12 +44,15 @@ static uint16 s_rebuild_indices[MAX_CAR_PATH] = {0U};
 static uint16 s_mandatory_prefix[MAX_CAR_PATH + 1U] = {0U};
 static uint16 s_push_edge_prefix[MAX_CAR_PATH + 1U] = {0U};
 static uint16 s_last_required_before[MAX_CAR_PATH] = {0U};
+static Position s_identify_candidate_exec[PATH_IDENTIFY_POSTPROCESS_MAX_RAW_STEPS] = {{0}};
 static Position s_safe_relocation_raw_path[PATH_SAFE_RELOCATION_MAX_POINTS] = {{0}};
 static path_map_snapshot_t s_stage_maps[PATH_STAGE_SNAPSHOT_CAPACITY];
 static uint8 s_raw_stage_index[MAX_CAR_PATH] = {0U};
 static uint8 s_stage_model_valid = 0U;
 /* 运行期开关：1 允许动态规划选择斜线捷径，0 时只保留水平/竖直执行段。 */
 static uint8 g_path_diagonal_enabled = 1U;
+/* 识别路径默认启用“既有路径上的一格识别替换”。 */
+static uint8 g_path_identify_near_postprocess_enabled = 1U;
 
 void path_remap_exec_point(Position *p)
 {
@@ -78,6 +102,16 @@ void path_set_diagonal_enabled(uint8 enabled)
 uint8 path_get_diagonal_enabled(void)
 {
     return g_path_diagonal_enabled;
+}
+
+void path_set_identify_near_postprocess_enabled(uint8 enabled)
+{
+    g_path_identify_near_postprocess_enabled = (enabled != 0U) ? 1U : 0U;
+}
+
+uint8 path_get_identify_near_postprocess_enabled(void)
+{
+    return g_path_identify_near_postprocess_enabled;
 }
 
 static uint8 path_is_same_grid_cell(const Position *a, const Position *b)
@@ -1101,6 +1135,535 @@ static uint8 path_exec_segment_allowed(const Position *path,
                                            seg_end);
 }
 
+/* 对当前 s_raw_path 运行一次执行路径提取。识别事件后处理会反复调用它比较
+ * 基线和候选结果，因此把原来的 DP 主体集中在这里，保证评价与最终下发一致。 */
+static uint8 path_extract_exec_from_raw(size_t raw_steps,
+                                        const path_map_snapshot_t *current_map,
+                                        const path_map_snapshot_t *extra_map,
+                                        Position *exec_path,
+                                        size_t exec_capacity,
+                                        size_t *exec_steps)
+{
+    size_t i = 0U;
+    size_t j = 0U;
+    size_t rebuild_count = 0U;
+    size_t out_steps = 0U;
+    uint16 idx = 0U;
+
+    if (exec_steps != NULL)
+        *exec_steps = 0U;
+    if (raw_steps < 2U || raw_steps > MAX_CAR_PATH ||
+        current_map == NULL || exec_path == NULL || exec_steps == NULL ||
+        exec_capacity < 2U)
+    {
+        return 0U;
+    }
+
+    path_prepare_prefix(s_raw_path, raw_steps);
+    for (i = 0U; i < raw_steps; i++)
+    {
+        s_path_cost[i] = PATH_COST_INF;
+        s_prev_index[i] = PATH_INDEX_NONE;
+    }
+    s_path_cost[0] = 0.0f;
+
+    for (j = 1U; j < raw_steps; j++)
+    {
+        size_t first_candidate = 0U;
+        uint16 required_anchor = s_last_required_before[j];
+
+        if (required_anchor != PATH_INDEX_NONE)
+            first_candidate = (size_t)required_anchor;
+
+        for (i = first_candidate; i < j; i++)
+        {
+            float segment_cost;
+            float candidate_cost;
+
+            if (s_path_cost[i] >= PATH_COST_INF * 0.5f)
+                continue;
+            segment_cost = path_grid_segment_distance(&s_raw_path[i], &s_raw_path[j]);
+            candidate_cost = s_path_cost[i] + segment_cost;
+            if (candidate_cost >= s_path_cost[j])
+                continue;
+            if (!path_exec_segment_allowed(s_raw_path,
+                                           raw_steps,
+                                           current_map,
+                                           extra_map,
+                                           i,
+                                           j))
+            {
+                continue;
+            }
+            s_path_cost[j] = candidate_cost;
+            s_prev_index[j] = (uint16)i;
+        }
+    }
+
+    if (s_prev_index[raw_steps - 1U] == PATH_INDEX_NONE)
+        return 0U;
+
+    idx = (uint16)(raw_steps - 1U);
+    while (rebuild_count < MAX_CAR_PATH)
+    {
+        s_rebuild_indices[rebuild_count++] = idx;
+        if (idx == 0U)
+            break;
+        idx = s_prev_index[idx];
+        if (idx == PATH_INDEX_NONE)
+            return 0U;
+    }
+    if (rebuild_count < 2U || s_rebuild_indices[rebuild_count - 1U] != 0U)
+        return 0U;
+
+    memset(exec_path, 0, sizeof(Position) * exec_capacity);
+    for (i = 0U; i < rebuild_count; i++)
+    {
+        Position mapped = s_raw_path[s_rebuild_indices[rebuild_count - 1U - i]];
+        if (out_steps >= exec_capacity)
+            return 0U;
+        path_remap_exec_point(&mapped);
+        exec_path[out_steps++] = mapped;
+    }
+    *exec_steps = out_steps;
+    return 1U;
+}
+
+static float path_exec_total_distance(const Position *path, size_t count)
+{
+    size_t i;
+    float total = 0.0f;
+    if (path == NULL)
+        return PATH_COST_INF;
+    for (i = 1U; i < count; i++)
+        total += path_grid_segment_distance(&path[i - 1U], &path[i]);
+    return total;
+}
+
+static int32 path_identify_direction(const Position *stand, const Position *object)
+{
+    int32 d_row;
+    int32 d_col;
+    if (stand == NULL || object == NULL)
+        return -1;
+    d_row = (int32)object->row - (int32)stand->row;
+    d_col = (int32)object->col - (int32)stand->col;
+    if (d_row < 0 && d_col == 0) return 0;
+    if (d_row > 0 && d_col == 0) return 1;
+    if (d_row == 0 && d_col < 0) return 2;
+    if (d_row == 0 && d_col > 0) return 3;
+    return -1;
+}
+
+static uint8 path_identify_view_distance(const path_map_snapshot_t *stage_map,
+                                         const Position *stand,
+                                         const Position *object)
+{
+    int32 d_row;
+    int32 d_col;
+    int32 distance;
+    Position middle;
+
+    if (!path_snapshot_counts_valid(stage_map) ||
+        !path_is_map_cell_valid(stand) || !path_is_map_cell_valid(object))
+    {
+        return 0U;
+    }
+    d_row = (int32)object->row - (int32)stand->row;
+    d_col = (int32)object->col - (int32)stand->col;
+    distance = path_abs_i32(d_row) + path_abs_i32(d_col);
+    if ((distance != 1 && distance != 2) || (d_row != 0 && d_col != 0))
+        return 0U;
+    if (distance == 1)
+        return 1U;
+
+    middle = *stand;
+    middle.row = (uint8)((int32)middle.row + (d_row > 0 ? 1 : (d_row < 0 ? -1 : 0)));
+    middle.col = (uint8)((int32)middle.col + (d_col > 0 ? 1 : (d_col < 0 ? -1 : 0)));
+    middle.id = 0U;
+    return path_cell_has_blocker(stage_map, NULL,
+                                 middle.row, middle.col, 1U) ? 0U : 2U;
+}
+
+/* 与 Control.collect_identify_targets_on_exec_point() 保持一致：每个朝向只
+ * 收集尚未识别的最近物体；同距离时箱子因扫描顺序优先。 */
+static void path_identify_collect_at_marker(const path_map_snapshot_t *pre_map,
+                                            const path_map_snapshot_t *stage_map,
+                                            const Position *stand,
+                                            path_identify_metrics_t *metrics,
+                                            path_identify_event_t *event)
+{
+    int32 chosen_kind[4] = {-1, -1, -1, -1};
+    int32 chosen_index[4] = {-1, -1, -1, -1};
+    uint8 chosen_distance[4] = {3U, 3U, 3U, 3U};
+    size_t i;
+    int32 direction;
+
+    for (i = 0U; i < pre_map->boxes_count; i++)
+    {
+        uint16 bit = (uint16)(1UL << i);
+        uint8 distance;
+        if ((metrics->box_mask & bit) != 0U ||
+            path_find_position_index(stage_map->boxes_buf,
+                                     stage_map->boxes_count,
+                                     MAX_BOXES,
+                                     pre_map->boxes_buf[i].row,
+                                     pre_map->boxes_buf[i].col) < 0)
+        {
+            continue;
+        }
+        distance = path_identify_view_distance(stage_map, stand, &pre_map->boxes_buf[i]);
+        direction = path_identify_direction(stand, &pre_map->boxes_buf[i]);
+        if (distance != 0U && direction >= 0 &&
+            distance < chosen_distance[direction])
+        {
+            chosen_kind[direction] = 0;
+            chosen_index[direction] = (int32)i;
+            chosen_distance[direction] = distance;
+        }
+    }
+
+    for (i = 0U; i < pre_map->targets_count; i++)
+    {
+        uint16 bit = (uint16)(1UL << i);
+        uint8 distance;
+        if ((metrics->target_mask & bit) != 0U ||
+            path_find_position_index(stage_map->targets_buf,
+                                     stage_map->targets_count,
+                                     MAX_TARGETS,
+                                     pre_map->targets_buf[i].row,
+                                     pre_map->targets_buf[i].col) < 0)
+        {
+            continue;
+        }
+        distance = path_identify_view_distance(stage_map, stand, &pre_map->targets_buf[i]);
+        direction = path_identify_direction(stand, &pre_map->targets_buf[i]);
+        if (distance != 0U && direction >= 0 &&
+            distance < chosen_distance[direction])
+        {
+            chosen_kind[direction] = 1;
+            chosen_index[direction] = (int32)i;
+            chosen_distance[direction] = distance;
+        }
+    }
+
+    for (direction = 0; direction < 4; direction++)
+    {
+        int32 object_index = chosen_index[direction];
+        uint16 bit;
+        if (object_index < 0)
+            continue;
+        bit = (uint16)(1UL << object_index);
+        if (chosen_kind[direction] == 0)
+        {
+            metrics->box_mask |= bit;
+            if (event != NULL)
+                event->box_mask |= bit;
+            if (chosen_distance[direction] == 1U)
+                metrics->near_count++;
+            else
+            {
+                metrics->far_count++;
+                if (event != NULL)
+                    event->far_box_mask |= bit;
+            }
+        }
+        else
+        {
+            metrics->target_mask |= bit;
+            if (event != NULL)
+                event->target_mask |= bit;
+            if (chosen_distance[direction] == 1U)
+                metrics->near_count++;
+            else
+            {
+                metrics->far_count++;
+                if (event != NULL)
+                    event->far_target_mask |= bit;
+            }
+        }
+    }
+}
+
+static uint8 path_identify_simulate(size_t raw_steps,
+                                    const path_map_snapshot_t *pre_map,
+                                    size_t capture_index,
+                                    path_identify_metrics_t *metrics,
+                                    path_identify_event_t *captured_event)
+{
+    size_t i;
+    if (!s_stage_model_valid || pre_map == NULL || metrics == NULL ||
+        pre_map->boxes_count > PATH_IDENTIFY_OBJECT_MASK_CAPACITY ||
+        pre_map->targets_count > PATH_IDENTIFY_OBJECT_MASK_CAPACITY)
+    {
+        return 0U;
+    }
+    memset(metrics, 0, sizeof(*metrics));
+    if (captured_event != NULL)
+        memset(captured_event, 0, sizeof(*captured_event));
+
+    for (i = 0U; i < raw_steps; i++)
+    {
+        path_identify_event_t local_event;
+        path_identify_event_t *event = NULL;
+        uint8 stage_index;
+        if ((s_raw_path[i].id & IDENTIFICATION) == 0U)
+            continue;
+        stage_index = s_raw_stage_index[i];
+        if (stage_index >= PATH_STAGE_SNAPSHOT_CAPACITY)
+            return 0U;
+        metrics->marker_count++;
+        if (i == capture_index && captured_event != NULL)
+        {
+            memset(&local_event, 0, sizeof(local_event));
+            event = &local_event;
+        }
+        path_identify_collect_at_marker(pre_map,
+                                        &s_stage_maps[stage_index],
+                                        &s_raw_path[i],
+                                        metrics,
+                                        event);
+        if (event != NULL)
+            *captured_event = *event;
+    }
+    return 1U;
+}
+
+static uint8 path_identify_event_all_one_grid(const path_identify_event_t *event,
+                                              const path_map_snapshot_t *pre_map,
+                                              const Position *stand)
+{
+    size_t i;
+    if (event == NULL || pre_map == NULL || stand == NULL ||
+        (event->box_mask == 0U && event->target_mask == 0U))
+    {
+        return 0U;
+    }
+    for (i = 0U; i < pre_map->boxes_count; i++)
+    {
+        if ((event->box_mask & (uint16)(1UL << i)) != 0U &&
+            path_abs_i32((int32)stand->row - (int32)pre_map->boxes_buf[i].row) +
+            path_abs_i32((int32)stand->col - (int32)pre_map->boxes_buf[i].col) != 1)
+        {
+            return 0U;
+        }
+    }
+    for (i = 0U; i < pre_map->targets_count; i++)
+    {
+        if ((event->target_mask & (uint16)(1UL << i)) != 0U &&
+            path_abs_i32((int32)stand->row - (int32)pre_map->targets_buf[i].row) +
+            path_abs_i32((int32)stand->col - (int32)pre_map->targets_buf[i].col) != 1)
+        {
+            return 0U;
+        }
+    }
+    return 1U;
+}
+
+static uint8 path_identify_index_is_push_or_action(size_t index, size_t raw_steps)
+{
+    uint8 non_identify_required;
+    if (index >= raw_steps)
+        return 1U;
+    non_identify_required = (uint8)(s_raw_path[index].id &
+                                     (PATH_REQUIRED_EVENTS & (uint8)~IDENTIFICATION));
+    if (non_identify_required != 0U)
+        return 1U;
+    if (index > 0U && s_push_edge_prefix[index] != s_push_edge_prefix[index - 1U])
+        return 1U;
+    if (index + 1U < raw_steps &&
+        s_push_edge_prefix[index + 1U] != s_push_edge_prefix[index])
+    {
+        return 1U;
+    }
+    return 0U;
+}
+
+static uint8 path_identify_path_is_supported(size_t raw_steps)
+{
+    size_t i;
+    uint8 has_identification = 0U;
+    for (i = 0U; i < raw_steps; i++)
+    {
+        if ((s_raw_path[i].id & IDENTIFICATION) != 0U)
+            has_identification = 1U;
+        /* 当前识别阶段只允许推炸弹；若未来引入识别/推箱交错，先保守关闭后处理。 */
+        if ((s_raw_path[i].id & PUSH_END_POINT) != 0U &&
+            (s_raw_path[i].id & BOMB_EXPLOSION) == 0U)
+        {
+            return 0U;
+        }
+    }
+    return has_identification;
+}
+
+/* 在不改变任何路径坐标的前提下移动 IDENTIFICATION 事件位。每个候选都要
+ * 通过完整识别重放和实际执行路径提取，任一安全/最短约束不满足即回退。 */
+static void path_optimize_identification_markers(size_t raw_steps,
+                                                 const path_map_snapshot_t *current_map,
+                                                 const path_map_snapshot_t *pre_map,
+                                                 Position *exec_path,
+                                                 size_t exec_capacity,
+                                                 size_t *exec_steps)
+{
+    path_identify_metrics_t required;
+    path_identify_metrics_t current;
+    float current_distance;
+    size_t pass;
+
+    if (!g_path_identify_near_postprocess_enabled || !s_stage_model_valid ||
+        raw_steps > PATH_IDENTIFY_POSTPROCESS_MAX_RAW_STEPS ||
+        pre_map == NULL || exec_path == NULL || exec_steps == NULL ||
+        pre_map->boxes_count > PATH_IDENTIFY_OBJECT_MASK_CAPACITY ||
+        pre_map->targets_count > PATH_IDENTIFY_OBJECT_MASK_CAPACITY ||
+        !path_identify_path_is_supported(raw_steps) ||
+        !path_identify_simulate(raw_steps, pre_map, MAX_CAR_PATH,
+                                &required, NULL) ||
+        required.far_count == 0U)
+    {
+        return;
+    }
+
+    current = required;
+    current_distance = path_exec_total_distance(exec_path, *exec_steps);
+    for (pass = 0U; pass < (size_t)(MAX_BOXES + MAX_TARGETS); pass++)
+    {
+        path_identify_metrics_t best_metrics = current;
+        float best_distance = current_distance;
+        size_t best_exec_steps = *exec_steps;
+        size_t best_from = MAX_CAR_PATH;
+        size_t best_to = MAX_CAR_PATH;
+        size_t i;
+
+        path_prepare_prefix(s_raw_path, raw_steps);
+        for (i = 0U; i < raw_steps; i++)
+        {
+            path_identify_event_t source_event;
+            path_identify_metrics_t replay;
+            size_t j;
+            if ((s_raw_path[i].id & IDENTIFICATION) == 0U ||
+                path_identify_index_is_push_or_action(i, raw_steps) ||
+                !path_identify_simulate(raw_steps, pre_map, i,
+                                        &replay, &source_event) ||
+                (source_event.far_box_mask == 0U &&
+                 source_event.far_target_mask == 0U))
+            {
+                continue;
+            }
+
+            for (j = 0U; j < raw_steps; j++)
+            {
+                uint8 old_from_id;
+                uint8 old_to_id;
+                path_identify_metrics_t candidate_metrics;
+                size_t candidate_exec_steps = 0U;
+                float candidate_distance;
+                uint8 candidate_better = 0U;
+
+                if (j == i || s_raw_stage_index[j] != s_raw_stage_index[i] ||
+                    path_identify_index_is_push_or_action(j, raw_steps) ||
+                    path_cell_has_blocker(&s_stage_maps[s_raw_stage_index[j]],
+                                          NULL,
+                                          s_raw_path[j].row,
+                                          s_raw_path[j].col,
+                                          1U) ||
+                    !path_identify_event_all_one_grid(&source_event,
+                                                      pre_map,
+                                                      &s_raw_path[j]))
+                {
+                    continue;
+                }
+
+                old_from_id = s_raw_path[i].id;
+                old_to_id = s_raw_path[j].id;
+                s_raw_path[i].id = (uint8)(s_raw_path[i].id & (uint8)~IDENTIFICATION);
+                s_raw_path[j].id = (uint8)(s_raw_path[j].id | IDENTIFICATION);
+
+                if (!path_identify_simulate(raw_steps, pre_map, MAX_CAR_PATH,
+                                            &candidate_metrics, NULL) ||
+                    candidate_metrics.box_mask != required.box_mask ||
+                    candidate_metrics.target_mask != required.target_mask ||
+                    candidate_metrics.marker_count > current.marker_count ||
+                    candidate_metrics.near_count <= current.near_count ||
+                    candidate_metrics.far_count >= current.far_count ||
+                    !path_extract_exec_from_raw(raw_steps,
+                                                current_map,
+                                                pre_map,
+                                                s_identify_candidate_exec,
+                                                PATH_IDENTIFY_POSTPROCESS_MAX_RAW_STEPS,
+                                                &candidate_exec_steps))
+                {
+                    s_raw_path[i].id = old_from_id;
+                    s_raw_path[j].id = old_to_id;
+                    continue;
+                }
+
+                candidate_distance = path_exec_total_distance(s_identify_candidate_exec,
+                                                               candidate_exec_steps);
+                if (candidate_exec_steps <= *exec_steps &&
+                    candidate_distance <= current_distance + PATH_IDENTIFY_DISTANCE_EPSILON)
+                {
+                    if (best_from == MAX_CAR_PATH ||
+                        candidate_metrics.near_count > best_metrics.near_count ||
+                        (candidate_metrics.near_count == best_metrics.near_count &&
+                         candidate_metrics.marker_count < best_metrics.marker_count) ||
+                        (candidate_metrics.near_count == best_metrics.near_count &&
+                         candidate_metrics.marker_count == best_metrics.marker_count &&
+                         candidate_exec_steps < best_exec_steps) ||
+                        (candidate_metrics.near_count == best_metrics.near_count &&
+                         candidate_metrics.marker_count == best_metrics.marker_count &&
+                         candidate_exec_steps == best_exec_steps &&
+                         candidate_distance < best_distance - PATH_IDENTIFY_DISTANCE_EPSILON))
+                    {
+                        candidate_better = 1U;
+                    }
+                }
+                if (candidate_better)
+                {
+                    best_from = i;
+                    best_to = j;
+                    best_metrics = candidate_metrics;
+                    best_exec_steps = candidate_exec_steps;
+                    best_distance = candidate_distance;
+                }
+                s_raw_path[i].id = old_from_id;
+                s_raw_path[j].id = old_to_id;
+            }
+        }
+
+        if (best_from == MAX_CAR_PATH || best_to == MAX_CAR_PATH)
+            break;
+
+        {
+            uint8 old_from_id = s_raw_path[best_from].id;
+            uint8 old_to_id = s_raw_path[best_to].id;
+            s_raw_path[best_from].id =
+                (uint8)(s_raw_path[best_from].id & (uint8)~IDENTIFICATION);
+            s_raw_path[best_to].id =
+                (uint8)(s_raw_path[best_to].id | IDENTIFICATION);
+            if (!path_extract_exec_from_raw(raw_steps,
+                                            current_map,
+                                            pre_map,
+                                            exec_path,
+                                            exec_capacity,
+                                            exec_steps))
+            {
+                s_raw_path[best_from].id = old_from_id;
+                s_raw_path[best_to].id = old_to_id;
+                (void)path_extract_exec_from_raw(raw_steps,
+                                                 current_map,
+                                                 pre_map,
+                                                 exec_path,
+                                                 exec_capacity,
+                                                 exec_steps);
+                break;
+            }
+        }
+        current = best_metrics;
+        current_distance = best_distance;
+    }
+}
+
 uint8 path_build_exec_from_planner(const Position *planner_path,
                                    size_t planner_steps,
                                    const path_map_snapshot_t *current_map,
@@ -1110,11 +1673,7 @@ uint8 path_build_exec_from_planner(const Position *planner_path,
                                    size_t *exec_steps)
 {
     size_t i = 0U;
-    size_t j = 0U;
     size_t raw_steps = 0U;
-    size_t rebuild_count = 0U;
-    size_t out_steps = 0U;
-    uint16 idx = 0U;
 
     if (exec_steps != NULL)
     {
@@ -1191,106 +1750,21 @@ uint8 path_build_exec_from_planner(const Position *planner_path,
                                      extra_map,
                                      current_map);
 
-    path_prepare_prefix(s_raw_path, raw_steps);
-
-    /* 第三步：动态规划求最短可执行路径。 */
-    for (i = 0U; i < raw_steps; i++)
-    {
-        s_path_cost[i] = PATH_COST_INF;
-        s_prev_index[i] = PATH_INDEX_NONE;
-    }
-    s_path_cost[0] = 0.0f;
-
-    for (j = 1U; j < raw_steps; j++)
-    {
-        size_t first_candidate = 0U;
-        uint16 required_anchor = s_last_required_before[j];
-
-        if (required_anchor != PATH_INDEX_NONE)
-        {
-            first_candidate = (size_t)required_anchor;
-        }
-
-        for (i = first_candidate; i < j; i++)
-        {
-            float segment_cost = 0.0f;
-            float candidate_cost = 0.0f;
-
-            if (s_path_cost[i] >= PATH_COST_INF * 0.5f)
-            {
-                continue;
-            }
-
-            /*
-             * 必经事件点已经把候选起点收窄到 last_required_before[j] 之后。
-             * 再先做代价下界剪枝，只有可能优于当前最优解的候选段才进入
-             * path_exec_segment_allowed() 的障碍/净空检查，降低长路径 DP 开销。
-             */
-            segment_cost = path_grid_segment_distance(&s_raw_path[i], &s_raw_path[j]);
-            candidate_cost = s_path_cost[i] + segment_cost;
-            if (candidate_cost >= s_path_cost[j])
-            {
-                continue;
-            }
-
-            if (!path_exec_segment_allowed(s_raw_path,
-                                           raw_steps,
-                                           current_map,
-                                           extra_map,
-                                           i,
-                                           j))
-            {
-                continue;
-            }
-
-            if (candidate_cost < s_path_cost[j])
-            {
-                s_path_cost[j] = candidate_cost;
-                s_prev_index[j] = (uint16)i;
-            }
-        }
-    }
-
-    if (s_prev_index[raw_steps - 1U] == PATH_INDEX_NONE)
+    if (!path_extract_exec_from_raw(raw_steps,
+                                    current_map,
+                                    extra_map,
+                                    exec_path,
+                                    exec_capacity,
+                                    exec_steps))
     {
         return 0U;
     }
-
-    /* 第四步：从终点反向重建被选中的原始路径点。 */
-    idx = (uint16)(raw_steps - 1U);
-    while (rebuild_count < MAX_CAR_PATH)
-    {
-        s_rebuild_indices[rebuild_count++] = idx;
-        if (idx == 0U)
-        {
-            break;
-        }
-        idx = s_prev_index[idx];
-        if (idx == PATH_INDEX_NONE)
-        {
-            return 0U;
-        }
-    }
-
-    if (rebuild_count < 2U ||
-        s_rebuild_indices[rebuild_count - 1U] != 0U)
-    {
-        return 0U;
-    }
-
-    /* 第五步：最终执行点 remap 到 path_follow 使用的执行坐标系。 */
-    for (i = 0U; i < rebuild_count; i++)
-    {
-        Position mapped = s_raw_path[s_rebuild_indices[rebuild_count - 1U - i]];
-        if (out_steps >= exec_capacity)
-        {
-            return 0U;
-        }
-        path_remap_exec_point(&mapped);
-        exec_path[out_steps++] = mapped;
-    }
-
-    *exec_steps = out_steps;
+    path_optimize_identification_markers(raw_steps,
+                                         current_map,
+                                         extra_map,
+                                         exec_path,
+                                         exec_capacity,
+                                         exec_steps);
     return 1U;
 }
 

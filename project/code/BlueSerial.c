@@ -972,7 +972,10 @@ static uint8 BlueSerial_StartPointTargetMove(void)
     return started;
 }
 
-static void BlueSerial_StartCenteredRelativeMove(float delta_x_m, float delta_y_m, float yaw_deg)
+static void BlueSerial_StartCenteredRelativeMove(float delta_x_m,
+                                                 float delta_y_m,
+                                                 float yaw_deg,
+                                                 uint8 segment_axis)
 {
     const float eps_m = 0.001f;
     float grid_m = BLUESERIAL_RELATIVE_GRID_M;
@@ -1015,7 +1018,11 @@ static void BlueSerial_StartCenteredRelativeMove(float delta_x_m, float delta_y_
 
     path_follow_reset_pose((float)center_cell * grid_m, (float)center_cell * grid_m, yaw_deg);
     path_follow_set_target_yaw(yaw_deg);
-    path_follow_set_path_with_grid(g_blueserial_relative_path, 2U, grid_m, 0U);
+    path_follow_set_path_with_grid_axis(g_blueserial_relative_path,
+                                        2U,
+                                        grid_m,
+                                        0U,
+                                        segment_axis);
 }
 
 static uint8 BlueSerial_StartConfiguredMove(void)
@@ -1026,6 +1033,7 @@ static uint8 BlueSerial_StartConfiguredMove(void)
     float position_m;
     float delta_x_m = 0.0f;
     float delta_y_m = 0.0f;
+    uint8 segment_axis = PATH_FOLLOW_AXIS_X;
 
     if (g_target_speed_cmps <= 0.0f || g_target_position_cm <= 0.0f)
     {
@@ -1046,21 +1054,25 @@ static uint8 BlueSerial_StartConfiguredMove(void)
         case BLUESERIAL_MOVE_FORWARD:
             delta_x_m = cosf(yaw_rad) * position_m;
             delta_y_m = sinf(yaw_rad) * position_m;
+            segment_axis = PATH_FOLLOW_AXIS_X;
             break;
 
         case BLUESERIAL_MOVE_BACKWARD:
             delta_x_m = -cosf(yaw_rad) * position_m;
             delta_y_m = -sinf(yaw_rad) * position_m;
+            segment_axis = PATH_FOLLOW_AXIS_X;
             break;
 
         case BLUESERIAL_MOVE_LEFT:
             delta_x_m = -sinf(yaw_rad) * position_m;
             delta_y_m = cosf(yaw_rad) * position_m;
+            segment_axis = PATH_FOLLOW_AXIS_Y;
             break;
 
         case BLUESERIAL_MOVE_RIGHT:
             delta_x_m = sinf(yaw_rad) * position_m;
             delta_y_m = -cosf(yaw_rad) * position_m;
+            segment_axis = PATH_FOLLOW_AXIS_Y;
             break;
 
         default:
@@ -1076,7 +1088,10 @@ static uint8 BlueSerial_StartConfiguredMove(void)
                                    g_target_position_cm,
                                    eulerAngle.yaw);
     BlueSerial_EnterPathMode();
-    BlueSerial_StartCenteredRelativeMove(delta_x_m, delta_y_m, eulerAngle.yaw);
+    BlueSerial_StartCenteredRelativeMove(delta_x_m,
+                                         delta_y_m,
+                                         eulerAngle.yaw,
+                                         segment_axis);
     interrupt_global_enable(primask);
     return 1U;
 }
@@ -2360,7 +2375,8 @@ static uint8 BlueSerial_SetSlider(const char *name, float value)
     {
         applied_value = BlueSerial_ClampFloat(value, 0.0f, BLUESERIAL_MAX_POSITION_KP);
         primask = interrupt_global_disable();
-        path_follow_set_position_pid_gains(applied_value, pid_stay.fKi, pid_stay.fKd);
+        path_follow_set_position_pid_gains_x(applied_value, pid_stay.fKi, pid_stay.fKd);
+        path_follow_set_position_pid_gains_y(applied_value, pid_stay_y.fKi, pid_stay_y.fKd);
         interrupt_global_enable(primask);
         BlueSerial_Printf("OK pos.kp=%.4f\r\n", applied_value);
         return 1U;
@@ -2369,7 +2385,8 @@ static uint8 BlueSerial_SetSlider(const char *name, float value)
     {
         applied_value = BlueSerial_ClampFloat(value, 0.0f, BLUESERIAL_MAX_POSITION_KI);
         primask = interrupt_global_disable();
-        path_follow_set_position_pid_gains(pid_stay.fKp, applied_value, pid_stay.fKd);
+        path_follow_set_position_pid_gains_x(pid_stay.fKp, applied_value, pid_stay.fKd);
+        path_follow_set_position_pid_gains_y(pid_stay_y.fKp, applied_value, pid_stay_y.fKd);
         interrupt_global_enable(primask);
         BlueSerial_Printf("OK pos.ki=%.4f\r\n", applied_value);
         return 1U;
@@ -2378,7 +2395,8 @@ static uint8 BlueSerial_SetSlider(const char *name, float value)
     {
         applied_value = BlueSerial_ClampFloat(value, 0.0f, BLUESERIAL_MAX_POSITION_KD);
         primask = interrupt_global_disable();
-        path_follow_set_position_pid_gains(pid_stay.fKp, pid_stay.fKi, applied_value);
+        path_follow_set_position_pid_gains_x(pid_stay.fKp, pid_stay.fKi, applied_value);
+        path_follow_set_position_pid_gains_y(pid_stay_y.fKp, pid_stay_y.fKi, applied_value);
         interrupt_global_enable(primask);
         BlueSerial_Printf("OK pos.kd=%.4f\r\n", applied_value);
         return 1U;
@@ -2394,6 +2412,84 @@ static uint8 BlueSerial_SetSlider(const char *name, float value)
         path_follow_set_position_speed_factor(applied_value);
         interrupt_global_enable(primask);
         BlueSerial_Printf("OK pos.envelope=%.3f\r\n", applied_value);
+        return 1U;
+    }
+    if (strcmp(name, "posx.kp") == 0 || strcmp(name, "position.x.kp") == 0)
+    {
+        applied_value = BlueSerial_ClampFloat(value, 0.0f, BLUESERIAL_MAX_POSITION_KP);
+        primask = interrupt_global_disable();
+        path_follow_set_position_pid_gains_x(applied_value, pid_stay.fKi, pid_stay.fKd);
+        interrupt_global_enable(primask);
+        BlueSerial_Printf("OK posx.kp=%.4f\r\n", applied_value);
+        return 1U;
+    }
+    if (strcmp(name, "posx.ki") == 0 || strcmp(name, "position.x.ki") == 0)
+    {
+        applied_value = BlueSerial_ClampFloat(value, 0.0f, BLUESERIAL_MAX_POSITION_KI);
+        primask = interrupt_global_disable();
+        path_follow_set_position_pid_gains_x(pid_stay.fKp, applied_value, pid_stay.fKd);
+        interrupt_global_enable(primask);
+        BlueSerial_Printf("OK posx.ki=%.4f\r\n", applied_value);
+        return 1U;
+    }
+    if (strcmp(name, "posx.kd") == 0 || strcmp(name, "position.x.kd") == 0)
+    {
+        applied_value = BlueSerial_ClampFloat(value, 0.0f, BLUESERIAL_MAX_POSITION_KD);
+        primask = interrupt_global_disable();
+        path_follow_set_position_pid_gains_x(pid_stay.fKp, pid_stay.fKi, applied_value);
+        interrupt_global_enable(primask);
+        BlueSerial_Printf("OK posx.kd=%.4f\r\n", applied_value);
+        return 1U;
+    }
+    if (strcmp(name, "posy.kp") == 0 || strcmp(name, "position.y.kp") == 0)
+    {
+        applied_value = BlueSerial_ClampFloat(value, 0.0f, BLUESERIAL_MAX_POSITION_KP);
+        primask = interrupt_global_disable();
+        path_follow_set_position_pid_gains_y(applied_value, pid_stay_y.fKi, pid_stay_y.fKd);
+        interrupt_global_enable(primask);
+        BlueSerial_Printf("OK posy.kp=%.4f\r\n", applied_value);
+        return 1U;
+    }
+    if (strcmp(name, "posy.ki") == 0 || strcmp(name, "position.y.ki") == 0)
+    {
+        applied_value = BlueSerial_ClampFloat(value, 0.0f, BLUESERIAL_MAX_POSITION_KI);
+        primask = interrupt_global_disable();
+        path_follow_set_position_pid_gains_y(pid_stay_y.fKp, applied_value, pid_stay_y.fKd);
+        interrupt_global_enable(primask);
+        BlueSerial_Printf("OK posy.ki=%.4f\r\n", applied_value);
+        return 1U;
+    }
+    if (strcmp(name, "posy.kd") == 0 || strcmp(name, "position.y.kd") == 0)
+    {
+        applied_value = BlueSerial_ClampFloat(value, 0.0f, BLUESERIAL_MAX_POSITION_KD);
+        primask = interrupt_global_disable();
+        path_follow_set_position_pid_gains_y(pid_stay_y.fKp, pid_stay_y.fKi, applied_value);
+        interrupt_global_enable(primask);
+        BlueSerial_Printf("OK posy.kd=%.4f\r\n", applied_value);
+        return 1U;
+    }
+    if (strcmp(name, "posx.envelope") == 0 ||
+        strcmp(name, "position.x.envelope") == 0)
+    {
+        applied_value = BlueSerial_ClampFloat(value,
+                                              BLUESERIAL_MIN_POSITION_ENVELOPE,
+                                              BLUESERIAL_MAX_POSITION_ENVELOPE);
+        primask = interrupt_global_disable();
+        path_follow_set_position_speed_factor_x(applied_value);
+        interrupt_global_enable(primask);
+        BlueSerial_Printf("OK posx.envelope=%.3f\r\n", applied_value);
+        return 1U;
+    }
+    if (strcmp(name, "posy.envelope") == 0 ||
+        strcmp(name, "position.y.envelope") == 0)
+    {
+        applied_value = BlueSerial_ClampFloat(value,
+                                              BLUESERIAL_MIN_POSITION_ENVELOPE,
+                                              BLUESERIAL_MAX_POSITION_ENVELOPE);
+        primask = interrupt_global_disable();
+        path_follow_set_position_speed_factor_y(applied_value);
+        interrupt_global_enable(primask);
+        BlueSerial_Printf("OK posy.envelope=%.3f\r\n", applied_value);
         return 1U;
     }
     if (strcmp(name, "yaw.kp") == 0)
@@ -2457,10 +2553,14 @@ static void BlueSerial_PrintStatus(void)
     float cross_right;
     float line_guide_kp;
     float line_guide_min_cmps;
-    float position_kp;
-    float position_ki;
-    float position_kd;
-    float position_envelope;
+    float position_x_kp;
+    float position_x_ki;
+    float position_x_kd;
+    float position_y_kp;
+    float position_y_ki;
+    float position_y_kd;
+    float position_x_envelope;
+    float position_y_envelope;
     uint8 point_target_valid;
     float point_target_x_m;
     float point_target_y_m;
@@ -2483,10 +2583,14 @@ static void BlueSerial_PrintStatus(void)
     cross_right = path_y_crosstalk_right_x_comp_k;
     line_guide_kp = path_line_guide_kp;
     line_guide_min_cmps = path_line_guide_min_cmps;
-    position_kp = pid_stay.fKp;
-    position_ki = pid_stay.fKi;
-    position_kd = pid_stay.fKd;
-    position_envelope = path_follow_get_position_speed_factor();
+    position_x_kp = pid_stay.fKp;
+    position_x_ki = pid_stay.fKi;
+    position_x_kd = pid_stay.fKd;
+    position_y_kp = pid_stay_y.fKp;
+    position_y_ki = pid_stay_y.fKi;
+    position_y_kd = pid_stay_y.fKd;
+    position_x_envelope = path_follow_get_position_speed_factor_x();
+    position_y_envelope = path_follow_get_position_speed_factor_y();
     point_target_valid = g_point_target_valid;
     point_target_x_m = g_point_target_x_m;
     point_target_y_m = g_point_target_y_m;
@@ -2506,13 +2610,18 @@ static void BlueSerial_PrintStatus(void)
                       yaw_ff,
                       (unsigned long)drop_count);
     BlueSerial_Printf("TUNE cross.left=%.4f cross.right=%.4f "
-                      "pospid=%.4f,%.4f,%.4f envelope=%.3f\r\n",
+                      "posx=%.4f,%.4f,%.4f envx=%.3f "
+                      "posy=%.4f,%.4f,%.4f envy=%.3f\r\n",
                       cross_left,
                       cross_right,
-                      position_kp,
-                      position_ki,
-                      position_kd,
-                      position_envelope);
+                      position_x_kp,
+                      position_x_ki,
+                      position_x_kd,
+                      position_x_envelope,
+                      position_y_kp,
+                      position_y_ki,
+                      position_y_kd,
+                      position_y_envelope);
     BlueSerial_Printf("TUNE line.kp=%.4f line.min=%.3fcmps\r\n",
                       line_guide_kp,
                       line_guide_min_cmps);
@@ -2949,7 +3058,8 @@ static void BlueSerial_ServiceTelemetryReport(void)
     }
 
     BlueSerial_Printf("MOTION100 n=%lu TPOS=%.3f,%.3f APOS=%.3f,%.3f "
-                      "DIST=%.3f TVEL=%.2f AVEL=%.2f ENV=%.2f CAP=%.2f\r\n",
+                      "DIST=%.3f TVEL=%.2f AVEL=%.2f AALONG=%.2f "
+                      "ENV=%.2f CAP=%.2f BLEND=%.3f\r\n",
                       (unsigned long)sequence,
                       status.target_x_m,
                       status.target_y_m,
@@ -2958,15 +3068,20 @@ static void BlueSerial_ServiceTelemetryReport(void)
                       status.distance_m,
                       target_speed_cmps,
                       status.actual_speed_cmps,
+                      status.actual_along_speed_cmps,
                       status.position_speed_limit_cmps,
-                      status.speed_cap_cmps);
+                      status.speed_cap_cmps,
+                      status.position_blend);
 
-    BlueSerial_Printf("STATE100 n=%lu TYAW=%.2f AYAW=%.2f BRK=%u POS=%u "
+    BlueSerial_Printf("STATE100 n=%lu TYAW=%.2f AYAW=%.2f CROSS=%u LIM=%u OVR=%u REV=%u POS=%u "
                       "LINE=%u PAUSE=%u AXIS=%u\r\n",
                       (unsigned long)sequence,
                       status.target_yaw_deg,
                       actual_yaw_deg,
-                      (unsigned int)status.approach_braking_active,
+                      (unsigned int)status.target_plane_crossed,
+                      (unsigned int)status.speed_limit_active,
+                      (unsigned int)status.overspeed_guard_active,
+                      (unsigned int)status.position_reverse_requested,
                       (unsigned int)status.position_loop_active,
                       (unsigned int)status.line_guidance_active,
                       (unsigned int)status.paused,

@@ -8,6 +8,9 @@
 
 #define PATH_FOLLOW_SCURVE_BAND_COUNT 5U
 #define PATH_FOLLOW_MAX_PAUSE_POINTS 20U
+#define PATH_FOLLOW_AXIS_AUTO 0U
+#define PATH_FOLLOW_AXIS_X    1U
+#define PATH_FOLLOW_AXIS_Y    2U
 
 typedef struct
 {
@@ -41,7 +44,11 @@ typedef struct
     float actual_speed_cmps;
     float speed_cap_cmps;
     float position_speed_limit_cmps;
+    float actual_along_speed_cmps;
+    float position_blend;
     float position_speed_factor;
+    float position_speed_factor_x;
+    float position_speed_factor_y;
     float target_yaw_deg;
     float speed_test_profile_time_s;
     float speed_test_profile_total_s;
@@ -49,8 +56,11 @@ typedef struct
     uint8 reached;
     uint8 paused;
     uint8 yaw_only_active;
+    uint8 speed_limit_active;
     uint8 overspeed_guard_active;
     uint8 approach_braking_active;
+    uint8 position_reverse_requested;
+    uint8 target_plane_crossed;
     uint8 position_loop_active;
     uint8 line_guidance_active;
     uint8 speed_test_enabled;
@@ -68,12 +78,20 @@ typedef struct
 
 void path_follow_init(float grid_size_m, float pulses_per_meter);
 void path_follow_set_position_pid_gains(float kp, float ki, float kd);
+void path_follow_set_position_pid_gains_x(float kp, float ki, float kd);
+void path_follow_set_position_pid_gains_y(float kp, float ki, float kd);
 void path_follow_set_position_speed_factor(float factor);
+void path_follow_set_position_speed_factor_x(float factor);
+void path_follow_set_position_speed_factor_y(float factor);
 float path_follow_get_position_speed_factor(void);
+float path_follow_get_position_speed_factor_x(void);
+float path_follow_get_position_speed_factor_y(void);
 void path_follow_set_speed_test_mode(uint8 enabled, uint8 yaw_enabled);
 void path_follow_set_path(const Position *path, size_t steps);
 void path_follow_set_path_pause_enabled(const Position *path, size_t steps, uint8 pause_events_enabled);
 void path_follow_set_path_with_grid(const Position *path, size_t steps, float grid_m, uint8 pause_events_enabled);
+void path_follow_set_path_with_grid_axis(const Position *path, size_t steps, float grid_m,
+                                         uint8 pause_events_enabled, uint8 segment_axis);
 void path_follow_set_target(int target_row, int target_col);
 void path_follow_set_target_yaw(float target_yaw_deg);
 void path_follow_hold_current_yaw(void);
@@ -102,6 +120,7 @@ size_t path_follow_extract_corners(const Position *path, size_t path_steps,
 extern tagPID_T pid_world_x;
 extern tagPID_T pid_world_y;
 extern tagPID_T pid_stay;
+extern tagPID_T pid_stay_y;
 extern tagPID_T pid_yaw;
 extern tagPID_T pid_accel_yaw;
 extern uint8 wait_stop;

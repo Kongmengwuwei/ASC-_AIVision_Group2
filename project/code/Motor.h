@@ -3,22 +3,22 @@
 
 #include "zf_common_typedef.h"
 
-#define MOTOR1_DIR              (C7)                           //ÉÏ×ó
+#define MOTOR1_DIR              (C7)                           //ï¿½ï¿½ï¿½ï¿½
 #define MOTOR1_PWM              (PWM2_MODULE0_CHA_C6)
 
-#define MOTOR2_DIR              (C9)                          //ÉÏÓÒ
+#define MOTOR2_DIR              (C9)                          //ï¿½ï¿½ï¿½ï¿½
 #define MOTOR2_PWM              (PWM2_MODULE1_CHA_C8)
 
-#define MOTOR3_DIR              (C11)                          //ÏÂ×ó
+#define MOTOR3_DIR              (C11)                          //ï¿½ï¿½ï¿½ï¿½
 #define MOTOR3_PWM              (PWM2_MODULE2_CHA_C10)
 
-#define MOTOR4_DIR              (D3)                           //ÏÂÓÒ
+#define MOTOR4_DIR              (D3)                           //ï¿½ï¿½ï¿½ï¿½
 #define MOTOR4_PWM              (PWM2_MODULE3_CHA_D2)
 
 // Motor board selection:
 // 0: old board pin/direction configuration.
 // 1: new board wiring adaptation, enabled by default.
-#define MOTOR_BOARD_USE_NEW          (1)
+#define MOTOR_BOARD_USE_NEW          (0)
 
 #if MOTOR_BOARD_USE_NEW
 // Remap logical wheels UL, UR, DL, DR to the measured physical motor channels.
@@ -30,6 +30,7 @@
 #define MOTOR_BOARD_REVERSE_DL_DIR   (1)
 #define MOTOR_BOARD_REVERSE_DR_DIR   (1)
 #define MOTOR_BOARD_REVERSE_ENCODER_ALL_DIR (1)
+#define MOTOR_BOARD_REVERSE_LEFT_ENCODERS (0)
 #else
 #define MOTOR_BOARD_REMAP_LOGICAL_WHEELS (0)
 #define MOTOR_BOARD_REVERSE_ALL_DIR  (0)
@@ -38,6 +39,7 @@
 #define MOTOR_BOARD_REVERSE_DL_DIR   (0)
 #define MOTOR_BOARD_REVERSE_DR_DIR   (0)
 #define MOTOR_BOARD_REVERSE_ENCODER_ALL_DIR (0)
+#define MOTOR_BOARD_REVERSE_LEFT_ENCODERS (1)
 #endif
 
 #define ENCODER_1                   (QTIMER1_ENCODER2)
@@ -56,14 +58,14 @@
 #define ENCODER_4_A                 (QTIMER1_ENCODER1_CH1_C0)
 #define ENCODER_4_B                 (QTIMER1_ENCODER1_CH2_C1)
 
-//²ÎÊýºê¶¨Òå
-#define ENCODER_RESOLUTION      2390.0   //±àÂëÆ÷·Ö±æÂÊ, ÂÖ×Ó×ªÒ»È¦£¬±àÂëÆ÷²úÉúµÄÂö³åÊý
-#define WHEEL_DIAMETER          0.06239  //ÂÖ×ÓÖ±¾¶,µ¥Î»£ºÃ×@
-#define LATERAL_CORRECTION_FACTOR 0.901589f  //Êµ¼ÊºáÒÆ¾àÀë / ¼Æ»®ºáÒÆ¾àÀë
+//ï¿½ï¿½ï¿½ï¿½ï¿½ê¶¨ï¿½ï¿½
+#define ENCODER_RESOLUTION      2390.0   //ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ö±ï¿½ï¿½ï¿½, ï¿½ï¿½ï¿½ï¿½×ªÒ»È¦ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
+#define WHEEL_DIAMETER          0.06239  //ï¿½ï¿½ï¿½ï¿½Ö±ï¿½ï¿½,ï¿½ï¿½Î»ï¿½ï¿½ï¿½ï¿½@
+#define LATERAL_CORRECTION_FACTOR 0.901589f  //Êµï¿½Êºï¿½ï¿½Æ¾ï¿½ï¿½ï¿½ / ï¿½Æ»ï¿½ï¿½ï¿½ï¿½Æ¾ï¿½ï¿½ï¿½
 #define LATERAL_TO_LONGITUDINAL_COUPLING_FACTOR 0.0f  // dx drift / dy travel
-#define D_X                     0.176     //µ×ÅÌYÖáÉÏÁ½ÂÖÖÐÐÄµÄ¼ä¾à
-#define D_Y                     0.20     //µ×ÅÌXÖáÉÏÁ½ÂÖÖÐÐÄµÄ¼ä¾à
-#define PID_RATE                100       //PIDµ÷½ÚPWMÖµµÄÆµÂÊ
+#define D_X                     0.176     //ï¿½ï¿½ï¿½ï¿½Yï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ÄµÄ¼ï¿½ï¿½
+#define D_Y                     0.20     //ï¿½ï¿½ï¿½ï¿½Xï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ÄµÄ¼ï¿½ï¿½
+#define PID_RATE                100       //PIDï¿½ï¿½ï¿½ï¿½PWMÖµï¿½ï¿½Æµï¿½ï¿½
 
 #define LIMIT_PWM_MIN              -6000
 #define LIMIT_PWM_MAX               6000

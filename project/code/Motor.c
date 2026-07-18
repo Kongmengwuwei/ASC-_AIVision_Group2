@@ -62,16 +62,27 @@ void encoder_get(void)
 	int16 encoder_raw_quaddec3 = encoder_get_count(ENCODER_3);
 	int16 encoder_raw_quaddec4 = encoder_get_count(ENCODER_4);
 
+	/* Old-board E1/E3 A/B polarity is opposite to the expected left-wheel direction. */
+#if MOTOR_BOARD_REVERSE_LEFT_ENCODERS
+	encoder_raw_quaddec1 = -encoder_raw_quaddec1;
+	encoder_raw_quaddec3 = -encoder_raw_quaddec3;
+#endif
+
 #if MOTOR_BOARD_USE_NEW
 	encoder_data_quaddec1 = -encoder_raw_quaddec4;                  // 获取编码器计数 左上
 	encoder_data_quaddec2 = -encoder_raw_quaddec3;                  // 获取编码器计数 右上
 	encoder_data_quaddec3 = -encoder_raw_quaddec1;                  // 获取编码器计数 左下
 	encoder_data_quaddec4 = -encoder_raw_quaddec2;                  // 获取编码器计数 右下
 #else
-	encoder_data_quaddec1 = -encoder_raw_quaddec1;                  // 获取编码器计数 左上
-	encoder_data_quaddec2 = -encoder_raw_quaddec4;                  // 获取编码器计数 右上
-	encoder_data_quaddec3 = -encoder_raw_quaddec3;                  // 获取编码器计数 左下
-	encoder_data_quaddec4 = -encoder_raw_quaddec2;                  // 获取编码器计数 右下
+	/*
+	 * Old board physical order is E1=UL, E2=UR, E3=DL, E4=DR.
+	 * The right-wheel filter inputs below apply one additional minus sign,
+	 * so store E2/E4 negated here to make the final feedback [E1,E2,E3,E4].
+	 */
+	encoder_data_quaddec1 =  encoder_raw_quaddec1;                  // 左上 E1
+	encoder_data_quaddec2 = -encoder_raw_quaddec2;                  // 右上 E2
+	encoder_data_quaddec3 =  encoder_raw_quaddec3;                  // 左下 E3
+	encoder_data_quaddec4 = -encoder_raw_quaddec4;                  // 右下 E4
 #endif
 
 #if MOTOR_BOARD_REVERSE_ENCODER_ALL_DIR

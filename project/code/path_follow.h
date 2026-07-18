@@ -43,6 +43,8 @@ typedef struct
     float position_speed_limit_cmps;
     float position_speed_factor;
     float target_yaw_deg;
+    float speed_test_profile_time_s;
+    float speed_test_profile_total_s;
     uint8 active;
     uint8 reached;
     uint8 paused;
@@ -51,6 +53,11 @@ typedef struct
     uint8 approach_braking_active;
     uint8 position_loop_active;
     uint8 line_guidance_active;
+    uint8 speed_test_enabled;
+    uint8 speed_test_yaw_enabled;
+    uint8 speed_test_settling;
+    uint8 speed_test_settle_timeout;
+    uint8 speed_test_profile_fault;
     uint8 segment_axis;
     uint8 target_grid_valid;
     uint8 target_row;
@@ -63,6 +70,7 @@ void path_follow_init(float grid_size_m, float pulses_per_meter);
 void path_follow_set_position_pid_gains(float kp, float ki, float kd);
 void path_follow_set_position_speed_factor(float factor);
 float path_follow_get_position_speed_factor(void);
+void path_follow_set_speed_test_mode(uint8 enabled, uint8 yaw_enabled);
 void path_follow_set_path(const Position *path, size_t steps);
 void path_follow_set_path_pause_enabled(const Position *path, size_t steps, uint8 pause_events_enabled);
 void path_follow_set_path_with_grid(const Position *path, size_t steps, float grid_m, uint8 pause_events_enabled);

@@ -10,6 +10,30 @@ float speed_three_array[3] = {0};
 int speed_encoder[4] = {0};
 int car_stop_array[4] = {0};
 
+volatile int motor_deadzone_target_min_counts = MOTOR_DEADZONE_TARGET_MIN_COUNTS;
+volatile int motor_deadzone_fwd[MOTOR_WHEEL_COUNT] =
+{
+    MOTOR_UL_DEADZONE_FWD,
+    MOTOR_UR_DEADZONE_FWD,
+    MOTOR_DL_DEADZONE_FWD,
+    MOTOR_DR_DEADZONE_FWD
+};
+volatile int motor_deadzone_rev[MOTOR_WHEEL_COUNT] =
+{
+    MOTOR_UL_DEADZONE_REV,
+    MOTOR_UR_DEADZONE_REV,
+    MOTOR_DL_DEADZONE_REV,
+    MOTOR_DR_DEADZONE_REV
+};
+
+static volatile int g_motor_debug_target[MOTOR_WHEEL_COUNT];
+static volatile int g_motor_debug_raw[MOTOR_WHEEL_COUNT];
+static volatile int g_motor_debug_pid_pwm[MOTOR_WHEEL_COUNT];
+static volatile int g_motor_debug_final_pwm[MOTOR_WHEEL_COUNT];
+static volatile int32 g_motor_debug_cumulative_target[MOTOR_WHEEL_COUNT];
+static volatile int32 g_motor_debug_cumulative_raw[MOTOR_WHEEL_COUNT];
+static volatile uint32 g_motor_debug_control_ticks;
+
 void motor_init(void)
 {
 	gpio_init(MOTOR1_DIR, GPO, GPIO_HIGH, GPO_PUSH_PULL);                            // GPIO 初始化为输出 默认上拉输出高
@@ -80,6 +104,16 @@ void encoder_get(void)
 	encoder_data_quaddec3 = -encoder_data_quaddec3;
 	encoder_data_quaddec4 = -encoder_data_quaddec4;
 #endif
+
+	/* Logical wheel order and sign before filtering: UL, UR, DL, DR. */
+	g_motor_debug_raw[MOTOR_WHEEL_UL] = encoder_data_quaddec1;
+	g_motor_debug_raw[MOTOR_WHEEL_UR] = -encoder_data_quaddec2;
+	g_motor_debug_raw[MOTOR_WHEEL_DL] = encoder_data_quaddec3;
+	g_motor_debug_raw[MOTOR_WHEEL_DR] = -encoder_data_quaddec4;
+	g_motor_debug_cumulative_raw[MOTOR_WHEEL_UL] += g_motor_debug_raw[MOTOR_WHEEL_UL];
+	g_motor_debug_cumulative_raw[MOTOR_WHEEL_UR] += g_motor_debug_raw[MOTOR_WHEEL_UR];
+	g_motor_debug_cumulative_raw[MOTOR_WHEEL_DL] += g_motor_debug_raw[MOTOR_WHEEL_DL];
+	g_motor_debug_cumulative_raw[MOTOR_WHEEL_DR] += g_motor_debug_raw[MOTOR_WHEEL_DR];
 	
 	
 	encoder_L_up[4]=encoder_L_up[3];//左上编码器
@@ -147,6 +181,11 @@ int16 Lowpass(int16 X_last,int16 X_new)
 
 void motor_pwm(int up_left_speed,int up_right_speed,int down_left_speed,int down_right_speed)
 {
+	g_motor_debug_final_pwm[MOTOR_WHEEL_UL] = up_left_speed;
+	g_motor_debug_final_pwm[MOTOR_WHEEL_UR] = up_right_speed;
+	g_motor_debug_final_pwm[MOTOR_WHEEL_DL] = down_left_speed;
+	g_motor_debug_final_pwm[MOTOR_WHEEL_DR] = down_right_speed;
+
 #if MOTOR_BOARD_REMAP_LOGICAL_WHEELS
 	int logical_ul = up_left_speed;
 	int logical_ur = up_right_speed;
@@ -273,11 +312,13 @@ static int motor_apply_deadzone_compensation(int pid_output,
                                              int deadzone_fwd,
                                              int deadzone_rev)
 {
-    if (target_speed >= MOTOR_DEADZONE_TARGET_MIN_COUNTS)
+    if (target_speed > 0 &&
+        target_speed >= motor_deadzone_target_min_counts)
     {
         pid_output += deadzone_fwd;
     }
-    else if (target_speed <= -MOTOR_DEADZONE_TARGET_MIN_COUNTS)
+    else if (target_speed < 0 &&
+             target_speed <= -motor_deadzone_target_min_counts)
     {
         pid_output -= deadzone_rev;
     }
@@ -291,15 +332,74 @@ void motor_control(int* input_speed_encoder)
 	int motorUR_pwm_value = 0;
 	int motorDL_pwm_value = 0;
 	int motorDR_pwm_value = 0;
+	g_motor_debug_target[MOTOR_WHEEL_UL] = input_speed_encoder[MOTOR_WHEEL_UL];
+	g_motor_debug_target[MOTOR_WHEEL_UR] = input_speed_encoder[MOTOR_WHEEL_UR];
+	g_motor_debug_target[MOTOR_WHEEL_DL] = input_speed_encoder[MOTOR_WHEEL_DL];
+	g_motor_debug_target[MOTOR_WHEEL_DR] = input_speed_encoder[MOTOR_WHEEL_DR];
+	g_motor_debug_cumulative_target[MOTOR_WHEEL_UL] += input_speed_encoder[MOTOR_WHEEL_UL];
+	g_motor_debug_cumulative_target[MOTOR_WHEEL_UR] += input_speed_encoder[MOTOR_WHEEL_UR];
+	g_motor_debug_cumulative_target[MOTOR_WHEEL_DL] += input_speed_encoder[MOTOR_WHEEL_DL];
+	g_motor_debug_cumulative_target[MOTOR_WHEEL_DR] += input_speed_encoder[MOTOR_WHEEL_DR];
+	g_motor_debug_control_ticks++;
+
 	motorUL_pwm_value = Limit_int(LIMIT_PWM_MIN, PID_Add_Calculate(&ULpid, up_L_all, input_speed_encoder[0]), LIMIT_PWM_MAX);   //上左
 	motorUR_pwm_value = Limit_int(LIMIT_PWM_MIN, PID_Add_Calculate(&URpid, up_R_all, input_speed_encoder[1]), LIMIT_PWM_MAX);   //上右
 	motorDL_pwm_value = Limit_int(LIMIT_PWM_MIN, PID_Add_Calculate(&DLpid, down_L_all, input_speed_encoder[2]), LIMIT_PWM_MAX);   //下左
 	motorDR_pwm_value = Limit_int(LIMIT_PWM_MIN, PID_Add_Calculate(&DRpid, down_R_all, input_speed_encoder[3]), LIMIT_PWM_MAX);   //下右
-	motorUL_pwm_value = motor_apply_deadzone_compensation(motorUL_pwm_value, input_speed_encoder[0], MOTOR_UL_DEADZONE_FWD, MOTOR_UL_DEADZONE_REV);
-	motorUR_pwm_value = motor_apply_deadzone_compensation(motorUR_pwm_value, input_speed_encoder[1], MOTOR_UR_DEADZONE_FWD, MOTOR_UR_DEADZONE_REV);
-	motorDL_pwm_value = motor_apply_deadzone_compensation(motorDL_pwm_value, input_speed_encoder[2], MOTOR_DL_DEADZONE_FWD, MOTOR_DL_DEADZONE_REV);
-	motorDR_pwm_value = motor_apply_deadzone_compensation(motorDR_pwm_value, input_speed_encoder[3], MOTOR_DR_DEADZONE_FWD, MOTOR_DR_DEADZONE_REV);
+	g_motor_debug_pid_pwm[MOTOR_WHEEL_UL] = motorUL_pwm_value;
+	g_motor_debug_pid_pwm[MOTOR_WHEEL_UR] = motorUR_pwm_value;
+	g_motor_debug_pid_pwm[MOTOR_WHEEL_DL] = motorDL_pwm_value;
+	g_motor_debug_pid_pwm[MOTOR_WHEEL_DR] = motorDR_pwm_value;
+	motorUL_pwm_value = motor_apply_deadzone_compensation(motorUL_pwm_value, input_speed_encoder[0], motor_deadzone_fwd[MOTOR_WHEEL_UL], motor_deadzone_rev[MOTOR_WHEEL_UL]);
+	motorUR_pwm_value = motor_apply_deadzone_compensation(motorUR_pwm_value, input_speed_encoder[1], motor_deadzone_fwd[MOTOR_WHEEL_UR], motor_deadzone_rev[MOTOR_WHEEL_UR]);
+	motorDL_pwm_value = motor_apply_deadzone_compensation(motorDL_pwm_value, input_speed_encoder[2], motor_deadzone_fwd[MOTOR_WHEEL_DL], motor_deadzone_rev[MOTOR_WHEEL_DL]);
+	motorDR_pwm_value = motor_apply_deadzone_compensation(motorDR_pwm_value, input_speed_encoder[3], motor_deadzone_fwd[MOTOR_WHEEL_DR], motor_deadzone_rev[MOTOR_WHEEL_DR]);
 	motor_pwm(motorUL_pwm_value, motorUR_pwm_value,motorDL_pwm_value,motorDR_pwm_value);
+}
+
+void motor_speed_debug_reset(void)
+{
+	uint8 i;
+
+	for (i = 0U; i < MOTOR_WHEEL_COUNT; ++i)
+	{
+		g_motor_debug_target[i] = 0;
+		g_motor_debug_raw[i] = 0;
+		g_motor_debug_pid_pwm[i] = 0;
+		g_motor_debug_final_pwm[i] = 0;
+		g_motor_debug_cumulative_target[i] = 0;
+		g_motor_debug_cumulative_raw[i] = 0;
+	}
+	g_motor_debug_control_ticks = 0U;
+}
+
+void motor_speed_debug_get_snapshot(motor_speed_debug_snapshot_t *snapshot)
+{
+	uint8 i;
+	const int filtered[MOTOR_WHEEL_COUNT] =
+	{
+		up_L_all,
+		up_R_all,
+		down_L_all,
+		down_R_all
+	};
+
+	if (snapshot == NULL)
+	{
+		return;
+	}
+
+	for (i = 0U; i < MOTOR_WHEEL_COUNT; ++i)
+	{
+		snapshot->target_counts[i] = g_motor_debug_target[i];
+		snapshot->raw_counts[i] = g_motor_debug_raw[i];
+		snapshot->filtered_counts[i] = filtered[i];
+		snapshot->pid_pwm[i] = g_motor_debug_pid_pwm[i];
+		snapshot->final_pwm[i] = g_motor_debug_final_pwm[i];
+		snapshot->cumulative_target_counts[i] = g_motor_debug_cumulative_target[i];
+		snapshot->cumulative_raw_counts[i] = g_motor_debug_cumulative_raw[i];
+	}
+	snapshot->control_ticks = g_motor_debug_control_ticks;
 }
 
 

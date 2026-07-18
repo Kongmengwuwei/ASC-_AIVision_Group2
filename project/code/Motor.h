@@ -70,14 +70,32 @@
 
 /* Closed-loop tuned dead-zone feedforward for the final motor driver board. */
 #define MOTOR_DEADZONE_TARGET_MIN_COUNTS  2
-#define MOTOR_UL_DEADZONE_FWD             420
-#define MOTOR_UL_DEADZONE_REV             390
-#define MOTOR_UR_DEADZONE_FWD             495
-#define MOTOR_UR_DEADZONE_REV             429
-#define MOTOR_DL_DEADZONE_FWD             435
-#define MOTOR_DL_DEADZONE_REV             390
-#define MOTOR_DR_DEADZONE_FWD             550
-#define MOTOR_DR_DEADZONE_REV             637
+#define MOTOR_UL_DEADZONE_FWD             280
+#define MOTOR_UL_DEADZONE_REV             210
+#define MOTOR_UR_DEADZONE_FWD             325
+#define MOTOR_UR_DEADZONE_REV             245
+#define MOTOR_DL_DEADZONE_FWD             290
+#define MOTOR_DL_DEADZONE_REV             230
+#define MOTOR_DR_DEADZONE_FWD             380
+#define MOTOR_DR_DEADZONE_REV             360
+
+#define MOTOR_WHEEL_COUNT                  4
+#define MOTOR_WHEEL_UL                     0
+#define MOTOR_WHEEL_UR                     1
+#define MOTOR_WHEEL_DL                     2
+#define MOTOR_WHEEL_DR                     3
+
+typedef struct
+{
+    int target_counts[MOTOR_WHEEL_COUNT];
+    int raw_counts[MOTOR_WHEEL_COUNT];
+    int filtered_counts[MOTOR_WHEEL_COUNT];
+    int pid_pwm[MOTOR_WHEEL_COUNT];
+    int final_pwm[MOTOR_WHEEL_COUNT];
+    int32 cumulative_target_counts[MOTOR_WHEEL_COUNT];
+    int32 cumulative_raw_counts[MOTOR_WHEEL_COUNT];
+    uint32 control_ticks;
+} motor_speed_debug_snapshot_t;
 
 #define LIMIT_ENCODER_MIN          -500
 #define LIMIT_ENCODER_MAX           500
@@ -102,6 +120,9 @@ extern float rx_plus_ry_cali;
 extern float speed_three_array[3];
 extern int speed_encoder[4];
 extern int car_stop_array[4];
+extern volatile int motor_deadzone_target_min_counts;
+extern volatile int motor_deadzone_fwd[MOTOR_WHEEL_COUNT];
+extern volatile int motor_deadzone_rev[MOTOR_WHEEL_COUNT];
 
 void motor_init(void);
 void encoder_init(void);
@@ -109,6 +130,8 @@ void encoder_get(void);
 int Limit_int(int left_limit, int target_num, int right_limit);
 void motor_pwm(int up_left_speed,int up_right_speed,int down_left_speed,int down_right_speed);
 void motor_control(int* input_speed_encoder);
+void motor_speed_debug_reset(void);
+void motor_speed_debug_get_snapshot(motor_speed_debug_snapshot_t *snapshot);
 //void encoder_read_filtered(int *enc1, int *enc2, int *enc3, int *enc4);
 int16 Lowpass(int16 X_last,int16 X_new);
 void Kinematics_Init(void);

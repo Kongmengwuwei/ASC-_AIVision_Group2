@@ -55,6 +55,14 @@
 #define BLUESERIAL_MAX_Y_CROSSTALK_ABS          0.100f
 #define BLUESERIAL_MAX_LINE_GUIDE_KP             4.0f
 #define BLUESERIAL_MAX_LINE_GUIDE_MIN_CMPS       3.0f
+#define BLUESERIAL_MAX_WHEEL_KP                  30.0f
+#define BLUESERIAL_MAX_WHEEL_KI                   3.0f
+#define BLUESERIAL_MAX_WHEEL_KD                  60.0f
+#define BLUESERIAL_MAX_DEADZONE_PWM            1200
+#define BLUESERIAL_MAX_DEADZONE_MIN_COUNTS       20
+#define BLUESERIAL_SPEED_LOG_CAPACITY            600U
+#define BLUESERIAL_SPEED_LOG_HEAD_COUNT           200U
+#define BLUESERIAL_SPEED_LOG_TAIL_COUNT           (BLUESERIAL_SPEED_LOG_CAPACITY - BLUESERIAL_SPEED_LOG_HEAD_COUNT)
 #define BLUESERIAL_MAX_POSITION_KP              20.0f
 #define BLUESERIAL_MAX_POSITION_KI              10.0f
 #define BLUESERIAL_MAX_POSITION_KD              50.0f
@@ -85,6 +93,18 @@ typedef enum
     BLUESERIAL_MOVE_LEFT,
     BLUESERIAL_MOVE_RIGHT
 } blueserial_move_direction_t;
+
+typedef struct
+{
+    uint16 tick;
+    int16 target[MOTOR_WHEEL_COUNT];
+    int16 actual[MOTOR_WHEEL_COUNT];
+    int16 raw[MOTOR_WHEEL_COUNT];
+    int16 pid_pwm[MOTOR_WHEEL_COUNT];
+    int16 final_pwm[MOTOR_WHEEL_COUNT];
+    int16 yaw_delta_cdeg;
+    int16 gyro_z_cdegps;
+} blueserial_speed_sample_t;
 
 static volatile uint8 g_rx_collecting = 0U;
 static volatile uint8 g_rx_work_len = 0U;
@@ -122,6 +142,49 @@ static volatile uint8 g_telemetry_tick_count = 0U;
 static volatile uint8 g_telemetry_report_pending = 0U;
 static volatile uint32 g_telemetry_sequence = 0U;
 static uint8 g_telemetry_was_active = 0U;
+static blueserial_speed_sample_t g_speed_log[BLUESERIAL_SPEED_LOG_CAPACITY];
+static motor_speed_debug_snapshot_t g_speed_log_final_motor;
+static volatile uint16 g_speed_log_count = 0U;
+static uint16 g_speed_log_tail_write = 0U;
+static uint16 g_speed_log_dump_index = 0U;
+static volatile uint32 g_speed_log_total_ticks = 0U;
+static volatile uint8 g_speed_log_recording = 0U;
+static uint8 g_speed_log_ready = 0U;
+static uint8 g_speed_log_dumping = 0U;
+static volatile uint8 g_speed_log_overflow = 0U;
+static uint8 g_speed_log_enabled = 0U;
+static uint8 g_speed_summary_pending = 0U;
+static uint8 g_speed_log_aborted = 0U;
+static uint8 g_speed_log_settle_timeout = 0U;
+static uint8 g_speed_log_profile_fault = 0U;
+static uint8 g_speed_test_profile_enabled = 0U;
+static volatile uint8 g_speed_test_yaw_enabled = 0U;
+static uint32 g_speed_run_id = 0U;
+static uint32 g_speed_log_run_id = 0U;
+static uint32 g_speed_cfg_id = 0U;
+static uint32 g_speed_log_cfg_id = 0U;
+static uint32 g_speed_log_abs_error_sum[MOTOR_WHEEL_COUNT];
+static uint32 g_speed_log_abs_target_sum[MOTOR_WHEEL_COUNT];
+static uint32 g_speed_log_saturation_ticks[MOTOR_WHEEL_COUNT];
+static int g_speed_log_peak_error[MOTOR_WHEEL_COUNT];
+static float g_speed_log_peak_axis_cm = 0.0f;
+static float g_speed_log_profile_total_s = 0.0f;
+static float g_speed_log_start_yaw_deg = 0.0f;
+static float g_speed_log_end_yaw_deg = 0.0f;
+static float g_speed_log_peak_yaw_abs_deg = 0.0f;
+static float g_speed_log_requested_cm = 0.0f;
+static float g_speed_log_requested_speed_cmps = 0.0f;
+static blueserial_move_direction_t g_speed_log_direction = BLUESERIAL_MOVE_FORWARD;
+
+static void BlueSerial_CountsToBodyCm(const int32 counts[MOTOR_WHEEL_COUNT],
+                                      float *x_cm,
+                                      float *y_cm);
+static void BlueSerial_ProjectBodyCm(blueserial_move_direction_t direction,
+                                     float x_cm,
+                                     float y_cm,
+                                     float *axis_cm,
+                                     float *cross_cm);
+static tagPID_T *BlueSerial_GetWheelPid(uint8 wheel_index);
 
 static float BlueSerial_ClampFloat(float value, float min_value, float max_value)
 {
@@ -152,6 +215,191 @@ static int BlueSerial_ClampInt(int value, int min_value, int max_value)
 static int BlueSerial_RoundToInt(float value)
 {
     return (int)(value + ((value >= 0.0f) ? 0.5f : -0.5f));
+}
+
+static int16 BlueSerial_ClampInt16(int value)
+{
+    if (value > 32767)
+    {
+        return 32767;
+    }
+    if (value < -32768)
+    {
+        return -32768;
+    }
+    return (int16)value;
+}
+
+static float BlueSerial_WrapDeg(float angle_deg)
+{
+    while (angle_deg > 180.0f)
+    {
+        angle_deg -= 360.0f;
+    }
+    while (angle_deg < -180.0f)
+    {
+        angle_deg += 360.0f;
+    }
+    return angle_deg;
+}
+
+static void BlueSerial_SpeedLogResetLocked(void)
+{
+    uint8 i;
+
+    g_speed_log_count = 0U;
+    g_speed_log_tail_write = 0U;
+    g_speed_log_dump_index = 0U;
+    g_speed_log_total_ticks = 0U;
+    g_speed_log_recording = 0U;
+    g_speed_log_ready = 0U;
+    g_speed_log_dumping = 0U;
+    g_speed_log_overflow = 0U;
+    g_speed_summary_pending = 0U;
+    g_speed_log_aborted = 0U;
+    g_speed_log_settle_timeout = 0U;
+    g_speed_log_profile_fault = 0U;
+    g_speed_log_peak_yaw_abs_deg = 0.0f;
+    g_speed_log_peak_axis_cm = 0.0f;
+    g_speed_log_profile_total_s = 0.0f;
+    for (i = 0U; i < MOTOR_WHEEL_COUNT; ++i)
+    {
+        g_speed_log_abs_error_sum[i] = 0U;
+        g_speed_log_abs_target_sum[i] = 0U;
+        g_speed_log_saturation_ticks[i] = 0U;
+        g_speed_log_peak_error[i] = 0;
+    }
+    memset(&g_speed_log_final_motor, 0, sizeof(g_speed_log_final_motor));
+    motor_speed_debug_reset();
+}
+
+static void BlueSerial_SpeedLogBeginLocked(blueserial_move_direction_t direction,
+                                           float requested_cm,
+                                           float start_yaw_deg)
+{
+    BlueSerial_SpeedLogResetLocked();
+    g_speed_run_id++;
+    g_speed_log_run_id = g_speed_run_id;
+    g_speed_log_cfg_id = g_speed_cfg_id;
+    g_speed_log_direction = direction;
+    g_speed_log_requested_cm = requested_cm;
+    g_speed_log_requested_speed_cmps = g_target_speed_cmps;
+    g_speed_log_start_yaw_deg = start_yaw_deg;
+    g_speed_log_end_yaw_deg = start_yaw_deg;
+    if (!g_speed_log_enabled)
+    {
+        return;
+    }
+
+    g_speed_log_recording = 1U;
+}
+
+static void BlueSerial_SpeedLogCapture10ms(void)
+{
+    motor_speed_debug_snapshot_t motor = {0};
+    path_follow_status_t status = {0};
+    blueserial_speed_sample_t *sample;
+    float yaw_delta_deg;
+    float x_cm;
+    float y_cm;
+    float axis_cm;
+    float unused_cross_cm;
+    uint16 slot;
+    uint8 i;
+
+    if (!g_speed_log_recording)
+    {
+        return;
+    }
+    motor_speed_debug_get_snapshot(&motor);
+    path_follow_get_status(&status);
+    g_speed_log_total_ticks++;
+    for (i = 0U; i < MOTOR_WHEEL_COUNT; ++i)
+    {
+        int error = motor.target_counts[i] - motor.filtered_counts[i];
+        int abs_error = (error >= 0) ? error : -error;
+        int abs_target = (motor.target_counts[i] >= 0) ?
+                         motor.target_counts[i] : -motor.target_counts[i];
+        int abs_pwm = (motor.final_pwm[i] >= 0) ?
+                      motor.final_pwm[i] : -motor.final_pwm[i];
+
+        g_speed_log_abs_error_sum[i] += (uint32)abs_error;
+        g_speed_log_abs_target_sum[i] += (uint32)abs_target;
+        if (abs_error > g_speed_log_peak_error[i])
+        {
+            g_speed_log_peak_error[i] = abs_error;
+        }
+        if (abs_pwm >= LIMIT_PWM_MAX)
+        {
+            g_speed_log_saturation_ticks[i]++;
+        }
+    }
+    yaw_delta_deg = BlueSerial_WrapDeg(eulerAngle.yaw - g_speed_log_start_yaw_deg);
+    g_speed_log_peak_yaw_abs_deg =
+        fmaxf(g_speed_log_peak_yaw_abs_deg, fabsf(yaw_delta_deg));
+    if (status.speed_test_profile_total_s > 0.0f)
+    {
+        g_speed_log_profile_total_s = status.speed_test_profile_total_s;
+    }
+    BlueSerial_CountsToBodyCm(motor.cumulative_raw_counts, &x_cm, &y_cm);
+    BlueSerial_ProjectBodyCm(g_speed_log_direction, x_cm, y_cm,
+                             &axis_cm, &unused_cross_cm);
+    g_speed_log_peak_axis_cm = fmaxf(g_speed_log_peak_axis_cm, axis_cm);
+
+    if (g_speed_log_total_ticks <= BLUESERIAL_SPEED_LOG_HEAD_COUNT)
+    {
+        slot = (uint16)(g_speed_log_total_ticks - 1U);
+    }
+    else
+    {
+        slot = (uint16)(BLUESERIAL_SPEED_LOG_HEAD_COUNT + g_speed_log_tail_write);
+        g_speed_log_tail_write = (uint16)((g_speed_log_tail_write + 1U) %
+                                           BLUESERIAL_SPEED_LOG_TAIL_COUNT);
+    }
+    if (g_speed_log_count < BLUESERIAL_SPEED_LOG_CAPACITY)
+    {
+        g_speed_log_count++;
+    }
+    else
+    {
+        g_speed_log_overflow = 1U;
+    }
+
+    sample = &g_speed_log[slot];
+    sample->tick = (g_speed_log_total_ticks <= 65535U) ?
+                   (uint16)g_speed_log_total_ticks : 65535U;
+    for (i = 0U; i < MOTOR_WHEEL_COUNT; ++i)
+    {
+        sample->target[i] = BlueSerial_ClampInt16(motor.target_counts[i]);
+        sample->actual[i] = BlueSerial_ClampInt16(motor.filtered_counts[i]);
+        sample->raw[i] = BlueSerial_ClampInt16(motor.raw_counts[i]);
+        sample->pid_pwm[i] = BlueSerial_ClampInt16(motor.pid_pwm[i]);
+        sample->final_pwm[i] = BlueSerial_ClampInt16(motor.final_pwm[i]);
+    }
+    sample->yaw_delta_cdeg = BlueSerial_ClampInt16(
+        BlueSerial_RoundToInt(yaw_delta_deg * 100.0f));
+    sample->gyro_z_cdegps = BlueSerial_ClampInt16(
+        BlueSerial_RoundToInt(gyroscope[2] * (180.0f / (float)M_PI) * 100.0f));
+}
+
+static void BlueSerial_SpeedLogFinishLocked(uint8 aborted)
+{
+    path_follow_status_t status = {0};
+
+    if (!g_speed_log_recording)
+    {
+        return;
+    }
+
+    motor_speed_debug_get_snapshot(&g_speed_log_final_motor);
+    path_follow_get_status(&status);
+    g_speed_log_end_yaw_deg = eulerAngle.yaw;
+    g_speed_log_aborted = aborted ? 1U : 0U;
+    g_speed_log_settle_timeout = status.speed_test_settle_timeout;
+    g_speed_log_profile_fault = status.speed_test_profile_fault;
+    g_speed_log_recording = 0U;
+    g_speed_log_ready = (g_speed_log_count > 0U) ? 1U : 0U;
+    g_speed_summary_pending = g_speed_log_ready;
 }
 
 static void BlueSerial_ClearWheelPid(void)
@@ -189,6 +437,7 @@ static void BlueSerial_StopControlLocked(void)
     g_turn_quarters_remaining = 0U;
     g_yaw_hold_enabled = 0U;
     path_follow_set_path(NULL, 0U);
+    path_follow_set_speed_test_mode(0U, 0U);
     path_follow_set_stationary_yaw_hold_enabled(0U);
     car_go_flag = 0U;
     car_stop_flag = 0U;
@@ -206,6 +455,7 @@ static void BlueSerial_StopControl(void)
 {
     uint32 primask = interrupt_global_disable();
 
+    BlueSerial_SpeedLogFinishLocked(1U);
     BlueSerial_StopControlLocked();
     interrupt_global_enable(primask);
 }
@@ -228,6 +478,12 @@ static void BlueSerial_ToggleYawHold(void)
     float hold_yaw_deg = 0.0f;
 
     primask = interrupt_global_disable();
+    if (!g_yaw_hold_enabled && g_control_mode != BLUESERIAL_MODE_STOP)
+    {
+        interrupt_global_enable(primask);
+        BlueSerial_Printf("ERR stop_first yawhold\r\n");
+        return;
+    }
     if (g_yaw_hold_enabled)
     {
         BlueSerial_StopControlLocked();
@@ -312,12 +568,14 @@ static uint8 BlueSerial_StartSpeedCruise(void)
     g_turn_quarters_remaining = 0U;
     g_yaw_hold_enabled = 0U;
     path_follow_set_path(NULL, 0U);
+    path_follow_set_speed_test_mode(0U, 0U);
     path_follow_set_stationary_yaw_hold_enabled(0U);
     BlueSerial_ZeroSpeedCommand();
     BlueSerial_ClearWheelPid();
     PID_Clear(&pid_yaw);
+    BlueSerial_SpeedLogBeginLocked(g_cruise_move_direction, 0.0f, hold_yaw_deg);
     path_follow_set_target_yaw(hold_yaw_deg);
-    path_follow_set_stationary_yaw_hold_enabled(1U);
+    path_follow_set_stationary_yaw_hold_enabled(g_speed_test_yaw_enabled);
     g_control_mode = BLUESERIAL_MODE_SPEED_CRUISE;
     car_go_flag = 1U;
     car_stop_flag = 0U;
@@ -688,6 +946,7 @@ static uint8 BlueSerial_StartPointTargetMove(void)
     target_x_m = g_point_target_x_m;
     target_y_m = g_point_target_y_m;
     path_follow_get_status(&status);
+    path_follow_set_speed_test_mode(0U, 0U);
     started = BlueSerial_BuildPointTargetPath(status.x_m,
                                              status.y_m,
                                              target_x_m,
@@ -763,7 +1022,6 @@ static uint8 BlueSerial_StartConfiguredMove(void)
 {
     uint32 primask;
     blueserial_move_direction_t direction;
-    path_follow_status_t status = {0};
     float yaw_rad;
     float position_m;
     float delta_x_m = 0.0f;
@@ -776,8 +1034,7 @@ static uint8 BlueSerial_StartConfiguredMove(void)
 
     primask = interrupt_global_disable();
     direction = g_next_move_direction;
-    path_follow_get_status(&status);
-    yaw_rad = status.yaw_deg * ((float)M_PI / 180.0f);
+    yaw_rad = eulerAngle.yaw * ((float)M_PI / 180.0f);
     position_m = g_target_position_cm * 0.01f;
 
     /*
@@ -813,8 +1070,13 @@ static uint8 BlueSerial_StartConfiguredMove(void)
 
     g_turn_quarters_remaining = 0U;
     BlueSerial_ApplyConfiguredPathSpeedLocked();
+    path_follow_set_speed_test_mode(g_speed_test_profile_enabled,
+                                    g_speed_test_yaw_enabled);
+    BlueSerial_SpeedLogBeginLocked(direction,
+                                   g_target_position_cm,
+                                   eulerAngle.yaw);
     BlueSerial_EnterPathMode();
-    BlueSerial_StartCenteredRelativeMove(delta_x_m, delta_y_m, status.yaw_deg);
+    BlueSerial_StartCenteredRelativeMove(delta_x_m, delta_y_m, eulerAngle.yaw);
     interrupt_global_enable(primask);
     return 1U;
 }
@@ -839,6 +1101,7 @@ static uint8 BlueSerial_StartTurn(uint8 quarter_count, float step_deg)
     primask = interrupt_global_disable();
     g_turn_quarters_remaining = quarter_count;
     g_turn_step_deg = step_deg;
+    path_follow_set_speed_test_mode(0U, 0U);
     BlueSerial_EnterPathMode();
     BlueSerial_StartNextQuarterTurn();
     interrupt_global_enable(primask);
@@ -849,6 +1112,8 @@ static void BlueSerial_ServiceMotionCompletion(void)
 {
     uint32 primask;
     uint8 completed = 0U;
+    uint8 speed_test_timeout = 0U;
+    uint8 speed_test_fault = 0U;
     path_follow_status_t status = {0};
 
     primask = interrupt_global_disable();
@@ -880,6 +1145,10 @@ static void BlueSerial_ServiceMotionCompletion(void)
      * 一次路径动作完成后释放蓝牙路径接管；如果之前打开过 yawhold，
      * 则继续保持航向，否则停止电机输出。
      */
+    BlueSerial_SpeedLogFinishLocked(0U);
+    speed_test_timeout = status.speed_test_settle_timeout;
+    speed_test_fault = status.speed_test_profile_fault;
+    path_follow_set_speed_test_mode(0U, 0U);
     g_control_mode = BLUESERIAL_MODE_STOP;
     car_go_flag = g_yaw_hold_enabled ? 1U : 0U;
     car_stop_flag = 0U;
@@ -891,15 +1160,28 @@ static void BlueSerial_ServiceMotionCompletion(void)
 
     if (completed)
     {
-        BlueSerial_Printf("DONE\r\n");
+        if (speed_test_fault)
+        {
+            BlueSerial_Printf("FAULT speed_profile\r\n");
+        }
+        else if (speed_test_timeout)
+        {
+            BlueSerial_Printf("DONE settle_timeout\r\n");
+        }
+        else
+        {
+            BlueSerial_Printf("DONE\r\n");
+        }
     }
 }
 
 static void BlueSerial_EnterRawPwmMode(void)
 {
+    BlueSerial_SpeedLogFinishLocked(1U);
     g_turn_quarters_remaining = 0U;
     g_yaw_hold_enabled = 0U;
     path_follow_set_path(NULL, 0U);
+    path_follow_set_speed_test_mode(0U, 0U);
     path_follow_set_stationary_yaw_hold_enabled(0U);
     g_control_mode = BLUESERIAL_MODE_RAW_PWM;
     car_go_flag = 0U;
@@ -922,6 +1204,12 @@ void Blue_Serial_Init(void)
     g_telemetry_report_pending = 0U;
     g_telemetry_sequence = 0U;
     g_telemetry_was_active = 0U;
+    g_speed_log_enabled = 0U;
+    g_speed_test_profile_enabled = 0U;
+    g_speed_test_yaw_enabled = 0U;
+    g_speed_run_id = 0U;
+    g_speed_cfg_id = 0U;
+    BlueSerial_SpeedLogResetLocked();
     uart_init(BLUESERIAL_UART, BLUESERIAL_BAUDRATE, BLUESERIAL_TX_PIN, BLUESERIAL_RX_PIN);
     interrupt_set_priority(BLUESERIAL_IRQN, BLUESERIAL_IRQ_PRIORITY);
     uart_rx_interrupt(BLUESERIAL_UART, ZF_ENABLE);
@@ -983,6 +1271,525 @@ void BlueSerial_Printf(char *format, ...)
     va_end(arg);
     String[sizeof(String) - 1U] = '\0';
     BlueSerial_SendString(String);
+}
+
+static int BlueSerial_DirectionWheelSign(blueserial_move_direction_t direction,
+                                         uint8 wheel_index)
+{
+    static const int8 signs[4][MOTOR_WHEEL_COUNT] =
+    {
+        { 1,  1,  1,  1},
+        {-1, -1, -1, -1},
+        {-1,  1,  1, -1},
+        { 1, -1, -1,  1}
+    };
+
+    if ((uint8)direction >= 4U || wheel_index >= MOTOR_WHEEL_COUNT)
+    {
+        return 0;
+    }
+    return signs[(uint8)direction][wheel_index];
+}
+
+static void BlueSerial_CountsToBodyCm(const int32 counts[MOTOR_WHEEL_COUNT],
+                                      float *x_cm,
+                                      float *y_cm)
+{
+    float x_counts;
+    float y_counts;
+    float count_to_cm;
+
+    if (x_cm == NULL || y_cm == NULL || pulse_per_meter <= 0.0)
+    {
+        if (x_cm != NULL)
+        {
+            *x_cm = 0.0f;
+        }
+        if (y_cm != NULL)
+        {
+            *y_cm = 0.0f;
+        }
+        return;
+    }
+    x_counts = 0.25f * (float)(counts[MOTOR_WHEEL_UL] +
+                                      counts[MOTOR_WHEEL_UR] +
+                                      counts[MOTOR_WHEEL_DL] +
+                                      counts[MOTOR_WHEEL_DR]);
+    y_counts = 0.25f * (float)(-counts[MOTOR_WHEEL_UL] +
+                                      counts[MOTOR_WHEEL_UR] +
+                                      counts[MOTOR_WHEEL_DL] -
+                                      counts[MOTOR_WHEEL_DR]);
+    count_to_cm = 100.0f / (float)pulse_per_meter;
+    *y_cm = y_counts * count_to_cm * LATERAL_CORRECTION_FACTOR;
+    *x_cm = x_counts * count_to_cm +
+            LATERAL_TO_LONGITUDINAL_COUPLING_FACTOR * (*y_cm);
+}
+
+static void BlueSerial_ProjectBodyCm(blueserial_move_direction_t direction,
+                                     float x_cm,
+                                     float y_cm,
+                                     float *axis_cm,
+                                     float *cross_cm)
+{
+    if (axis_cm == NULL || cross_cm == NULL)
+    {
+        return;
+    }
+    switch (direction)
+    {
+        case BLUESERIAL_MOVE_FORWARD:
+            *axis_cm = x_cm;
+            *cross_cm = y_cm;
+            break;
+        case BLUESERIAL_MOVE_BACKWARD:
+            *axis_cm = -x_cm;
+            *cross_cm = y_cm;
+            break;
+        case BLUESERIAL_MOVE_LEFT:
+            *axis_cm = y_cm;
+            *cross_cm = x_cm;
+            break;
+        case BLUESERIAL_MOVE_RIGHT:
+            *axis_cm = -y_cm;
+            *cross_cm = x_cm;
+            break;
+        default:
+            *axis_cm = 0.0f;
+            *cross_cm = 0.0f;
+            break;
+    }
+}
+
+static uint16 BlueSerial_SpeedLogSlotFromDumpIndex(uint16 dump_index)
+{
+    if (!g_speed_log_overflow || dump_index < BLUESERIAL_SPEED_LOG_HEAD_COUNT)
+    {
+        return dump_index;
+    }
+    return (uint16)(BLUESERIAL_SPEED_LOG_HEAD_COUNT +
+                    ((g_speed_log_tail_write + dump_index -
+                      BLUESERIAL_SPEED_LOG_HEAD_COUNT) %
+                     BLUESERIAL_SPEED_LOG_TAIL_COUNT));
+}
+
+static void BlueSerial_PrintSpeedTuneStatus(void)
+{
+    uint32 primask;
+    path_follow_status_t status = {0};
+    float kp[MOTOR_WHEEL_COUNT];
+    float ki[MOTOR_WHEEL_COUNT];
+    float kd[MOTOR_WHEEL_COUNT];
+    float alpha[MOTOR_WHEEL_COUNT];
+    int deadzone_fwd[MOTOR_WHEEL_COUNT];
+    int deadzone_rev[MOTOR_WHEEL_COUNT];
+    int deadzone_min;
+    uint8 i;
+
+    primask = interrupt_global_disable();
+    path_follow_get_status(&status);
+    for (i = 0U; i < MOTOR_WHEEL_COUNT; ++i)
+    {
+        tagPID_T *pid = BlueSerial_GetWheelPid(i);
+        kp[i] = pid->fKp;
+        ki[i] = pid->fKi;
+        kd[i] = pid->fKd;
+        alpha[i] = pid->alpha;
+        deadzone_fwd[i] = motor_deadzone_fwd[i];
+        deadzone_rev[i] = motor_deadzone_rev[i];
+    }
+    deadzone_min = motor_deadzone_target_min_counts;
+    interrupt_global_enable(primask);
+
+    BlueSerial_Printf("SPDCTL run=%lu cfg=%lu mode=%u arm=%u test=%u yaw=%u "
+                      "pos=%u line=%u log=%u rec=%u ready=%u n=%u total=%lu ovf=%u\r\n",
+                      (unsigned long)g_speed_run_id,
+                      (unsigned long)g_speed_cfg_id,
+                      (unsigned int)g_control_mode,
+                      (unsigned int)g_speed_test_profile_enabled,
+                      (unsigned int)status.speed_test_enabled,
+                      (unsigned int)g_speed_test_yaw_enabled,
+                      (unsigned int)status.position_loop_active,
+                      (unsigned int)status.line_guidance_active,
+                      (unsigned int)g_speed_log_enabled,
+                      (unsigned int)g_speed_log_recording,
+                      (unsigned int)g_speed_log_ready,
+                      (unsigned int)g_speed_log_count,
+                      (unsigned long)g_speed_log_total_ticks,
+                      (unsigned int)g_speed_log_overflow);
+    BlueSerial_Printf("SPDPID UL=%.3f,%.3f,%.3f,%.2f UR=%.3f,%.3f,%.3f,%.2f\r\n",
+                      kp[0], ki[0], kd[0], alpha[0],
+                      kp[1], ki[1], kd[1], alpha[1]);
+    BlueSerial_Printf("SPDPID DL=%.3f,%.3f,%.3f,%.2f DR=%.3f,%.3f,%.3f,%.2f\r\n",
+                      kp[2], ki[2], kd[2], alpha[2],
+                      kp[3], ki[3], kd[3], alpha[3]);
+    BlueSerial_Printf("SPDDZ UL=%d,%d UR=%d,%d min=%d\r\n",
+                      deadzone_fwd[0], deadzone_rev[0],
+                      deadzone_fwd[1], deadzone_rev[1], deadzone_min);
+    BlueSerial_Printf("SPDDZ DL=%d,%d DR=%d,%d min=%d\r\n",
+                      deadzone_fwd[2], deadzone_rev[2],
+                      deadzone_fwd[3], deadzone_rev[3], deadzone_min);
+}
+
+static char BlueSerial_DirectionLetter(blueserial_move_direction_t direction)
+{
+    static const char letters[4] = {'F', 'B', 'L', 'R'};
+
+    return ((uint8)direction < 4U) ? letters[(uint8)direction] : '?';
+}
+
+static void BlueSerial_PrintSpeedSummary(void)
+{
+    int32 target_counts[MOTOR_WHEEL_COUNT];
+    int32 actual_counts[MOTOR_WHEEL_COUNT];
+    int32 error_counts[MOTOR_WHEEL_COUNT];
+    int32 t50_target_counts[MOTOR_WHEEL_COUNT] = {0};
+    int32 t50_actual_counts[MOTOR_WHEEL_COUNT] = {0};
+    int32 start_200ms_counts[MOTOR_WHEEL_COUNT] = {0};
+    float gain[MOTOR_WHEEL_COUNT];
+    float nmae[MOTOR_WHEEL_COUNT];
+    float target_x_cm;
+    float target_y_cm;
+    float actual_x_cm;
+    float actual_y_cm;
+    float target_axis_cm;
+    float target_cross_cm;
+    float actual_axis_cm;
+    float actual_cross_cm;
+    float cross_error_cm;
+    float cross_ratio_pct;
+    float yaw_error_deg;
+    float encoder_yaw_deg = 0.0f;
+    float max_gain = -1000000.0f;
+    float min_gain = 1000000.0f;
+    float wheel_spread_pct;
+    float t50_target_x_cm;
+    float t50_target_y_cm;
+    float t50_actual_x_cm;
+    float t50_actual_y_cm;
+    float t50_target_axis_cm;
+    float t50_target_cross_cm;
+    float t50_actual_axis_cm;
+    float t50_actual_cross_cm;
+    float t50_cross_error_cm = 0.0f;
+    float t50_yaw_deg = 0.0f;
+    float peak_target_average = 0.0f;
+    float overshoot_cm;
+    float compensated_back_cm;
+    int peak_target[MOTOR_WHEEL_COUNT] = {0};
+    int target_start_tick[MOTOR_WHEEL_COUNT] = {-1, -1, -1, -1};
+    int actual_start_tick[MOTOR_WHEEL_COUNT] = {-1, -1, -1, -1};
+    int lag_ms[MOTOR_WHEEL_COUNT] = {-1, -1, -1, -1};
+    int first_target_tick = -1;
+    int t50_tick = -1;
+    int lag_spread_ms = 0;
+    int min_lag_ms = 0;
+    int max_lag_ms = 0;
+    uint32 settle_ms = 0U;
+    uint16 sample_count;
+    uint16 startup_sample_count;
+    uint16 j;
+    uint8 i;
+    uint8 lags_valid = 1U;
+
+    if (!g_speed_log_ready || g_speed_log_recording)
+    {
+        BlueSerial_Printf("ERR speed_log_not_ready rec=%u\r\n",
+                          (unsigned int)g_speed_log_recording);
+        return;
+    }
+
+    sample_count = g_speed_log_count;
+    startup_sample_count = (sample_count < BLUESERIAL_SPEED_LOG_HEAD_COUNT) ?
+                           sample_count : BLUESERIAL_SPEED_LOG_HEAD_COUNT;
+    for (i = 0U; i < MOTOR_WHEEL_COUNT; ++i)
+    {
+        int direction_sign = BlueSerial_DirectionWheelSign(g_speed_log_direction, i);
+        float signed_target;
+
+        target_counts[i] = g_speed_log_final_motor.cumulative_target_counts[i];
+        actual_counts[i] = g_speed_log_final_motor.cumulative_raw_counts[i];
+        error_counts[i] = target_counts[i] - actual_counts[i];
+        signed_target = (float)(direction_sign * target_counts[i]);
+        gain[i] = (fabsf(signed_target) > 0.5f) ?
+                  (100.0f * (float)(direction_sign * actual_counts[i]) /
+                   signed_target) : 0.0f;
+        nmae[i] = (g_speed_log_abs_target_sum[i] > 0U) ?
+                  (100.0f * (float)g_speed_log_abs_error_sum[i] /
+                   (float)g_speed_log_abs_target_sum[i]) : 0.0f;
+        max_gain = fmaxf(max_gain, gain[i]);
+        min_gain = fminf(min_gain, gain[i]);
+    }
+    wheel_spread_pct = max_gain - min_gain;
+
+    for (j = 0U; j < startup_sample_count; ++j)
+    {
+        const blueserial_speed_sample_t *sample =
+            &g_speed_log[BlueSerial_SpeedLogSlotFromDumpIndex(j)];
+        float average_target = 0.0f;
+
+        for (i = 0U; i < MOTOR_WHEEL_COUNT; ++i)
+        {
+            int direction_sign = BlueSerial_DirectionWheelSign(g_speed_log_direction, i);
+            int signed_target = direction_sign * sample->target[i];
+
+            if (signed_target > peak_target[i])
+            {
+                peak_target[i] = signed_target;
+            }
+            average_target += 0.25f * (float)signed_target;
+        }
+        peak_target_average = fmaxf(peak_target_average, average_target);
+    }
+
+    for (j = 0U; j < startup_sample_count; ++j)
+    {
+        const blueserial_speed_sample_t *sample =
+            &g_speed_log[BlueSerial_SpeedLogSlotFromDumpIndex(j)];
+
+        for (i = 0U; i < MOTOR_WHEEL_COUNT; ++i)
+        {
+            int direction_sign = BlueSerial_DirectionWheelSign(g_speed_log_direction, i);
+            int threshold = (peak_target[i] + 9) / 10;
+            int signed_target = direction_sign * sample->target[i];
+            int signed_actual = direction_sign * sample->actual[i];
+
+            if (threshold < 1)
+            {
+                threshold = 1;
+            }
+            if (target_start_tick[i] < 0 && signed_target >= threshold)
+            {
+                target_start_tick[i] = (int)sample->tick;
+                if (first_target_tick < 0 || target_start_tick[i] < first_target_tick)
+                {
+                    first_target_tick = target_start_tick[i];
+                }
+            }
+            if (target_start_tick[i] >= 0 &&
+                actual_start_tick[i] < 0 && j + 1U < startup_sample_count &&
+                (int)sample->tick >= target_start_tick[i])
+            {
+                const blueserial_speed_sample_t *next_sample =
+                    &g_speed_log[BlueSerial_SpeedLogSlotFromDumpIndex((uint16)(j + 1U))];
+                int next_actual = direction_sign * next_sample->actual[i];
+
+                if (next_sample->tick == (uint16)(sample->tick + 1U) &&
+                    signed_actual >= threshold && next_actual >= threshold)
+                {
+                    actual_start_tick[i] = (int)sample->tick;
+                }
+            }
+        }
+    }
+
+    if (first_target_tick >= 0)
+    {
+        for (j = 0U; j < startup_sample_count; ++j)
+        {
+            const blueserial_speed_sample_t *sample =
+                &g_speed_log[BlueSerial_SpeedLogSlotFromDumpIndex(j)];
+
+            if ((int)sample->tick >= first_target_tick &&
+                (int)sample->tick < first_target_tick + 20)
+            {
+                for (i = 0U; i < MOTOR_WHEEL_COUNT; ++i)
+                {
+                    start_200ms_counts[i] +=
+                        BlueSerial_DirectionWheelSign(g_speed_log_direction, i) *
+                        sample->raw[i];
+                }
+            }
+        }
+    }
+
+    for (i = 0U; i < MOTOR_WHEEL_COUNT; ++i)
+    {
+        if (target_start_tick[i] >= 0 && actual_start_tick[i] >= 0)
+        {
+            lag_ms[i] = (actual_start_tick[i] - target_start_tick[i]) * 10;
+        }
+        else
+        {
+            lags_valid = 0U;
+        }
+        if (i == 0U || lag_ms[i] < min_lag_ms)
+        {
+            min_lag_ms = lag_ms[i];
+        }
+        if (i == 0U || lag_ms[i] > max_lag_ms)
+        {
+            max_lag_ms = lag_ms[i];
+        }
+    }
+    lag_spread_ms = lags_valid ? (max_lag_ms - min_lag_ms) : -1;
+
+    if (peak_target_average > 0.0f)
+    {
+        for (j = 0U; j < startup_sample_count; ++j)
+        {
+            const blueserial_speed_sample_t *sample =
+                &g_speed_log[BlueSerial_SpeedLogSlotFromDumpIndex(j)];
+            float average_target = 0.0f;
+
+            for (i = 0U; i < MOTOR_WHEEL_COUNT; ++i)
+            {
+                int direction_sign = BlueSerial_DirectionWheelSign(g_speed_log_direction, i);
+                average_target += 0.25f * (float)(direction_sign * sample->target[i]);
+                t50_target_counts[i] += sample->target[i];
+                t50_actual_counts[i] += sample->raw[i];
+            }
+            if (average_target >= 0.5f * peak_target_average)
+            {
+                t50_tick = (int)sample->tick;
+                t50_yaw_deg = (float)sample->yaw_delta_cdeg * 0.01f;
+                break;
+            }
+        }
+    }
+
+    BlueSerial_CountsToBodyCm(target_counts, &target_x_cm, &target_y_cm);
+    BlueSerial_CountsToBodyCm(actual_counts, &actual_x_cm, &actual_y_cm);
+    BlueSerial_ProjectBodyCm(g_speed_log_direction, target_x_cm, target_y_cm,
+                             &target_axis_cm, &target_cross_cm);
+    BlueSerial_ProjectBodyCm(g_speed_log_direction, actual_x_cm, actual_y_cm,
+                             &actual_axis_cm, &actual_cross_cm);
+    cross_error_cm = actual_cross_cm - target_cross_cm;
+    cross_ratio_pct = 100.0f * cross_error_cm /
+                      fmaxf(fabsf(actual_axis_cm), 1.0f);
+    yaw_error_deg = BlueSerial_WrapDeg(g_speed_log_end_yaw_deg -
+                                       g_speed_log_start_yaw_deg);
+    if (pulse_per_meter > 0.0 && rx_plus_ry_cali > 0.0f)
+    {
+        float rotation_counts = 0.25f *
+            (float)(-actual_counts[0] + actual_counts[1] -
+                    actual_counts[2] + actual_counts[3]);
+        encoder_yaw_deg = rotation_counts /
+                          ((float)pulse_per_meter * rx_plus_ry_cali) *
+                          (180.0f / (float)M_PI);
+    }
+    if (t50_tick >= 0)
+    {
+        BlueSerial_CountsToBodyCm(t50_target_counts,
+                                  &t50_target_x_cm, &t50_target_y_cm);
+        BlueSerial_CountsToBodyCm(t50_actual_counts,
+                                  &t50_actual_x_cm, &t50_actual_y_cm);
+        BlueSerial_ProjectBodyCm(g_speed_log_direction,
+                                 t50_target_x_cm, t50_target_y_cm,
+                                 &t50_target_axis_cm, &t50_target_cross_cm);
+        BlueSerial_ProjectBodyCm(g_speed_log_direction,
+                                 t50_actual_x_cm, t50_actual_y_cm,
+                                 &t50_actual_axis_cm, &t50_actual_cross_cm);
+        t50_cross_error_cm = t50_actual_cross_cm - t50_target_cross_cm;
+    }
+    overshoot_cm = fmaxf(0.0f, g_speed_log_peak_axis_cm - target_axis_cm);
+    compensated_back_cm = fmaxf(0.0f, g_speed_log_peak_axis_cm - actual_axis_cm);
+    if (g_speed_log_profile_total_s > 0.0f)
+    {
+        int settle_ms_signed = (int)(g_speed_log_total_ticks * 10U) -
+                               BlueSerial_RoundToInt(g_speed_log_profile_total_s * 1000.0f);
+        settle_ms = (settle_ms_signed > 0) ? (uint32)settle_ms_signed : 0U;
+    }
+
+    BlueSerial_Printf("SPDSUM ID=%lu CFG=%lu D=%c V=%.1f REQ=%.2f T=%.2f A=%.2f SH=%.2f "
+                      "RG=%.2f X=%.2f XR=%.2f YE=%.2f YP=%.2f YENC=%.2f "
+                      "AB=%u TO=%u PF=%u OVF=%u\r\n",
+                       (unsigned long)g_speed_log_run_id,
+                      (unsigned long)g_speed_log_cfg_id,
+                      BlueSerial_DirectionLetter(g_speed_log_direction),
+                      g_speed_log_requested_speed_cmps,
+                      g_speed_log_requested_cm, target_axis_cm, actual_axis_cm,
+                      target_axis_cm - actual_axis_cm,
+                      g_speed_log_requested_cm - actual_axis_cm,
+                      cross_error_cm, cross_ratio_pct, yaw_error_deg,
+                      g_speed_log_peak_yaw_abs_deg, encoder_yaw_deg,
+                      (unsigned int)g_speed_log_aborted,
+                      (unsigned int)g_speed_log_settle_timeout,
+                      (unsigned int)g_speed_log_profile_fault,
+                      (unsigned int)g_speed_log_overflow);
+    BlueSerial_Printf("SPDWHL ID=%lu G=%.1f,%.1f,%.1f,%.1f GSP=%.1f "
+                      "NM=%.1f,%.1f,%.1f,%.1f PE=%d,%d,%d,%d SATN=%lu,%lu,%lu,%lu\r\n",
+                       (unsigned long)g_speed_log_run_id,
+                      gain[0], gain[1], gain[2], gain[3], wheel_spread_pct,
+                      nmae[0], nmae[1], nmae[2], nmae[3],
+                      g_speed_log_peak_error[0], g_speed_log_peak_error[1],
+                      g_speed_log_peak_error[2], g_speed_log_peak_error[3],
+                      (unsigned long)g_speed_log_saturation_ticks[0],
+                      (unsigned long)g_speed_log_saturation_ticks[1],
+                      (unsigned long)g_speed_log_saturation_ticks[2],
+                      (unsigned long)g_speed_log_saturation_ticks[3]);
+    BlueSerial_Printf("SPDSTART ID=%lu L10=%d,%d,%d,%d DSP=%d X0=%.2f Y0=%.2f T50=%d "
+                      "D200=%ld,%ld,%ld,%ld\r\n",
+                       (unsigned long)g_speed_log_run_id,
+                       lag_ms[0], lag_ms[1], lag_ms[2], lag_ms[3], lag_spread_ms,
+                      t50_cross_error_cm, t50_yaw_deg,
+                      (t50_tick >= 0) ? t50_tick * 10 : -1,
+                      (long)start_200ms_counts[0], (long)start_200ms_counts[1],
+                      (long)start_200ms_counts[2], (long)start_200ms_counts[3]);
+    BlueSerial_Printf("SPDTAIL ID=%lu PK=%.2f OV=%.2f BK=%.2f SET=%lums TOTAL=%lums\r\n",
+                       (unsigned long)g_speed_log_run_id,
+                       g_speed_log_peak_axis_cm, overshoot_cm, compensated_back_cm,
+                      (unsigned long)settle_ms,
+                      (unsigned long)(g_speed_log_total_ticks * 10U));
+    BlueSerial_Printf("SPDCUM ID=%lu T=%ld,%ld,%ld,%ld A=%ld,%ld,%ld,%ld "
+                      "E=%ld,%ld,%ld,%ld\r\n",
+                       (unsigned long)g_speed_log_run_id,
+                       (long)target_counts[0], (long)target_counts[1],
+                      (long)target_counts[2], (long)target_counts[3],
+                      (long)actual_counts[0], (long)actual_counts[1],
+                      (long)actual_counts[2], (long)actual_counts[3],
+                      (long)error_counts[0], (long)error_counts[1],
+                      (long)error_counts[2], (long)error_counts[3]);
+}
+
+static void BlueSerial_ServiceSpeedSummary(void)
+{
+    if (!g_speed_summary_pending)
+    {
+        return;
+    }
+    g_speed_summary_pending = 0U;
+    BlueSerial_PrintSpeedSummary();
+}
+
+static void BlueSerial_ServiceSpeedDump(void)
+{
+    const blueserial_speed_sample_t *sample;
+    uint16 slot;
+
+    if (!g_speed_log_dumping || g_speed_log_recording)
+    {
+        return;
+    }
+    if (g_speed_log_dump_index >= g_speed_log_count)
+    {
+        g_speed_log_dumping = 0U;
+        BlueSerial_Printf("SPDEND ID=%lu rows=%u total=%lu ovf=%u\r\n",
+                           (unsigned long)g_speed_log_run_id,
+                           (unsigned int)g_speed_log_count,
+                          (unsigned long)g_speed_log_total_ticks,
+                          (unsigned int)g_speed_log_overflow);
+        return;
+    }
+
+    slot = BlueSerial_SpeedLogSlotFromDumpIndex(g_speed_log_dump_index);
+    sample = &g_speed_log[slot];
+    BlueSerial_Printf("SPD10 ID=%lu K=%u T=%d,%d,%d,%d F=%d,%d,%d,%d A=%d,%d,%d,%d "
+                      "U=%d,%d,%d,%d P=%d,%d,%d,%d Y=%.2f G=%.2f\r\n",
+                       (unsigned long)g_speed_log_run_id,
+                       (unsigned int)sample->tick,
+                      sample->target[0], sample->target[1],
+                      sample->target[2], sample->target[3],
+                      sample->actual[0], sample->actual[1],
+                      sample->actual[2], sample->actual[3],
+                      sample->raw[0], sample->raw[1],
+                      sample->raw[2], sample->raw[3],
+                      sample->pid_pwm[0], sample->pid_pwm[1],
+                      sample->pid_pwm[2], sample->pid_pwm[3],
+                      sample->final_pwm[0], sample->final_pwm[1],
+                      sample->final_pwm[2], sample->final_pwm[3],
+                      (float)sample->yaw_delta_cdeg * 0.01f,
+                      (float)sample->gyro_z_cdegps * 0.01f);
+    g_speed_log_dump_index++;
 }
 
 void BlueSerial_GetLastRxFrame(char *buffer, uint16 length)
@@ -1179,6 +1986,248 @@ static int BlueSerial_GetLogicalWheelIndex(const char *name)
     return -1;
 }
 
+static tagPID_T *BlueSerial_GetWheelPid(uint8 wheel_index)
+{
+    static tagPID_T *const pids[MOTOR_WHEEL_COUNT] =
+    {
+        &ULpid, &URpid, &DLpid, &DRpid
+    };
+
+    return (wheel_index < MOTOR_WHEEL_COUNT) ? pids[wheel_index] : NULL;
+}
+
+static PIDInitStruct *BlueSerial_GetWheelPidInit(uint8 wheel_index)
+{
+    static PIDInitStruct *const init[MOTOR_WHEEL_COUNT] =
+    {
+        &ULPidInitStruct, &URPidInitStruct, &DLPidInitStruct, &DRPidInitStruct
+    };
+
+    return (wheel_index < MOTOR_WHEEL_COUNT) ? init[wheel_index] : NULL;
+}
+
+static int BlueSerial_ParseWheelToken(const char *token)
+{
+    if (strcmp(token, "ul") == 0)
+    {
+        return MOTOR_WHEEL_UL;
+    }
+    if (strcmp(token, "ur") == 0)
+    {
+        return MOTOR_WHEEL_UR;
+    }
+    if (strcmp(token, "dl") == 0)
+    {
+        return MOTOR_WHEEL_DL;
+    }
+    if (strcmp(token, "dr") == 0)
+    {
+        return MOTOR_WHEEL_DR;
+    }
+    if (strcmp(token, "all") == 0)
+    {
+        return MOTOR_WHEEL_COUNT;
+    }
+    return -1;
+}
+
+static uint8 BlueSerial_TuningIsIdle(void)
+{
+    uint32 primask;
+    uint8 idle;
+    path_follow_status_t status = {0};
+
+    primask = interrupt_global_disable();
+    idle = (g_control_mode == BLUESERIAL_MODE_STOP && !g_yaw_hold_enabled) ? 1U : 0U;
+    path_follow_get_status(&status);
+    interrupt_global_enable(primask);
+    return (idle && !status.active) ? 1U : 0U;
+}
+
+static uint8 BlueSerial_SplitTuneName(const char *name,
+                                      const char *prefix,
+                                      char *wheel,
+                                      uint16 wheel_len,
+                                      const char **field)
+{
+    const char *wheel_begin;
+    const char *dot;
+    size_t prefix_len = strlen(prefix);
+    size_t token_len;
+
+    if (strncmp(name, prefix, prefix_len) != 0)
+    {
+        return 0U;
+    }
+    wheel_begin = name + prefix_len;
+    dot = strchr(wheel_begin, '.');
+    if (dot == NULL || dot == wheel_begin || dot[1] == '\0' || strchr(dot + 1, '.') != NULL)
+    {
+        return 0U;
+    }
+    token_len = (size_t)(dot - wheel_begin);
+    if (token_len >= wheel_len)
+    {
+        return 0U;
+    }
+    (void)memcpy(wheel, wheel_begin, token_len);
+    wheel[token_len] = '\0';
+    *field = dot + 1;
+    return 1U;
+}
+
+static uint8 BlueSerial_TrySetWheelPid(const char *name, float value)
+{
+    char wheel_name[8];
+    const char *field;
+    int parsed_wheel;
+    uint8 first_wheel;
+    uint8 last_wheel;
+    uint8 i;
+    float applied_value;
+    uint32 primask;
+
+    if (!BlueSerial_SplitTuneName(name, "spd.", wheel_name,
+                                  (uint16)sizeof(wheel_name), &field))
+    {
+        return 0U;
+    }
+    parsed_wheel = BlueSerial_ParseWheelToken(wheel_name);
+    if (parsed_wheel < 0 ||
+        (strcmp(field, "kp") != 0 && strcmp(field, "ki") != 0 &&
+         strcmp(field, "kd") != 0 && strcmp(field, "alpha") != 0))
+    {
+        return 0U;
+    }
+    if (!BlueSerial_TuningIsIdle())
+    {
+        BlueSerial_Printf("ERR stop_first %s\r\n", name);
+        return 1U;
+    }
+
+    if (strcmp(field, "kp") == 0)
+    {
+        applied_value = BlueSerial_ClampFloat(value, 0.0f, BLUESERIAL_MAX_WHEEL_KP);
+    }
+    else if (strcmp(field, "ki") == 0)
+    {
+        applied_value = BlueSerial_ClampFloat(value, 0.0f, BLUESERIAL_MAX_WHEEL_KI);
+    }
+    else if (strcmp(field, "kd") == 0)
+    {
+        applied_value = BlueSerial_ClampFloat(value, 0.0f, BLUESERIAL_MAX_WHEEL_KD);
+    }
+    else
+    {
+        applied_value = BlueSerial_ClampFloat(value, 0.0f, 1.0f);
+    }
+
+    first_wheel = (parsed_wheel == MOTOR_WHEEL_COUNT) ? 0U : (uint8)parsed_wheel;
+    last_wheel = (parsed_wheel == MOTOR_WHEEL_COUNT) ?
+                 (MOTOR_WHEEL_COUNT - 1U) : (uint8)parsed_wheel;
+    primask = interrupt_global_disable();
+    for (i = first_wheel; i <= last_wheel; ++i)
+    {
+        tagPID_T *pid = BlueSerial_GetWheelPid(i);
+        PIDInitStruct *init = BlueSerial_GetWheelPidInit(i);
+
+        if (strcmp(field, "kp") == 0)
+        {
+            init->fKp = applied_value;
+        }
+        else if (strcmp(field, "ki") == 0)
+        {
+            init->fKi = applied_value;
+        }
+        else if (strcmp(field, "kd") == 0)
+        {
+            init->fKd = applied_value;
+        }
+        else
+        {
+            init->alpha = applied_value;
+        }
+        PID_Update(pid, init);
+        PID_Clear(pid);
+    }
+    g_speed_cfg_id++;
+    interrupt_global_enable(primask);
+    BlueSerial_Printf("OK spd.%s.%s=%.4f cfg=%lu\r\n",
+                      wheel_name, field, applied_value,
+                      (unsigned long)g_speed_cfg_id);
+    return 1U;
+}
+
+static uint8 BlueSerial_TrySetDeadzone(const char *name, float value)
+{
+    char wheel_name[8];
+    const char *field;
+    int parsed_wheel;
+    int applied_value;
+    uint8 first_wheel;
+    uint8 last_wheel;
+    uint8 i;
+    uint32 primask;
+
+    if (strcmp(name, "dz.min") == 0)
+    {
+        if (!BlueSerial_TuningIsIdle())
+        {
+            BlueSerial_Printf("ERR stop_first %s\r\n", name);
+            return 1U;
+        }
+        applied_value = BlueSerial_ClampInt(BlueSerial_RoundToInt(value),
+                                            1, BLUESERIAL_MAX_DEADZONE_MIN_COUNTS);
+        primask = interrupt_global_disable();
+        motor_deadzone_target_min_counts = applied_value;
+        g_speed_cfg_id++;
+        interrupt_global_enable(primask);
+        BlueSerial_Printf("OK dz.min=%dcount cfg=%lu\r\n",
+                          applied_value, (unsigned long)g_speed_cfg_id);
+        return 1U;
+    }
+    if (!BlueSerial_SplitTuneName(name, "dz.", wheel_name,
+                                  (uint16)sizeof(wheel_name), &field))
+    {
+        return 0U;
+    }
+    parsed_wheel = BlueSerial_ParseWheelToken(wheel_name);
+    if (parsed_wheel < 0 ||
+        (strcmp(field, "fwd") != 0 && strcmp(field, "rev") != 0))
+    {
+        return 0U;
+    }
+    if (!BlueSerial_TuningIsIdle())
+    {
+        BlueSerial_Printf("ERR stop_first %s\r\n", name);
+        return 1U;
+    }
+
+    applied_value = BlueSerial_ClampInt(BlueSerial_RoundToInt(value),
+                                        0, BLUESERIAL_MAX_DEADZONE_PWM);
+    first_wheel = (parsed_wheel == MOTOR_WHEEL_COUNT) ? 0U : (uint8)parsed_wheel;
+    last_wheel = (parsed_wheel == MOTOR_WHEEL_COUNT) ?
+                 (MOTOR_WHEEL_COUNT - 1U) : (uint8)parsed_wheel;
+    primask = interrupt_global_disable();
+    for (i = first_wheel; i <= last_wheel; ++i)
+    {
+        if (strcmp(field, "fwd") == 0)
+        {
+            motor_deadzone_fwd[i] = applied_value;
+        }
+        else
+        {
+            motor_deadzone_rev[i] = applied_value;
+        }
+    }
+    g_speed_cfg_id++;
+    interrupt_global_enable(primask);
+    BlueSerial_Printf("OK dz.%s.%s=%d cfg=%lu\r\n",
+                      wheel_name, field, applied_value,
+                      (unsigned long)g_speed_cfg_id);
+    return 1U;
+}
+
 static uint8 BlueSerial_SetSlider(const char *name, float value)
 {
     uint32 primask;
@@ -1186,9 +2235,56 @@ static uint8 BlueSerial_SetSlider(const char *name, float value)
     int pwm_value;
     float applied_value;
 
+    if (BlueSerial_TrySetWheelPid(name, value) ||
+        BlueSerial_TrySetDeadzone(name, value))
+    {
+        return 1U;
+    }
+    if (strcmp(name, "test.profile") == 0 || strcmp(name, "test.yaw") == 0 ||
+        strcmp(name, "spd.log") == 0)
+    {
+        uint8 enabled;
+
+        if (!BlueSerial_TuningIsIdle())
+        {
+            BlueSerial_Printf("ERR stop_first %s\r\n", name);
+            return 1U;
+        }
+        enabled = (value >= 0.5f) ? 1U : 0U;
+        primask = interrupt_global_disable();
+        if (strcmp(name, "test.profile") == 0)
+        {
+            g_speed_test_profile_enabled = enabled;
+        }
+        else if (strcmp(name, "test.yaw") == 0)
+        {
+            g_speed_test_yaw_enabled = enabled;
+        }
+        else
+        {
+            g_speed_log_enabled = enabled;
+            if (!enabled)
+            {
+                BlueSerial_SpeedLogResetLocked();
+            }
+        }
+        g_speed_cfg_id++;
+        interrupt_global_enable(primask);
+        BlueSerial_Printf("OK %s=%u cfg=%lu\r\n",
+                          name, (unsigned int)enabled,
+                          (unsigned long)g_speed_cfg_id);
+        return 1U;
+    }
+
     wheel_index = BlueSerial_GetLogicalWheelIndex(name);
     if (wheel_index >= 0)
     {
+        if (g_control_mode != BLUESERIAL_MODE_RAW_PWM &&
+            !BlueSerial_TuningIsIdle())
+        {
+            BlueSerial_Printf("ERR stop_first %s\r\n", name);
+            return 1U;
+        }
         pwm_value = BlueSerial_ClampInt(BlueSerial_RoundToInt(value), LIMIT_PWM_MIN, LIMIT_PWM_MAX);
         primask = interrupt_global_disable();
         g_raw_pwm[wheel_index] = pwm_value;
@@ -1426,6 +2522,7 @@ static void BlueSerial_PrintStatus(void)
                           point_target_x_m,
                           point_target_y_m);
     }
+    BlueSerial_PrintSpeedTuneStatus();
 }
 
 static uint8 BlueSerial_RunButton(const char *command)
@@ -1453,6 +2550,16 @@ static uint8 BlueSerial_RunButton(const char *command)
     if (strcmp(command, "start") == 0 || strcmp(command, "run") == 0 ||
         strcmp(command, "apply") == 0 || strcmp(command, "move") == 0)
     {
+        if (g_speed_summary_pending || g_speed_log_dumping)
+        {
+            BlueSerial_Printf("ERR wait_speed_report\r\n");
+            return 1U;
+        }
+        if (!BlueSerial_TuningIsIdle())
+        {
+            BlueSerial_Printf("ERR stop_first start\r\n");
+            return 1U;
+        }
         if (BlueSerial_HasPointTarget())
         {
             if (!BlueSerial_StartPointTargetMove())
@@ -1475,6 +2582,16 @@ static uint8 BlueSerial_RunButton(const char *command)
     if (strcmp(command, "speed") == 0 || strcmp(command, "cruise") == 0 ||
         strcmp(command, "speed.start") == 0)
     {
+        if (g_speed_summary_pending || g_speed_log_dumping)
+        {
+            BlueSerial_Printf("ERR wait_speed_report\r\n");
+            return 1U;
+        }
+        if (!BlueSerial_TuningIsIdle())
+        {
+            BlueSerial_Printf("ERR stop_first speed\r\n");
+            return 1U;
+        }
         if (!BlueSerial_StartSpeedCruise())
         {
             BlueSerial_Printf("ERR set_target_speed_first\r\n");
@@ -1487,24 +2604,44 @@ static uint8 BlueSerial_RunButton(const char *command)
     }
     if (strcmp(command, "turn90") == 0)
     {
+        if (!BlueSerial_TuningIsIdle())
+        {
+            BlueSerial_Printf("ERR stop_first turn90\r\n");
+            return 1U;
+        }
         BlueSerial_StartTurn(1U, 90.0f);
         BlueSerial_Printf("OK turn90 ccw\r\n");
         return 1U;
     }
     if (strcmp(command, "turn360") == 0)
     {
+        if (!BlueSerial_TuningIsIdle())
+        {
+            BlueSerial_Printf("ERR stop_first turn360\r\n");
+            return 1U;
+        }
         BlueSerial_StartTurn(4U, 90.0f);
         BlueSerial_Printf("OK turn360 ccw\r\n");
         return 1U;
     }
     if (strcmp(command, "turn90r") == 0)
     {
+        if (!BlueSerial_TuningIsIdle())
+        {
+            BlueSerial_Printf("ERR stop_first turn90r\r\n");
+            return 1U;
+        }
         BlueSerial_StartTurn(1U, -90.0f);
         BlueSerial_Printf("OK turn90 cw\r\n");
         return 1U;
     }
     if (strcmp(command, "turn360r") == 0)
     {
+        if (!BlueSerial_TuningIsIdle())
+        {
+            BlueSerial_Printf("ERR stop_first turn360r\r\n");
+            return 1U;
+        }
         BlueSerial_StartTurn(4U, -90.0f);
         BlueSerial_Printf("OK turn360 cw\r\n");
         return 1U;
@@ -1518,6 +2655,66 @@ static uint8 BlueSerial_RunButton(const char *command)
     if (strcmp(command, "yawhold") == 0 || strcmp(command, "yaw.hold") == 0)
     {
         BlueSerial_ToggleYawHold();
+        return 1U;
+    }
+    if (strcmp(command, "spd.status") == 0)
+    {
+        BlueSerial_PrintSpeedTuneStatus();
+        return 1U;
+    }
+    if (strcmp(command, "spd.help") == 0)
+    {
+        BlueSerial_Printf("SPDHELP [slider,test.profile,0|1] [slider,test.yaw,0|1] "
+                          "[slider,spd.log,0|1]\r\n");
+        BlueSerial_Printf("SPDHELP [slider,spd.<ul|ur|dl|dr|all>.<kp|ki|kd|alpha>,v]\r\n");
+        BlueSerial_Printf("SPDHELP [slider,dz.<ul|ur|dl|dr|all>.<fwd|rev>,v] "
+                          "[slider,dz.min,v]\r\n");
+        BlueSerial_Printf("SPDHELP [spd.status] [spd.summary] [spd.dump] "
+                          "[spd.dump.stop] [spd.reset]\r\n");
+        return 1U;
+    }
+    if (strcmp(command, "spd.summary") == 0)
+    {
+        g_speed_summary_pending = 0U;
+        BlueSerial_PrintSpeedSummary();
+        return 1U;
+    }
+    if (strcmp(command, "spd.dump") == 0)
+    {
+        if (g_speed_log_recording || !g_speed_log_ready)
+        {
+            BlueSerial_Printf("ERR speed_log_not_ready rec=%u\r\n",
+                              (unsigned int)g_speed_log_recording);
+            return 1U;
+        }
+        g_speed_log_dump_index = 0U;
+        g_speed_log_dumping = 1U;
+        BlueSerial_Printf("OK spd.dump ID=%lu rows=%u total=%lu ovf=%u\r\n",
+                          (unsigned long)g_speed_log_run_id,
+                          (unsigned int)g_speed_log_count,
+                          (unsigned long)g_speed_log_total_ticks,
+                          (unsigned int)g_speed_log_overflow);
+        return 1U;
+    }
+    if (strcmp(command, "spd.dump.stop") == 0)
+    {
+        g_speed_log_dumping = 0U;
+        BlueSerial_Printf("OK spd.dump.stop\r\n");
+        return 1U;
+    }
+    if (strcmp(command, "spd.reset") == 0)
+    {
+        uint32 primask;
+
+        if (!BlueSerial_TuningIsIdle())
+        {
+            BlueSerial_Printf("ERR stop_first spd.reset\r\n");
+            return 1U;
+        }
+        primask = interrupt_global_disable();
+        BlueSerial_SpeedLogResetLocked();
+        interrupt_global_enable(primask);
+        BlueSerial_Printf("OK spd.reset\r\n");
         return 1U;
     }
     if (strcmp(command, "status") == 0)
@@ -1646,8 +2843,11 @@ static void BlueSerial_ServiceTelemetryReport(void)
     uint32 sequence = 0U;
     uint8 report_pending;
     uint8 report_active;
+    uint8 speed_recording = 0U;
+    uint32 speed_total_ticks = 0U;
     unsigned int mode = 0U;
     path_follow_status_t status = {0};
+    motor_speed_debug_snapshot_t motor = {0};
     float target_speed_cmps;
     float actual_yaw_deg = 0.0f;
     float target_cell_x;
@@ -1664,6 +2864,12 @@ static void BlueSerial_ServiceTelemetryReport(void)
         mode = (unsigned int)g_control_mode;
         path_follow_get_status(&status);
         actual_yaw_deg = eulerAngle.yaw;
+        speed_recording = g_speed_log_recording;
+        speed_total_ticks = g_speed_log_total_ticks;
+        if (speed_recording)
+        {
+            motor_speed_debug_get_snapshot(&motor);
+        }
     }
     interrupt_global_enable(primask);
 
@@ -1678,6 +2884,27 @@ static void BlueSerial_ServiceTelemetryReport(void)
         return;
     }
     g_telemetry_was_active = report_active;
+
+    if (speed_recording)
+    {
+        if ((sequence % 10U) == 0U)
+        {
+            BlueSerial_Printf("SPDLIVE ID=%lu K=%lu TEST=%u YAW=%u "
+                              "T=%d,%d,%d,%d F=%d,%d,%d,%d Y=%.2f P=%.2f/%.2f\r\n",
+                              (unsigned long)g_speed_log_run_id,
+                              (unsigned long)speed_total_ticks,
+                              (unsigned int)status.speed_test_enabled,
+                              (unsigned int)status.speed_test_yaw_enabled,
+                              motor.target_counts[0], motor.target_counts[1],
+                              motor.target_counts[2], motor.target_counts[3],
+                              motor.filtered_counts[0], motor.filtered_counts[1],
+                              motor.filtered_counts[2], motor.filtered_counts[3],
+                              BlueSerial_WrapDeg(actual_yaw_deg - g_speed_log_start_yaw_deg),
+                              status.speed_test_profile_time_s,
+                              status.speed_test_profile_total_s);
+        }
+        return;
+    }
 
     target_speed_cmps = status.speed_ref_cmps;
     if (mode == (unsigned int)BLUESERIAL_MODE_SPEED_CRUISE)
@@ -1765,6 +2992,7 @@ void BlueSerial_ControlTick10ms(void)
     {
         distance_speed_strategy();
         motor_control(speed_encoder);
+        BlueSerial_SpeedLogCapture10ms();
         return;
     }
 
@@ -1796,9 +3024,10 @@ void BlueSerial_ControlTick10ms(void)
                 speed_three_array[1] = 0.0f;
                 break;
         }
-        speed_three_array[2] = yaw_hold.omega_cmd;
+        speed_three_array[2] = g_speed_test_yaw_enabled ? yaw_hold.omega_cmd : 0.0f;
         Kinematics_Inverse(speed_three_array, speed_encoder);
         motor_control(speed_encoder);
+        BlueSerial_SpeedLogCapture10ms();
         return;
     }
 
@@ -1814,9 +3043,13 @@ void BlueSerial_ControlTick10ms(void)
 
 void BlueSerial_Task(void)
 {
+    BlueSerial_ServiceMotionCompletion();
+    BlueSerial_ServiceSpeedSummary();
     BlueSerial_CommandTask();
     BlueSerial_ServiceMotionCompletion();
+    BlueSerial_ServiceSpeedSummary();
     BlueSerial_ServicePositionRequest();
     BlueSerial_ServiceVisionRequest();
     BlueSerial_ServiceTelemetryReport();
+    BlueSerial_ServiceSpeedDump();
 }

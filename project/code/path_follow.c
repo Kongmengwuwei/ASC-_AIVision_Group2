@@ -30,12 +30,15 @@
 #define PF_POSITION_SPEED_FACTOR_MAX     1.00f   /* 制动速度包络系数上限。 */
 #define PF_POSITION_SPEED_FACTOR_DEFAULT 0.38f   /* 近点超速制动包络系数；双向实测可降低终点超调。 */
 #define PF_POSITION_RELEASE_MARGIN_M     0.10f   /* 扩大的滑移、执行及位置环接管余量，单位 m。 */
+#define PF_SPEED_TEST_SETTLE_COUNTS      2       /* 纯S曲线结束后每轮允许的静止计数，count/10ms。 */
+#define PF_SPEED_TEST_SETTLE_TICKS       5U      /* 四轮连续静止50ms后结束测试。 */
+#define PF_SPEED_TEST_SETTLE_TIMEOUT     500U    /* 最长保留5s零速闭环尾段。 */
 
 /* Y-to-X crosstalk feedforward boot defaults.
  * Unit: X correction / absolute Y command. The gains are signed and
  * independent: +Y is left, -Y is right. X-only commands are unaffected. */
-#define PF_Y_CROSSTALK_LEFT_X_COMP_K      0.0f /* 默认关闭；短距离低速与高速全档验证前不启用。 */
-#define PF_Y_CROSSTALK_RIGHT_X_COMP_K     0.0f /* 默认关闭；短距离低速与高速全档验证前不启用。 */
+#define PF_Y_CROSSTALK_LEFT_X_COMP_K      0.005f /* 多组左移原始串轴均值接近 0，先不补偿。 */
+#define PF_Y_CROSSTALK_RIGHT_X_COMP_K     -0.016f /* 多组右移原始串轴均值接近 0，先不补偿。 */
 #define PF_LATERAL_LEFT_ODOMETRY_SCALE    1.0090f /* 三地图区域五组往返均值：左移里程约多 0.9%。 */
 
 #define PF_POSITION_KP                   1.45f   /* 配合 0.35 制动包络补偿近目标残差。 */
@@ -44,7 +47,7 @@
 #define PF_POSITION_MAX_IOUT_CMPS        200.0f  /* 位置环积分输出上限，单位 cm/s。 */
 #define PF_POSITION_MAX_OUT_CMPS         200.0f  /* 位置环总输出上限，单位 cm/s。 */
 #define PF_POSITION_FILTER_ALPHA         0.9f    /* 位置环微分滤波系数。 */
-#define PF_LINE_GUIDE_KP                 0.0f    /* 强航向闭环下默认关闭；保留运行时接口供特殊场地启用。 */
+#define PF_LINE_GUIDE_KP                 0.3f    /* 强航向闭环下默认关闭；保留运行时接口供特殊场地启用。 */
 #define PF_LINE_GUIDE_MIN_CMPS           0.0f    /* 法向纠偏非零时的最小附加速度，单位 cm/s。 */
 #define PF_LINE_GUIDE_MAX_CMPS           12.0f   /* 法向纠偏速度上限，单位 cm/s。 */
 #define PF_LINE_GUIDE_DEADBAND_M         0.0025f /* 法向偏差死区，单位 m。 */
@@ -184,6 +187,14 @@ static Position g_offset_path[3];
 static Position g_pose_move_path[3];
 static uint8 g_stationary_yaw_hold_enabled;
 static volatile uint8 g_bluetooth_report_pending;
+static uint8 g_speed_test_enabled;
+static uint8 g_speed_test_yaw_enabled;
+static uint8 g_speed_test_settling;
+static uint16 g_speed_test_stable_ticks;
+static uint16 g_speed_test_settle_ticks;
+static uint8 g_speed_test_settle_timeout;
+static uint8 g_speed_test_profile_fault;
+static float g_speed_test_frame_yaw_deg;
 
 /* Public compatibility objects declared by path_follow.h. */
 tagPID_T pid_world_x;
@@ -334,6 +345,9 @@ static void pf_reset_motion_state(void)
 {
     pf_reset_speed();
     pf_clear_debug();
+    g_speed_test_settling = 0U;
+    g_speed_test_stable_ticks = 0U;
+    g_speed_test_settle_ticks = 0U;
     PID_Clear(&pid_world_x);
     PID_Clear(&pid_world_y);
     PID_Clear(&pid_stay);
@@ -816,18 +830,26 @@ static uint8 pf_build_active_profile(const pf_geometry_t *geometry,
 
     /* Build from the distance that is actually left, so a recovery profile
      * does not repeat the original full-segment timing. */
-    profile_distance_m = geometry->distance_m;
+    profile_distance_m = g_speed_test_enabled ?
+                         geometry->planned_distance_m : geometry->distance_m;
+    if (profile_distance_m <= PF_MIN_VALID_GRID_M)
+    {
+        profile_distance_m = geometry->distance_m;
+    }
     pf_select_scurve_band(profile_distance_m, &selected_cfg);
     g_pf.active_scurve_cfg = selected_cfg;
 
     speed_plan->end_speed_cmps = fminf(pf_segment_end_speed_cmps(),
                                        g_pf.active_scurve_cfg.max_speed_cmps);
-    speed_plan->safety_cap_cmps = pf_brake_speed_cap(geometry->distance_m,
-                                                      speed_plan->end_speed_cmps,
-                                                      g_pf.active_scurve_cfg.max_speed_cmps,
-                                                      g_pf.active_scurve_cfg.accel_cmpss);
-    start_speed_cmps = fminf(fmaxf(g_pf.last_ref_speed_cmps, 0.0f),
-                              speed_plan->safety_cap_cmps);
+    speed_plan->safety_cap_cmps = g_speed_test_enabled ?
+        g_pf.active_scurve_cfg.max_speed_cmps :
+        pf_brake_speed_cap(geometry->distance_m,
+                           speed_plan->end_speed_cmps,
+                           g_pf.active_scurve_cfg.max_speed_cmps,
+                           g_pf.active_scurve_cfg.accel_cmpss);
+    start_speed_cmps = g_speed_test_enabled ? 0.0f :
+        fminf(fmaxf(g_pf.last_ref_speed_cmps, 0.0f),
+              speed_plan->safety_cap_cmps);
 
     if (!pf_build_scurve_profile(&profile,
                                  profile_distance_m * 100.0f,
@@ -868,10 +890,12 @@ static void pf_plan_scurve_speed(const pf_geometry_t *geometry,
     else
     {
         speed_plan->end_speed_cmps = g_pf.active_profile.v1;
-        speed_plan->safety_cap_cmps = pf_brake_speed_cap(geometry->distance_m,
-                                                          speed_plan->end_speed_cmps,
-                                                          g_pf.active_scurve_cfg.max_speed_cmps,
-                                                          g_pf.active_scurve_cfg.accel_cmpss);
+        speed_plan->safety_cap_cmps = g_speed_test_enabled ?
+            g_pf.active_scurve_cfg.max_speed_cmps :
+            pf_brake_speed_cap(geometry->distance_m,
+                               speed_plan->end_speed_cmps,
+                               g_pf.active_scurve_cfg.max_speed_cmps,
+                               g_pf.active_scurve_cfg.accel_cmpss);
     }
 
     if (g_pf.profile_active)
@@ -884,13 +908,24 @@ static void pf_plan_scurve_speed(const pf_geometry_t *geometry,
         speed_plan->ref_speed_cmps = pf_sample_scurve_velocity(g_pf.profile_time_s,
                                                                 &g_pf.active_profile);
         speed_plan->end_speed_cmps = g_pf.active_profile.v1;
-        speed_plan->safety_cap_cmps = pf_brake_speed_cap(geometry->distance_m,
-                                                          speed_plan->end_speed_cmps,
-                                                          g_pf.active_scurve_cfg.max_speed_cmps,
-                                                          g_pf.active_scurve_cfg.accel_cmpss);
+        speed_plan->safety_cap_cmps = g_speed_test_enabled ?
+            g_pf.active_scurve_cfg.max_speed_cmps :
+            pf_brake_speed_cap(geometry->distance_m,
+                               speed_plan->end_speed_cmps,
+                               g_pf.active_scurve_cfg.max_speed_cmps,
+                               g_pf.active_scurve_cfg.accel_cmpss);
     }
     else if (!build_ok)
     {
+        if (g_speed_test_enabled)
+        {
+            g_speed_test_profile_fault = 1U;
+            g_pf.active = 0U;
+            speed_plan->ref_speed_cmps = 0.0f;
+            speed_plan->safety_cap_cmps = 0.0f;
+            g_pf.last_ref_speed_cmps = 0.0f;
+            return;
+        }
         speed_plan->ref_speed_cmps = pf_profile_fault_speed(g_pf.last_ref_speed_cmps,
                                                              speed_plan->safety_cap_cmps,
                                                              g_pf.active_scurve_cfg.accel_cmpss);
@@ -899,11 +934,15 @@ static void pf_plan_scurve_speed(const pf_geometry_t *geometry,
     speed_plan->ref_speed_cmps = pf_clamp(speed_plan->ref_speed_cmps,
                                            -g_pf.active_scurve_cfg.max_speed_cmps,
                                            g_pf.active_scurve_cfg.max_speed_cmps);
-    speed_plan->ref_speed_cmps = fminf(speed_plan->ref_speed_cmps,
-                                       speed_plan->safety_cap_cmps);
+    if (!g_speed_test_enabled)
+    {
+        speed_plan->ref_speed_cmps = fminf(speed_plan->ref_speed_cmps,
+                                            speed_plan->safety_cap_cmps);
+    }
     speed_plan->ref_speed_cmps = fmaxf(speed_plan->ref_speed_cmps, 0.0f);
 
-    if (g_pf.profile_active && g_pf.active_profile.T > 0.0f &&
+    if (!g_speed_test_enabled &&
+        g_pf.profile_active && g_pf.active_profile.T > 0.0f &&
         g_pf.profile_time_s >= g_pf.active_profile.T &&
         geometry->distance_m > fmaxf(g_pf.position_tolerance_m,
                                      path_hold_trim_release_distance))
@@ -918,7 +957,8 @@ static void pf_plan_scurve_speed(const pf_geometry_t *geometry,
         speed_plan->ref_speed_cmps = 0.0f;
         return;
     }
-    if (geometry->distance_m <= g_pf.position_tolerance_m)
+    if (!g_speed_test_enabled &&
+        geometry->distance_m <= g_pf.position_tolerance_m)
     {
         speed_plan->ref_speed_cmps = 0.0f;
         /* Keep a low cap so the position loop can still aim at the target
@@ -1406,8 +1446,12 @@ static void pf_update_odometry(float yaw_deg)
     {
         vy_body_mps *= PF_LATERAL_LEFT_ODOMETRY_SCALE;
     }
-    /* Remove the deliberate Y-to-X feedforward from encoder odometry. */
-    vx_body_mps -= pf_y_crosstalk_x_comp(vy_body_mps);
+    /* The speed-loop test observes raw wheel coupling.  Normal operation
+     * still removes deliberate command feedforward from internal odometry. */
+    if (!g_speed_test_enabled)
+    {
+        vx_body_mps -= pf_y_crosstalk_x_comp(vy_body_mps);
+    }
     g_pf.linear_speed_cmps =
         sqrtf(vx_body_mps * vx_body_mps + vy_body_mps * vy_body_mps) * 100.0f;
 
@@ -1642,7 +1686,63 @@ static uint8 pf_prepare_geometry(pf_geometry_t *geometry, path_follow_output_t *
             ((geometry->within_tolerance || target_plane_crossed) &&
              g_pf.linear_speed_cmps <= PF_ARRIVAL_MAX_SPEED_CMPS) ? 1U : 0U;
 
-        if (position_ready)
+        if (g_speed_test_enabled)
+        {
+            uint8 profile_done =
+                (g_pf.profile_active && g_pf.active_profile.T > 0.0f &&
+                 g_pf.profile_target_idx == g_pf.target_idx &&
+                 g_pf.profile_time_s >= g_pf.active_profile.T) ? 1U : 0U;
+
+            if (profile_done)
+            {
+                uint8 wheels_still =
+                    (fabsf((float)up_L_all) <= PF_SPEED_TEST_SETTLE_COUNTS &&
+                     fabsf((float)up_R_all) <= PF_SPEED_TEST_SETTLE_COUNTS &&
+                     fabsf((float)down_L_all) <= PF_SPEED_TEST_SETTLE_COUNTS &&
+                     fabsf((float)down_R_all) <= PF_SPEED_TEST_SETTLE_COUNTS &&
+                     fabsf((float)encoder_data_quaddec1) <= PF_SPEED_TEST_SETTLE_COUNTS &&
+                     fabsf((float)-encoder_data_quaddec2) <= PF_SPEED_TEST_SETTLE_COUNTS &&
+                     fabsf((float)encoder_data_quaddec3) <= PF_SPEED_TEST_SETTLE_COUNTS &&
+                     fabsf((float)-encoder_data_quaddec4) <= PF_SPEED_TEST_SETTLE_COUNTS) ? 1U : 0U;
+
+                g_speed_test_settling = 1U;
+                g_speed_test_settle_ticks++;
+                g_speed_test_stable_ticks = wheels_still ?
+                    (uint16)(g_speed_test_stable_ticks + 1U) : 0U;
+
+                if (g_speed_test_stable_ticks >= PF_SPEED_TEST_SETTLE_TICKS ||
+                    g_speed_test_settle_ticks >= PF_SPEED_TEST_SETTLE_TIMEOUT)
+                {
+                    if (g_speed_test_settle_ticks >= PF_SPEED_TEST_SETTLE_TIMEOUT &&
+                        g_speed_test_stable_ticks < PF_SPEED_TEST_SETTLE_TICKS)
+                    {
+                        g_speed_test_settle_timeout = 1U;
+                        pf_finish_path(out);
+                        return 0U;
+                    }
+                    g_speed_test_settling = 0U;
+                    g_speed_test_stable_ticks = 0U;
+                    g_speed_test_settle_ticks = 0U;
+                    if (!pf_advance_reached_target(out))
+                    {
+                        return 0U;
+                    }
+                    if (!g_pf.active || g_pf.target_idx >= g_pf.steps)
+                    {
+                        return 0U;
+                    }
+                    continue;
+                }
+            }
+            else
+            {
+                g_speed_test_settling = 0U;
+                g_speed_test_stable_ticks = 0U;
+                g_speed_test_settle_ticks = 0U;
+            }
+        }
+
+        if (!g_speed_test_enabled && position_ready)
         {
             /* Competitive path: accept immediately when speed is safe.  A
              * crossed target plane is also accepted even if lateral error
@@ -1659,7 +1759,7 @@ static uint8 pf_prepare_geometry(pf_geometry_t *geometry, path_follow_output_t *
             continue;
         }
 
-        if (g_pf.approach_braking)
+        if (!g_speed_test_enabled && g_pf.approach_braking)
         {
             /* Once triggered, keep the final braking-plus-position phase
              * latched until this target is accepted. */
@@ -1671,7 +1771,8 @@ static uint8 pf_prepare_geometry(pf_geometry_t *geometry, path_follow_output_t *
             return 1U;
         }
 
-        if (geometry->within_tolerance || target_plane_crossed)
+        if (!g_speed_test_enabled &&
+            (geometry->within_tolerance || target_plane_crossed))
         {
             /* Inside tolerance or beyond the target plane while still too
              * fast: enter the latched one-way brake state.  Its signed
@@ -1750,6 +1851,9 @@ static void pf_apply_path(const Position *path,
 
     pf_reset_pause_runtime();
     pf_reset_motion_state();
+    g_speed_test_settle_timeout = 0U;
+    g_speed_test_profile_fault = 0U;
+    g_speed_test_frame_yaw_deg = g_pf.pose.yaw_deg;
     PID_Clear(&pid_yaw);
     PID_Clear(&pid_yaw_rotate);
 
@@ -1824,6 +1928,11 @@ void path_follow_init(float grid_size_m, float pulses_per_meter)
 
     g_stationary_yaw_hold_enabled = 0U;
     g_bluetooth_report_pending = 0U;
+    g_speed_test_enabled = 0U;
+    g_speed_test_yaw_enabled = 0U;
+    g_speed_test_frame_yaw_deg = 0.0f;
+    g_speed_test_settle_timeout = 0U;
+    g_speed_test_profile_fault = 0U;
     path_follow_reset_scurve_band_defaults();
     pf_clear_pause_config();
     pf_reset_motion_state();
@@ -1884,6 +1993,26 @@ void path_follow_set_position_speed_factor(float factor)
 float path_follow_get_position_speed_factor(void)
 {
     return pf_position_speed_factor();
+}
+
+void path_follow_set_speed_test_mode(uint8 enabled, uint8 yaw_enabled)
+{
+    g_speed_test_enabled = enabled ? 1U : 0U;
+    g_speed_test_yaw_enabled = yaw_enabled ? 1U : 0U;
+    g_speed_test_frame_yaw_deg = g_pf.pose.yaw_deg;
+    g_speed_test_settling = 0U;
+    g_speed_test_stable_ticks = 0U;
+    g_speed_test_settle_ticks = 0U;
+    if (g_speed_test_enabled)
+    {
+        g_speed_test_settle_timeout = 0U;
+        g_speed_test_profile_fault = 0U;
+    }
+
+    if (!g_speed_test_yaw_enabled)
+    {
+        PID_Clear(&pid_yaw);
+    }
 }
 
 void path_follow_reset_pose(float x_m, float y_m, float yaw_deg)
@@ -2010,6 +2139,7 @@ void path_follow_update(float yaw_deg, path_follow_output_t *out)
     float vx_world_cmps;
     float vy_world_cmps;
     float yaw_error_deg;
+    float command_frame_yaw_deg;
     float position_blend;
     float position_speed_threshold_cmps;
     uint8 use_position_loop;
@@ -2065,20 +2195,27 @@ void path_follow_update(float yaw_deg, path_follow_output_t *out)
     }
 
     pf_sync_position_pid_gains();
-    position_blend = pf_position_loop_blend(&geometry);
-    position_speed_threshold_cmps = pf_position_speed_threshold_cmps(
-        fmaxf(geometry.along_track_remaining_m, 0.0f));
+    position_blend = g_speed_test_enabled ? 0.0f :
+        pf_position_loop_blend(&geometry);
+    position_speed_threshold_cmps = g_speed_test_enabled ? 0.0f :
+        pf_position_speed_threshold_cmps(
+            fmaxf(geometry.along_track_remaining_m, 0.0f));
 
     if (!g_pf.approach_braking)
     {
         pf_plan_scurve_speed(&geometry, &speed_plan);
+        if (g_speed_test_enabled && g_speed_test_profile_fault)
+        {
+            return;
+        }
         /* The position loop may blend in early, but do not latch braking just
          * because the blend zone has begun.  On a short segment the measured
          * speed can still be zero here; latching that value would invalidate
          * the S-curve and leave no command capable of starting the car.
          * Braking takes over only when measured speed exceeds the distance
          * envelope.  Once latched, position feedback remains active with it. */
-        if (position_blend > 0.0f &&
+        if (!g_speed_test_enabled &&
+            position_blend > 0.0f &&
             g_pf.linear_speed_cmps > position_speed_threshold_cmps &&
             (!geometry.within_tolerance ||
              g_pf.linear_speed_cmps > PF_ARRIVAL_MAX_SPEED_CMPS))
@@ -2087,7 +2224,7 @@ void path_follow_update(float yaw_deg, path_follow_output_t *out)
         }
     }
 
-    if (g_pf.approach_braking)
+    if (!g_speed_test_enabled && g_pf.approach_braking)
     {
         g_pf.approach_position_blend =
             fmaxf(g_pf.approach_position_blend, position_blend);
@@ -2099,8 +2236,8 @@ void path_follow_update(float yaw_deg, path_follow_output_t *out)
 
     vx_world_cmps = speed_plan.ref_speed_cmps * geometry.dir_x;
     vy_world_cmps = speed_plan.ref_speed_cmps * geometry.dir_y;
-    use_position_loop = (position_blend > 0.0f) ? 1U : 0U;
-    use_line_guidance = use_position_loop ? 0U : 1U;
+    use_position_loop = (!g_speed_test_enabled && position_blend > 0.0f) ? 1U : 0U;
+    use_line_guidance = (!g_speed_test_enabled && !use_position_loop) ? 1U : 0U;
     if (use_position_loop)
     {
         pf_apply_position_loop(&geometry,
@@ -2134,15 +2271,28 @@ void path_follow_update(float yaw_deg, path_follow_output_t *out)
 
     if (out != NULL)
     {
+        command_frame_yaw_deg = g_speed_test_enabled ?
+                                g_speed_test_frame_yaw_deg : yaw_deg;
         pf_world_to_body(vx_world_cmps,
                          vy_world_cmps,
-                         yaw_deg,
+                         command_frame_yaw_deg,
                          &out->vx_cmd,
                          &out->vy_cmd);
-        out->vx_cmd += pf_y_crosstalk_x_comp(out->vy_cmd);
-        out->omega_cmd = pf_yaw_command_radps(yaw_deg,
-                                              &pid_yaw,
-                                              path_yaw_feedforward_min_degps);
+        if (!g_speed_test_enabled)
+        {
+            out->vx_cmd += pf_y_crosstalk_x_comp(out->vy_cmd);
+        }
+        if (g_speed_test_enabled &&
+            (!g_speed_test_yaw_enabled || g_speed_test_settling))
+        {
+            out->omega_cmd = 0.0f;
+        }
+        else
+        {
+            out->omega_cmd = pf_yaw_command_radps(yaw_deg,
+                                                  &pid_yaw,
+                                                  path_yaw_feedforward_min_degps);
+        }
         out->active = 1U;
         out->reached = 0U;
         out->target_idx = g_pf.target_idx;
@@ -2206,6 +2356,8 @@ void path_follow_get_status(path_follow_status_t *status)
         g_pf.debug.position_speed_limit_cmps;
     status->position_speed_factor = pf_position_speed_factor();
     status->target_yaw_deg = g_pf.target_yaw_deg;
+    status->speed_test_profile_time_s = g_pf.profile_time_s;
+    status->speed_test_profile_total_s = g_pf.active_profile.T;
     status->active = (g_pf.active || g_pf.rotate_only_active) ? 1U : 0U;
     status->reached = status->active ? 0U : 1U;
     status->paused = g_pf.paused;
@@ -2215,6 +2367,11 @@ void path_follow_get_status(path_follow_status_t *status)
         g_pf.debug.approach_braking_active;
     status->position_loop_active = g_pf.debug.position_loop_active;
     status->line_guidance_active = g_pf.debug.line_guidance_active;
+    status->speed_test_enabled = g_speed_test_enabled;
+    status->speed_test_yaw_enabled = g_speed_test_yaw_enabled;
+    status->speed_test_settling = g_speed_test_settling;
+    status->speed_test_settle_timeout = g_speed_test_settle_timeout;
+    status->speed_test_profile_fault = g_speed_test_profile_fault;
     status->segment_axis = g_pf.debug.segment_axis;
     status->target_idx = g_pf.target_idx;
     status->yaw_error_deg = pf_yaw_error_deg(g_pf.pose.yaw_deg,

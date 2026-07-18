@@ -24,6 +24,8 @@ typedef struct
     uint16 target_mask;
     uint16 far_box_mask;
     uint16 far_target_mask;
+    /* Control uses RIGHT, UP, LEFT, DOWN as direction bits 0..3. */
+    uint8 direction_mask;
 } path_identify_event_t;
 
 typedef struct
@@ -45,6 +47,8 @@ static uint16 s_mandatory_prefix[MAX_CAR_PATH + 1U] = {0U};
 static uint16 s_push_edge_prefix[MAX_CAR_PATH + 1U] = {0U};
 static uint16 s_last_required_before[MAX_CAR_PATH] = {0U};
 static Position s_identify_candidate_exec[PATH_IDENTIFY_POSTPROCESS_MAX_RAW_STEPS] = {{0}};
+static uint8 s_identify_direction_masks[PATH_IDENTIFY_POSTPROCESS_MAX_RAW_STEPS] = {0U};
+static path_identify_event_t s_identify_events[PATH_IDENTIFY_POSTPROCESS_MAX_RAW_STEPS] = {{0}};
 static Position s_safe_relocation_raw_path[PATH_SAFE_RELOCATION_MAX_POINTS] = {{0}};
 static path_map_snapshot_t s_stage_maps[PATH_STAGE_SNAPSHOT_CAPACITY];
 static uint8 s_raw_stage_index[MAX_CAR_PATH] = {0U};
@@ -1353,6 +1357,18 @@ static void path_identify_collect_at_marker(const path_map_snapshot_t *pre_map,
         uint16 bit;
         if (object_index < 0)
             continue;
+        if (event != NULL)
+        {
+            /* path directions: UP, DOWN, LEFT, RIGHT;
+             * Control directions: RIGHT, UP, LEFT, DOWN. */
+            static const uint8 control_direction_bit[4] = {
+                (uint8)(1U << 1),
+                (uint8)(1U << 3),
+                (uint8)(1U << 2),
+                (uint8)(1U << 0)
+            };
+            event->direction_mask |= control_direction_bit[direction];
+        }
         bit = (uint16)(1UL << object_index);
         if (chosen_kind[direction] == 0)
         {
@@ -1387,9 +1403,9 @@ static void path_identify_collect_at_marker(const path_map_snapshot_t *pre_map,
 
 static uint8 path_identify_simulate(size_t raw_steps,
                                     const path_map_snapshot_t *pre_map,
-                                    size_t capture_index,
                                     path_identify_metrics_t *metrics,
-                                    path_identify_event_t *captured_event)
+                                    uint8 *direction_masks,
+                                    path_identify_event_t *events)
 {
     size_t i;
     if (!s_stage_model_valid || pre_map == NULL || metrics == NULL ||
@@ -1399,8 +1415,10 @@ static uint8 path_identify_simulate(size_t raw_steps,
         return 0U;
     }
     memset(metrics, 0, sizeof(*metrics));
-    if (captured_event != NULL)
-        memset(captured_event, 0, sizeof(*captured_event));
+    if (direction_masks != NULL)
+        memset(direction_masks, 0, raw_steps * sizeof(direction_masks[0]));
+    if (events != NULL)
+        memset(events, 0, raw_steps * sizeof(events[0]));
 
     for (i = 0U; i < raw_steps; i++)
     {
@@ -1413,7 +1431,7 @@ static uint8 path_identify_simulate(size_t raw_steps,
         if (stage_index >= PATH_STAGE_SNAPSHOT_CAPACITY)
             return 0U;
         metrics->marker_count++;
-        if (i == capture_index && captured_event != NULL)
+        if (direction_masks != NULL || events != NULL)
         {
             memset(&local_event, 0, sizeof(local_event));
             event = &local_event;
@@ -1423,10 +1441,75 @@ static uint8 path_identify_simulate(size_t raw_steps,
                                         &s_raw_path[i],
                                         metrics,
                                         event);
-        if (event != NULL)
-            *captured_event = *event;
+        if (direction_masks != NULL)
+            direction_masks[i] = local_event.direction_mask;
+        if (events != NULL)
+            events[i] = local_event;
     }
     return 1U;
+}
+
+/* Match Control's real recognition order. The car starts facing RIGHT, every
+ * marker processes RIGHT/UP/LEFT/DOWN in that order, keeps the final heading
+ * between markers, and returns to RIGHT when identification ends. The return
+ * value is measured in 90-degree turns, so a 180-degree reversal costs 2. */
+static uint16 path_identify_yaw_turn_cost(const uint8 *direction_masks,
+                                          size_t raw_steps)
+{
+    uint16 total = 0U;
+    uint8 previous_direction = 0U;
+    size_t i;
+
+    if (direction_masks == NULL)
+        return 0xFFFFU;
+
+    for (i = 0U; i < raw_steps; i++)
+    {
+        uint8 direction;
+        for (direction = 0U; direction < 4U; direction++)
+        {
+            uint8 difference;
+            if ((direction_masks[i] & (uint8)(1U << direction)) == 0U)
+                continue;
+            difference = (previous_direction > direction) ?
+                         (uint8)(previous_direction - direction) :
+                         (uint8)(direction - previous_direction);
+            if (difference > 2U)
+                difference = (uint8)(4U - difference);
+            total = (uint16)(total + difference);
+            previous_direction = direction;
+        }
+    }
+
+    if (previous_direction > 2U)
+        total = (uint16)(total + (uint8)(4U - previous_direction));
+    else
+        total = (uint16)(total + previous_direction);
+    return total;
+}
+
+static uint8 path_identify_score_is_better(const path_identify_metrics_t *candidate,
+                                            uint16 candidate_yaw_turn_cost,
+                                            float candidate_distance,
+                                            size_t candidate_exec_steps,
+                                            const path_identify_metrics_t *best,
+                                            uint16 best_yaw_turn_cost,
+                                            float best_distance,
+                                            size_t best_exec_steps)
+{
+    /* Recognition quality stays primary. Among equally near candidates, avoid
+     * camera-heading turns before considering distance/marker compression. */
+    if (candidate->near_count != best->near_count)
+        return (candidate->near_count > best->near_count) ? 1U : 0U;
+    if (candidate_yaw_turn_cost != best_yaw_turn_cost)
+        return (candidate_yaw_turn_cost < best_yaw_turn_cost) ? 1U : 0U;
+    if (candidate_distance < best_distance - PATH_IDENTIFY_DISTANCE_EPSILON)
+        return 1U;
+    if (candidate_distance > best_distance + PATH_IDENTIFY_DISTANCE_EPSILON)
+        return 0U;
+    if (candidate->marker_count != best->marker_count)
+        return (candidate->marker_count < best->marker_count) ? 1U : 0U;
+    return (candidate_exec_steps < best_exec_steps) ? 1U : 0U;
 }
 
 static uint8 path_identify_event_all_one_grid(const path_identify_event_t *event,
@@ -1497,8 +1580,9 @@ static uint8 path_identify_path_is_supported(size_t raw_steps)
     return has_identification;
 }
 
-/* 在不改变任何路径坐标的前提下移动 IDENTIFICATION 事件位。每个候选都要
- * 通过完整识别重放和实际执行路径提取，任一安全/最短约束不满足即回退。 */
+/* 只沿原始规划路线移动 IDENTIFICATION 事件位，不改变路线坐标。每个候选都要完整重放：
+ * 识别覆盖必须一致、近距离识别数不能下降、提取后的实际路程不能增加；候选排序使用
+ * Control 实际的 RIGHT/UP/LEFT/DOWN 识别顺序计算车头转向代价。 */
 static void path_optimize_identification_markers(size_t raw_steps,
                                                  const path_map_snapshot_t *current_map,
                                                  const path_map_snapshot_t *pre_map,
@@ -1509,6 +1593,7 @@ static void path_optimize_identification_markers(size_t raw_steps,
     path_identify_metrics_t required;
     path_identify_metrics_t current;
     float current_distance;
+    uint16 current_yaw_turn_cost;
     size_t pass;
 
     if (!g_path_identify_near_postprocess_enabled || !s_stage_model_valid ||
@@ -1517,36 +1602,47 @@ static void path_optimize_identification_markers(size_t raw_steps,
         pre_map->boxes_count > PATH_IDENTIFY_OBJECT_MASK_CAPACITY ||
         pre_map->targets_count > PATH_IDENTIFY_OBJECT_MASK_CAPACITY ||
         !path_identify_path_is_supported(raw_steps) ||
-        !path_identify_simulate(raw_steps, pre_map, MAX_CAR_PATH,
-                                &required, NULL) ||
-        required.far_count == 0U)
+        !path_identify_simulate(raw_steps, pre_map, &required,
+                                s_identify_direction_masks, NULL))
     {
         return;
     }
 
     current = required;
     current_distance = path_exec_total_distance(exec_path, *exec_steps);
+    current_yaw_turn_cost = path_identify_yaw_turn_cost(s_identify_direction_masks,
+                                                        raw_steps);
     for (pass = 0U; pass < (size_t)(MAX_BOXES + MAX_TARGETS); pass++)
     {
         path_identify_metrics_t best_metrics = current;
         float best_distance = current_distance;
+        uint16 best_yaw_turn_cost = current_yaw_turn_cost;
         size_t best_exec_steps = *exec_steps;
         size_t best_from = MAX_CAR_PATH;
         size_t best_to = MAX_CAR_PATH;
         size_t i;
 
         path_prepare_prefix(s_raw_path, raw_steps);
+        {
+            path_identify_metrics_t replay;
+            if (!path_identify_simulate(raw_steps, pre_map, &replay,
+                                        NULL, s_identify_events) ||
+                replay.box_mask != current.box_mask ||
+                replay.target_mask != current.target_mask ||
+                replay.near_count != current.near_count ||
+                replay.far_count != current.far_count)
+            {
+                break;
+            }
+        }
         for (i = 0U; i < raw_steps; i++)
         {
-            path_identify_event_t source_event;
-            path_identify_metrics_t replay;
+            const path_identify_event_t *source_event = &s_identify_events[i];
             size_t j;
             if ((s_raw_path[i].id & IDENTIFICATION) == 0U ||
                 path_identify_index_is_push_or_action(i, raw_steps) ||
-                !path_identify_simulate(raw_steps, pre_map, i,
-                                        &replay, &source_event) ||
-                (source_event.far_box_mask == 0U &&
-                 source_event.far_target_mask == 0U))
+                (source_event->box_mask == 0U &&
+                 source_event->target_mask == 0U))
             {
                 continue;
             }
@@ -1558,6 +1654,7 @@ static void path_optimize_identification_markers(size_t raw_steps,
                 path_identify_metrics_t candidate_metrics;
                 size_t candidate_exec_steps = 0U;
                 float candidate_distance;
+                uint16 candidate_yaw_turn_cost;
                 uint8 candidate_better = 0U;
 
                 if (j == i || s_raw_stage_index[j] != s_raw_stage_index[i] ||
@@ -1567,7 +1664,7 @@ static void path_optimize_identification_markers(size_t raw_steps,
                                           s_raw_path[j].row,
                                           s_raw_path[j].col,
                                           1U) ||
-                    !path_identify_event_all_one_grid(&source_event,
+                    !path_identify_event_all_one_grid(source_event,
                                                       pre_map,
                                                       &s_raw_path[j]))
                 {
@@ -1579,13 +1676,14 @@ static void path_optimize_identification_markers(size_t raw_steps,
                 s_raw_path[i].id = (uint8)(s_raw_path[i].id & (uint8)~IDENTIFICATION);
                 s_raw_path[j].id = (uint8)(s_raw_path[j].id | IDENTIFICATION);
 
-                if (!path_identify_simulate(raw_steps, pre_map, MAX_CAR_PATH,
-                                            &candidate_metrics, NULL) ||
+                if (!path_identify_simulate(raw_steps, pre_map,
+                                            &candidate_metrics,
+                                            s_identify_direction_masks, NULL) ||
                     candidate_metrics.box_mask != required.box_mask ||
                     candidate_metrics.target_mask != required.target_mask ||
                     candidate_metrics.marker_count > current.marker_count ||
-                    candidate_metrics.near_count <= current.near_count ||
-                    candidate_metrics.far_count >= current.far_count ||
+                    candidate_metrics.near_count < current.near_count ||
+                    candidate_metrics.far_count > current.far_count ||
                     !path_extract_exec_from_raw(raw_steps,
                                                 current_map,
                                                 pre_map,
@@ -1600,20 +1698,18 @@ static void path_optimize_identification_markers(size_t raw_steps,
 
                 candidate_distance = path_exec_total_distance(s_identify_candidate_exec,
                                                                candidate_exec_steps);
-                if (candidate_exec_steps <= *exec_steps &&
-                    candidate_distance <= current_distance + PATH_IDENTIFY_DISTANCE_EPSILON)
+                candidate_yaw_turn_cost =
+                    path_identify_yaw_turn_cost(s_identify_direction_masks, raw_steps);
+                if (candidate_distance <= current_distance + PATH_IDENTIFY_DISTANCE_EPSILON)
                 {
-                    if (best_from == MAX_CAR_PATH ||
-                        candidate_metrics.near_count > best_metrics.near_count ||
-                        (candidate_metrics.near_count == best_metrics.near_count &&
-                         candidate_metrics.marker_count < best_metrics.marker_count) ||
-                        (candidate_metrics.near_count == best_metrics.near_count &&
-                         candidate_metrics.marker_count == best_metrics.marker_count &&
-                         candidate_exec_steps < best_exec_steps) ||
-                        (candidate_metrics.near_count == best_metrics.near_count &&
-                         candidate_metrics.marker_count == best_metrics.marker_count &&
-                         candidate_exec_steps == best_exec_steps &&
-                         candidate_distance < best_distance - PATH_IDENTIFY_DISTANCE_EPSILON))
+                    if (path_identify_score_is_better(&candidate_metrics,
+                                                      candidate_yaw_turn_cost,
+                                                      candidate_distance,
+                                                      candidate_exec_steps,
+                                                      &best_metrics,
+                                                      best_yaw_turn_cost,
+                                                      best_distance,
+                                                      best_exec_steps))
                     {
                         candidate_better = 1U;
                     }
@@ -1625,6 +1721,7 @@ static void path_optimize_identification_markers(size_t raw_steps,
                     best_metrics = candidate_metrics;
                     best_exec_steps = candidate_exec_steps;
                     best_distance = candidate_distance;
+                    best_yaw_turn_cost = candidate_yaw_turn_cost;
                 }
                 s_raw_path[i].id = old_from_id;
                 s_raw_path[j].id = old_to_id;
@@ -1661,6 +1758,7 @@ static void path_optimize_identification_markers(size_t raw_steps,
         }
         current = best_metrics;
         current_distance = best_distance;
+        current_yaw_turn_cost = best_yaw_turn_cost;
     }
 }
 

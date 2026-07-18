@@ -74,8 +74,9 @@ void path_set_diagonal_enabled(uint8 enabled);
  */
 uint8 path_get_diagonal_enabled(void);
 
-/* 识别路径后处理开关：保持原始规划路径不变，只把可安全替换的两格识别事件
- * 移到既有路径上的一格识别点。默认开启，测试时可关闭以获得基线结果。 */
+/* 识别路径后处理开关：保持原始路线坐标不变，只移动识别事件。先尽可能把两格识别
+ * 换成一格识别；近距离识别数相同时优先减少识别车头转向，且不允许增加实际路程。
+ * 默认开启，测试时可关闭以获得基线结果。 */
 void path_set_identify_near_postprocess_enabled(uint8 enabled);
 uint8 path_get_identify_near_postprocess_enabled(void);
 

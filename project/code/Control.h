@@ -122,6 +122,9 @@ uint8 control_get_prestart_depart_dir(void);
  */
 control_stage_t control_get_stage(void);
 
+/* 返程完成后的发车格判定结果；1 在 (4,0)/(5,0) 发车格内，0 为未判定或不在。 */
+uint8 control_get_return_pose_in_depot(void);
+
 /**
  * @brief 获取当前执行路径缓存。
  *

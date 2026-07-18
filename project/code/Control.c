@@ -65,8 +65,9 @@ float g_control_prestart_depart_compensate_m = -0.025f;
 #define CONTROL_CONTINUOUS_LEVEL_COUNT 3U
 #define CONTROL_CONTINUOUS_STOP_ENCODER_TOL 5
 #define CONTROL_CONTINUOUS_STOP_STABLE_LOOPS 3U
-/* 10 ms 控制节拍；检测到仍有未推进箱子时，下一关发车前额外等待 300 ms。 */
-#define CONTROL_CONTINUOUS_EXTRA_DEPART_WAIT_TICKS 30U
+/* 10 ms 控制节拍；检测到仍有未推进箱子时，下一关发车前额外等待 5 s。 */
+#define CONTROL_CONTINUOUS_EXTRA_DEPART_WAIT_TICKS 400U
+#define CONTROL_DEPOT_CELL_HALF_EXTENT_M (0.5f * GRID_SIZE_M)
 
 
 /**
@@ -233,6 +234,8 @@ static uint32 g_continuous_extra_depart_wait_start_tick = 0U;
 static uint8 g_level_start_localization_required = 0U;
 static uint8 g_continuous_preset_base_index = 0U;
 static uint8 g_return_heading_rotate_started = 0U;
+static uint8 g_return_depot_check_done = 0U;
+static uint8 g_return_pose_in_depot = 0U;
 static uint8 g_pushbox_entry_heading_rotate_started = 0U;
 static float g_start_yaw_deg = 0.0f;
 static uint8 g_start_yaw_ready = 0U;
@@ -993,6 +996,8 @@ static void reset_level_runtime_state_for_launch(void)
     g_plan_ready = 0U;
     g_exec_steps = 0U;
     g_return_heading_rotate_started = 0U;
+    g_return_depot_check_done = 0U;
+    g_return_pose_in_depot = 0U;
     g_pushbox_entry_heading_rotate_started = 0U;
     g_identify_safe_move_prepared = 0U;
     g_identify_safe_move_running = 0U;
@@ -3904,6 +3909,36 @@ static void handle_load_path_stage(void)
     set_control_phase_stage(CONTROL_PHASE_STEP_EXECUTE_PATH);
 }
 
+static uint8 return_pose_is_in_depot(float x_m, float y_m)
+{
+    Position depots[2] = {
+        {4U, 0U, 0U},
+        {5U, 0U, 0U}
+    };
+    size_t i;
+
+    for (i = 0U; i < 2U; i++)
+    {
+        float target_x_m;
+        float target_y_m;
+        float dx_m;
+        float dy_m;
+
+        path_remap_exec_point(&depots[i]);
+        target_x_m = (float)depots[i].row * GRID_SIZE_M;
+        target_y_m = (float)depots[i].col * GRID_SIZE_M;
+        dx_m = target_x_m - x_m;
+        dy_m = target_y_m - y_m;
+        if (fabsf(dx_m) <= CONTROL_DEPOT_CELL_HALF_EXTENT_M &&
+            fabsf(dy_m) <= CONTROL_DEPOT_CELL_HALF_EXTENT_M)
+        {
+            return 1U;
+        }
+    }
+
+    return 0U;
+}
+
 static void finish_pushbox_flow_after_return(void)
 {
     control_hold_yaw_closed_loop();
@@ -3966,6 +4001,13 @@ static void handle_pushbox_execute_path(void)
         {
             return;
         }
+    }
+
+    if (!g_return_depot_check_done)
+    {
+        path_follow_get_status(&st);
+        g_return_pose_in_depot = return_pose_is_in_depot(st.x_m, st.y_m);
+        g_return_depot_check_done = 1U;
     }
 
     return_yaw_deg = map_dir_to_yaw_deg(CONTROL_MAP_DIR_RIGHT);
@@ -4205,6 +4247,11 @@ void control_process(void)
 control_stage_t control_get_stage(void)
 {
     return g_control_stage;
+}
+
+uint8 control_get_return_pose_in_depot(void)
+{
+    return g_return_pose_in_depot;
 }
 
 const Position *control_get_exec_path(size_t *steps)

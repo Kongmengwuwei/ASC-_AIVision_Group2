@@ -3,6 +3,7 @@
  *
  * 兼容的蓝牙帧格式：
  *   [slider,name,value]  滑条调参，例如 [slider,speed,40]
+ *   [slider,line.kp,value] / [slider,line.min,value] 调节运行段法向纠偏。
  *   [button_name]        按钮命令，例如 [forward]、[start]、[stop]
  *   [button,name]        兼容部分小程序发送的 button 前缀格式
  *
@@ -52,6 +53,8 @@
 #define BLUESERIAL_MAX_YAW_KD                   50.0f
 #define BLUESERIAL_MAX_YAW_FF_DEGPS             120.0f
 #define BLUESERIAL_MAX_Y_CROSSTALK_ABS          0.100f
+#define BLUESERIAL_MAX_LINE_GUIDE_KP             4.0f
+#define BLUESERIAL_MAX_LINE_GUIDE_MIN_CMPS       3.0f
 #define BLUESERIAL_MAX_POSITION_KP              20.0f
 #define BLUESERIAL_MAX_POSITION_KI              10.0f
 #define BLUESERIAL_MAX_POSITION_KD              50.0f
@@ -1237,6 +1240,26 @@ static uint8 BlueSerial_SetSlider(const char *name, float value)
         BlueSerial_Printf("OK cross.right=%.4f\r\n", applied_value);
         return 1U;
     }
+    if (strcmp(name, "line.kp") == 0 || strcmp(name, "guide.kp") == 0)
+    {
+        applied_value = BlueSerial_ClampFloat(value, 0.0f, BLUESERIAL_MAX_LINE_GUIDE_KP);
+        primask = interrupt_global_disable();
+        path_line_guide_kp = applied_value;
+        interrupt_global_enable(primask);
+        BlueSerial_Printf("OK line.kp=%.4f\r\n", applied_value);
+        return 1U;
+    }
+    if (strcmp(name, "line.min") == 0 || strcmp(name, "guide.min") == 0)
+    {
+        applied_value = BlueSerial_ClampFloat(value,
+                                              0.0f,
+                                              BLUESERIAL_MAX_LINE_GUIDE_MIN_CMPS);
+        primask = interrupt_global_disable();
+        path_line_guide_min_cmps = applied_value;
+        interrupt_global_enable(primask);
+        BlueSerial_Printf("OK line.min=%.3fcmps\r\n", applied_value);
+        return 1U;
+    }
     if (strcmp(name, "pos.kp") == 0 || strcmp(name, "position.kp") == 0)
     {
         applied_value = BlueSerial_ClampFloat(value, 0.0f, BLUESERIAL_MAX_POSITION_KP);
@@ -1336,6 +1359,8 @@ static void BlueSerial_PrintStatus(void)
     float yaw_ff;
     float cross_left;
     float cross_right;
+    float line_guide_kp;
+    float line_guide_min_cmps;
     float position_kp;
     float position_ki;
     float position_kd;
@@ -1360,6 +1385,8 @@ static void BlueSerial_PrintStatus(void)
     yaw_ff = path_yaw_feedforward_min_degps;
     cross_left = path_y_crosstalk_left_x_comp_k;
     cross_right = path_y_crosstalk_right_x_comp_k;
+    line_guide_kp = path_line_guide_kp;
+    line_guide_min_cmps = path_line_guide_min_cmps;
     position_kp = pid_stay.fKp;
     position_ki = pid_stay.fKi;
     position_kd = pid_stay.fKd;
@@ -1390,6 +1417,9 @@ static void BlueSerial_PrintStatus(void)
                       position_ki,
                       position_kd,
                       position_envelope);
+    BlueSerial_Printf("TUNE line.kp=%.4f line.min=%.3fcmps\r\n",
+                      line_guide_kp,
+                      line_guide_min_cmps);
     if (point_target_valid)
     {
         BlueSerial_Printf("TARGET pending=1 target_m=%.3f,%.3f\r\n",

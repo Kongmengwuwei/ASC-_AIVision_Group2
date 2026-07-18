@@ -25,10 +25,10 @@
 #define PF_POSITION_LOOP_RELEASE_M       0.55f   /* 近点接管距离上限；高速档按理论制动距离动态接管，单位 m。 */
 #define PF_ARRIVAL_MAX_SPEED_CMPS        3.0f    /* 完成目标允许的最大实测平移速度，单位 cm/s。 */
 #define PF_YAW_FEEDFORWARD_DEADBAND_DEG  0.25f   /* 克服 0.25~0.5 deg 残差死区，极小误差再由浮点 PID 细调。 */
-#define PF_APPROACH_DECEL_CMPS2          150.0f  /* S 曲线参数无效时的接近减速度，单位 cm/s^2。 */
+#define PF_APPROACH_DECEL_CMPS2          120.0f  /* S 曲线参数无效时的接近减速度，单位 cm/s^2。 */
 #define PF_POSITION_SPEED_FACTOR_MIN     0.10f   /* 手动制动速度包络系数下限。 */
 #define PF_POSITION_SPEED_FACTOR_MAX     1.00f   /* 制动速度包络系数上限。 */
-#define PF_POSITION_SPEED_FACTOR_DEFAULT 0.65f   /* 近点超速制动包络系数；双向实测可降低终点超调。 */
+#define PF_POSITION_SPEED_FACTOR_DEFAULT 0.38f   /* 近点超速制动包络系数；双向实测可降低终点超调。 */
 #define PF_POSITION_RELEASE_MARGIN_M     0.10f   /* 扩大的滑移、执行及位置环接管余量，单位 m。 */
 
 /* Y-to-X crosstalk feedforward boot defaults.
@@ -38,9 +38,9 @@
 #define PF_Y_CROSSTALK_RIGHT_X_COMP_K     0.0f /* 默认关闭；短距离低速与高速全档验证前不启用。 */
 #define PF_LATERAL_LEFT_ODOMETRY_SCALE    1.0090f /* 三地图区域五组往返均值：左移里程约多 0.9%。 */
 
-#define PF_POSITION_KP                   0.50f   /* 配合 0.35 制动包络补偿近目标残差。 */
+#define PF_POSITION_KP                   1.45f   /* 配合 0.35 制动包络补偿近目标残差。 */
 #define PF_POSITION_KI                   0.0f    /* 近目标位置环积分系数。 */
-#define PF_POSITION_KD                   0.0f    /* 近目标位置环微分系数。 */
+#define PF_POSITION_KD                   2.5f    /* 近目标位置环微分系数。 */
 #define PF_POSITION_MAX_IOUT_CMPS        200.0f  /* 位置环积分输出上限，单位 cm/s。 */
 #define PF_POSITION_MAX_OUT_CMPS         200.0f  /* 位置环总输出上限，单位 cm/s。 */
 #define PF_POSITION_FILTER_ALPHA         0.9f    /* 位置环微分滤波系数。 */
@@ -225,20 +225,20 @@ float path_rotate_center_offset_y_cm = 0.0f;
 
 static const path_follow_scurve_band_cfg_t g_default_speed_bands[PATH_FOLLOW_SCURVE_BAND_COUNT] =
 {
-    {0.30f,   0.60f, 1.50f, 8.00f},
-    {0.50f,   0.80f, 1.50f, 8.00f},
-    {0.70f,   1.05f, 1.50f, 8.00f},
-    {0.90f,   1.25f, 1.50f, 8.00f},
-    {1000.0f, 1.80f, 1.50f, 8.00f}
+    {0.30f,   0.60f, 1.20f, 8.00f},
+    {0.50f,   0.80f, 1.20f, 8.00f},
+    {0.70f,   1.05f, 1.20f, 8.00f},
+    {0.90f,   1.25f, 1.20f, 8.00f},
+    {1000.0f, 1.80f, 1.20f, 8.00f}
 };
 
 path_follow_scurve_band_cfg_t g_path_follow_scurve_band_cfg[PATH_FOLLOW_SCURVE_BAND_COUNT] =
 {
-     {0.30f,   0.60f, 1.50f, 8.00f},
-    {0.50f,   0.80f, 1.50f, 8.00f},
-    {0.70f,   1.05f, 1.50f, 8.00f},
-    {0.90f,   1.25f, 1.50f, 8.00f},
-    {1000.0f, 1.80f, 1.50f, 8.00f}
+     {0.30f,   0.60f, 1.20f, 8.00f},
+    {0.50f,   0.80f, 1.20f, 8.00f},
+    {0.70f,   1.05f, 1.20f, 8.00f},
+    {0.90f,   1.25f, 1.20f, 8.00f},
+    {1000.0f, 1.80f, 1.20f, 8.00f}
 };
 
 static float pf_clamp(float value, float min_value, float max_value)

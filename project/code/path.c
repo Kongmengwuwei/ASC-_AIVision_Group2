@@ -1240,6 +1240,72 @@ static float path_exec_total_distance(const Position *path, size_t count)
     return total;
 }
 
+static size_t path_exec_turn_count(const Position *path, size_t count)
+{
+    size_t i;
+    size_t turns = 0U;
+    int32 previous_row_delta = 0;
+    int32 previous_col_delta = 0;
+    uint8 has_previous_dir = 0U;
+
+    if (path == NULL)
+        return MAX_CAR_PATH;
+
+    for (i = 1U; i < count; i++)
+    {
+        int32 row_delta = (int32)path[i].row - (int32)path[i - 1U].row;
+        int32 col_delta = (int32)path[i].col - (int32)path[i - 1U].col;
+
+        if (row_delta == 0 && col_delta == 0)
+            continue;
+        if (has_previous_dir)
+        {
+            int32 cross = previous_row_delta * col_delta -
+                          previous_col_delta * row_delta;
+            int32 dot = previous_row_delta * row_delta +
+                        previous_col_delta * col_delta;
+            if (cross != 0 || dot <= 0)
+                turns++;
+        }
+        previous_row_delta = row_delta;
+        previous_col_delta = col_delta;
+        has_previous_dir = 1U;
+    }
+    return turns;
+}
+
+/*
+ * Recognition postprocess score, in strict priority order:
+ * more near recognitions, fewer turns, shorter distance, fewer execution
+ * points, then fewer recognition markers.  A lower-priority gain must never
+ * trade away a higher-priority result.
+ */
+static uint8 path_identify_score_is_better(const path_identify_metrics_t *candidate,
+                                            size_t candidate_turns,
+                                            float candidate_distance,
+                                            size_t candidate_exec_steps,
+                                            const path_identify_metrics_t *reference,
+                                            size_t reference_turns,
+                                            float reference_distance,
+                                            size_t reference_exec_steps)
+{
+    if (candidate == NULL || reference == NULL)
+        return 0U;
+    if (candidate->near_count != reference->near_count)
+        return (candidate->near_count > reference->near_count) ? 1U : 0U;
+    if (candidate_turns != reference_turns)
+        return (candidate_turns < reference_turns) ? 1U : 0U;
+    if (candidate_distance < reference_distance - PATH_IDENTIFY_DISTANCE_EPSILON)
+        return 1U;
+    if (candidate_distance > reference_distance + PATH_IDENTIFY_DISTANCE_EPSILON)
+        return 0U;
+    if (candidate_exec_steps != reference_exec_steps)
+        return (candidate_exec_steps < reference_exec_steps) ? 1U : 0U;
+    if (candidate->marker_count != reference->marker_count)
+        return (candidate->marker_count < reference->marker_count) ? 1U : 0U;
+    return 0U;
+}
+
 static int32 path_identify_direction(const Position *stand, const Position *object)
 {
     int32 d_row;
@@ -1497,8 +1563,8 @@ static uint8 path_identify_path_is_supported(size_t raw_steps)
     return has_identification;
 }
 
-/* 在不改变任何路径坐标的前提下移动 IDENTIFICATION 事件位。每个候选都要
- * 通过完整识别重放和实际执行路径提取，任一安全/最短约束不满足即回退。 */
+/* 在不改变原始规划路径坐标的前提下移动 IDENTIFICATION 事件位。每个候选都要
+ * 通过完整识别重放和安全执行路径提取，再按近识别数、转向数等分级目标择优。 */
 static void path_optimize_identification_markers(size_t raw_steps,
                                                  const path_map_snapshot_t *current_map,
                                                  const path_map_snapshot_t *pre_map,
@@ -1509,6 +1575,7 @@ static void path_optimize_identification_markers(size_t raw_steps,
     path_identify_metrics_t required;
     path_identify_metrics_t current;
     float current_distance;
+    size_t current_turns;
     size_t pass;
 
     if (!g_path_identify_near_postprocess_enabled || !s_stage_model_valid ||
@@ -1518,19 +1585,20 @@ static void path_optimize_identification_markers(size_t raw_steps,
         pre_map->targets_count > PATH_IDENTIFY_OBJECT_MASK_CAPACITY ||
         !path_identify_path_is_supported(raw_steps) ||
         !path_identify_simulate(raw_steps, pre_map, MAX_CAR_PATH,
-                                &required, NULL) ||
-        required.far_count == 0U)
+                                &required, NULL))
     {
         return;
     }
 
     current = required;
     current_distance = path_exec_total_distance(exec_path, *exec_steps);
+    current_turns = path_exec_turn_count(exec_path, *exec_steps);
     for (pass = 0U; pass < (size_t)(MAX_BOXES + MAX_TARGETS); pass++)
     {
         path_identify_metrics_t best_metrics = current;
         float best_distance = current_distance;
         size_t best_exec_steps = *exec_steps;
+        size_t best_turns = current_turns;
         size_t best_from = MAX_CAR_PATH;
         size_t best_to = MAX_CAR_PATH;
         size_t i;
@@ -1545,8 +1613,8 @@ static void path_optimize_identification_markers(size_t raw_steps,
                 path_identify_index_is_push_or_action(i, raw_steps) ||
                 !path_identify_simulate(raw_steps, pre_map, i,
                                         &replay, &source_event) ||
-                (source_event.far_box_mask == 0U &&
-                 source_event.far_target_mask == 0U))
+                (source_event.box_mask == 0U &&
+                 source_event.target_mask == 0U))
             {
                 continue;
             }
@@ -1557,6 +1625,7 @@ static void path_optimize_identification_markers(size_t raw_steps,
                 uint8 old_to_id;
                 path_identify_metrics_t candidate_metrics;
                 size_t candidate_exec_steps = 0U;
+                size_t candidate_turns;
                 float candidate_distance;
                 uint8 candidate_better = 0U;
 
@@ -1584,8 +1653,8 @@ static void path_optimize_identification_markers(size_t raw_steps,
                     candidate_metrics.box_mask != required.box_mask ||
                     candidate_metrics.target_mask != required.target_mask ||
                     candidate_metrics.marker_count > current.marker_count ||
-                    candidate_metrics.near_count <= current.near_count ||
-                    candidate_metrics.far_count >= current.far_count ||
+                    candidate_metrics.near_count < current.near_count ||
+                    candidate_metrics.far_count > current.far_count ||
                     !path_extract_exec_from_raw(raw_steps,
                                                 current_map,
                                                 pre_map,
@@ -1600,23 +1669,27 @@ static void path_optimize_identification_markers(size_t raw_steps,
 
                 candidate_distance = path_exec_total_distance(s_identify_candidate_exec,
                                                                candidate_exec_steps);
-                if (candidate_exec_steps <= *exec_steps &&
-                    candidate_distance <= current_distance + PATH_IDENTIFY_DISTANCE_EPSILON)
+                candidate_turns = path_exec_turn_count(s_identify_candidate_exec,
+                                                        candidate_exec_steps);
+                if (path_identify_score_is_better(&candidate_metrics,
+                                                   candidate_turns,
+                                                   candidate_distance,
+                                                   candidate_exec_steps,
+                                                   &current,
+                                                   current_turns,
+                                                   current_distance,
+                                                   *exec_steps) &&
+                    (best_from == MAX_CAR_PATH ||
+                     path_identify_score_is_better(&candidate_metrics,
+                                                   candidate_turns,
+                                                   candidate_distance,
+                                                   candidate_exec_steps,
+                                                   &best_metrics,
+                                                   best_turns,
+                                                   best_distance,
+                                                   best_exec_steps)))
                 {
-                    if (best_from == MAX_CAR_PATH ||
-                        candidate_metrics.near_count > best_metrics.near_count ||
-                        (candidate_metrics.near_count == best_metrics.near_count &&
-                         candidate_metrics.marker_count < best_metrics.marker_count) ||
-                        (candidate_metrics.near_count == best_metrics.near_count &&
-                         candidate_metrics.marker_count == best_metrics.marker_count &&
-                         candidate_exec_steps < best_exec_steps) ||
-                        (candidate_metrics.near_count == best_metrics.near_count &&
-                         candidate_metrics.marker_count == best_metrics.marker_count &&
-                         candidate_exec_steps == best_exec_steps &&
-                         candidate_distance < best_distance - PATH_IDENTIFY_DISTANCE_EPSILON))
-                    {
-                        candidate_better = 1U;
-                    }
+                    candidate_better = 1U;
                 }
                 if (candidate_better)
                 {
@@ -1624,6 +1697,7 @@ static void path_optimize_identification_markers(size_t raw_steps,
                     best_to = j;
                     best_metrics = candidate_metrics;
                     best_exec_steps = candidate_exec_steps;
+                    best_turns = candidate_turns;
                     best_distance = candidate_distance;
                 }
                 s_raw_path[i].id = old_from_id;
@@ -1660,6 +1734,7 @@ static void path_optimize_identification_markers(size_t raw_steps,
             }
         }
         current = best_metrics;
+        current_turns = best_turns;
         current_distance = best_distance;
     }
 }

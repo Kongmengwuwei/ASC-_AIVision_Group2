@@ -29,8 +29,8 @@
 #define PF_APPROACH_DECEL_CMPS2          130.0f  /* S 曲线参数无效时的接近减速度，单位 cm/s^2。 */
 #define PF_POSITION_SPEED_FACTOR_MIN     0.10f   /* 手动制动速度包络系数下限。 */
 #define PF_POSITION_SPEED_FACTOR_MAX     1.00f   /* 制动速度包络系数上限。 */
-#define PF_POSITION_X_SPEED_FACTOR_DEFAULT 0.99f /* X轴实时剩余距离速度上限系数。 */
-#define PF_POSITION_Y_SPEED_FACTOR_DEFAULT 0.38f /* Y轴实时剩余距离速度上限系数。 */
+#define PF_POSITION_X_SPEED_FACTOR_DEFAULT 0.70f /* X轴实时剩余距离速度上限系数。 */
+#define PF_POSITION_Y_SPEED_FACTOR_DEFAULT 0.70f /* Y轴实时剩余距离速度上限系数。 */
 #define PF_POSITION_RELEASE_MARGIN_M     0.10f   /* 扩大的滑移、执行及位置环接管余量，单位 m。 */
 #define PF_SPEED_TEST_SETTLE_COUNTS      2       /* 纯S曲线结束后每轮允许的静止计数，count/10ms。 */
 #define PF_SPEED_TEST_SETTLE_TICKS       5U      /* 四轮连续静止50ms后结束测试。 */
@@ -43,9 +43,9 @@
 #define PF_Y_CROSSTALK_RIGHT_X_COMP_K     -0.016f /* 多组右移原始串轴均值接近 0，先不补偿。 */
 #define PF_LATERAL_LEFT_ODOMETRY_SCALE    1.0090f /* 三地图区域五组往返均值：左移里程约多 0.9%。 */
 
-#define PF_POSITION_X_KP                 4.45f   /* X轴近目标位置速度系数。 */
+#define PF_POSITION_X_KP                 4.95f   /* X轴近目标位置速度系数。 */
 #define PF_POSITION_X_KI                 0.0f    /* X轴近目标位置积分系数。 */
-#define PF_POSITION_X_KD                 2.5f    /* X轴近目标位置微分系数。 */
+#define PF_POSITION_X_KD                 8.0f    /* X轴近目标位置微分系数。 */
 #define PF_POSITION_Y_KP                 1.45f   /* Y轴独立近目标位置速度系数。 */
 #define PF_POSITION_Y_KI                 0.0f    /* Y轴独立近目标位置积分系数。 */
 #define PF_POSITION_Y_KD                 2.5f    /* Y轴独立近目标位置微分系数。 */

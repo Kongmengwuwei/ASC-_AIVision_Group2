@@ -1044,8 +1044,10 @@ static void vision_uart_init_internal(void)
 {
     fifo_init(&vision_uart_data_fifo, FIFO_DATA_8BIT, vision_uart_fifo_buf, VISION_FIFO_SIZE);
     fifo_clear(&vision_uart_data_fifo);
+#if VISION_UART_AVAILABLE
     uart_init(VISION_UART_INDEX, VISION_UART_BAUDRATE, VISION_UART_TX_PIN, VISION_UART_RX_PIN);
     uart_rx_interrupt(VISION_UART_INDEX, ZF_ENABLE);
+#endif
 
     memset(vision_fifo_read_buf, 0, sizeof(vision_fifo_read_buf));
     memset(vision_line_buf, 0, sizeof(vision_line_buf));
@@ -1195,6 +1197,7 @@ void uart_blob_rx_interrupt_handler(void)
 /* 视觉识别串口接收中断：只收字节入视觉 FIFO，所有解析都留给 process_vision_data。 */
 void vision_uart_rx_interrupt_handler(void)
 {
+#if VISION_UART_AVAILABLE
     uint8_t data = 0U;
 
     if (!uart_query_byte(VISION_UART_INDEX, &data)) {
@@ -1204,6 +1207,7 @@ void vision_uart_rx_interrupt_handler(void)
     if (FIFO_SUCCESS != fifo_write_buffer(&vision_uart_data_fifo, &data, 1U)) {
         vision_uart_rx_overflow_flag = true;
     }
+#endif
 }
 
 /*
@@ -1275,6 +1279,15 @@ bool uart_send_vision_request_with_sequence(VisionRecognitionType type,
     char cmd[24];
     uint8 mode = 0U;
     uint16 sequence = 0U;
+
+#if !VISION_UART_AVAILABLE
+    (void)type;
+    (void)distance;
+    if (out_sequence != NULL) {
+        *out_sequence = 0U;
+    }
+    return false;
+#endif
 
     if (!vision_get_request_mode(type, distance, &mode)) {
         return false;

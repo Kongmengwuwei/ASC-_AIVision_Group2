@@ -41,6 +41,26 @@ static uint8 g_motor_right_start_inactive_ticks;
 static uint16 g_motor_right_start_ticks;
 static int32 g_motor_right_start_lateral_sum4;
 
+#if !MOTOR_BOARD_USE_NEW
+static const int g_motor_startup_fwd[MOTOR_WHEEL_COUNT] =
+{
+    MOTOR_UL_STARTUP_FWD,
+    MOTOR_UR_STARTUP_FWD,
+    MOTOR_DL_STARTUP_FWD,
+    MOTOR_DR_STARTUP_FWD
+};
+static const int g_motor_startup_rev[MOTOR_WHEEL_COUNT] =
+{
+    MOTOR_UL_STARTUP_REV,
+    MOTOR_UR_STARTUP_REV,
+    MOTOR_DL_STARTUP_REV,
+    MOTOR_DR_STARTUP_REV
+};
+static uint8 g_motor_running[MOTOR_WHEEL_COUNT];
+static uint8 g_motor_startup_ticks[MOTOR_WHEEL_COUNT];
+static int8 g_motor_last_target_sign[MOTOR_WHEEL_COUNT];
+#endif
+
 void motor_init(void)
 {
 	gpio_init(MOTOR1_DIR, GPO, GPIO_HIGH, GPO_PUSH_PULL);                            // GPIO 初始化为输出 默认上拉输出高
@@ -100,9 +120,9 @@ void encoder_get(void)
 	encoder_data_quaddec4 = -encoder_raw_quaddec2;                  // 获取编码器计数 右下
 #else
 	encoder_data_quaddec1 = -encoder_raw_quaddec1;                  // 获取编码器计数 左上
-	encoder_data_quaddec2 = -encoder_raw_quaddec4;                  // 获取编码器计数 右上
+	encoder_data_quaddec2 = -encoder_raw_quaddec2;                  // 获取编码器计数 右上
 	encoder_data_quaddec3 = -encoder_raw_quaddec3;                  // 获取编码器计数 左下
-	encoder_data_quaddec4 = -encoder_raw_quaddec2;                  // 获取编码器计数 右下
+	encoder_data_quaddec4 = -encoder_raw_quaddec4;                  // 获取编码器计数 右下
 #endif
 
 #if MOTOR_BOARD_REVERSE_ENCODER_ALL_DIR
@@ -199,6 +219,9 @@ void motor_pwm(int up_left_speed,int up_right_speed,int down_left_speed,int down
 		down_left_speed == 0 && down_right_speed == 0)
 	{
 		motor_right_start_compensation_reset();
+#if !MOTOR_BOARD_USE_NEW
+		motor_control_reset_state();
+#endif
 	}
 
 #if MOTOR_BOARD_REMAP_LOGICAL_WHEELS
@@ -327,6 +350,7 @@ static int motor_apply_deadzone_compensation(int pid_output,
                                              int deadzone_fwd,
                                              int deadzone_rev)
 {
+#if MOTOR_BOARD_USE_NEW
     if (target_speed > 0 &&
         target_speed >= motor_deadzone_target_min_counts)
     {
@@ -337,8 +361,54 @@ static int motor_apply_deadzone_compensation(int pid_output,
     {
         pid_output -= deadzone_rev;
     }
+#else
+    int compensation;
+    int magnitude;
+
+    if (target_speed < motor_deadzone_target_min_counts &&
+        target_speed > -motor_deadzone_target_min_counts)
+    {
+        return Limit_int(LIMIT_PWM_MIN, pid_output, LIMIT_PWM_MAX);
+    }
+
+    if (pid_output > 0)
+    {
+        compensation = deadzone_fwd;
+        if (MOTOR_DEADZONE_BLEND_PWM > 0)
+        {
+            compensation = (deadzone_fwd * pid_output) /
+                           (pid_output + MOTOR_DEADZONE_BLEND_PWM);
+        }
+        pid_output += compensation;
+    }
+    else if (pid_output < 0)
+    {
+        magnitude = -pid_output;
+        compensation = deadzone_rev;
+        if (MOTOR_DEADZONE_BLEND_PWM > 0)
+        {
+            compensation = (deadzone_rev * magnitude) /
+                           (magnitude + MOTOR_DEADZONE_BLEND_PWM);
+        }
+        pid_output -= compensation;
+    }
+#endif
 
     return Limit_int(LIMIT_PWM_MIN, pid_output, LIMIT_PWM_MAX);
+}
+
+void motor_control_reset_state(void)
+{
+#if !MOTOR_BOARD_USE_NEW
+	uint8 i;
+
+	for (i = 0U; i < MOTOR_WHEEL_COUNT; ++i)
+	{
+		g_motor_running[i] = 0U;
+		g_motor_startup_ticks[i] = 0U;
+		g_motor_last_target_sign[i] = 0;
+	}
+#endif
 }
 
 void motor_right_start_compensation_reset(void)
@@ -443,6 +513,114 @@ void motor_limit_right_start_forward_offset(const int *input_speed_encoder,
 	}
 }
 
+#if !MOTOR_BOARD_USE_NEW
+static tagPID_T *motor_old_board_get_pid(uint8 wheel)
+{
+	switch (wheel)
+	{
+		case MOTOR_WHEEL_UL: return &ULpid;
+		case MOTOR_WHEEL_UR: return &URpid;
+		case MOTOR_WHEEL_DL: return &DLpid;
+		default:             return &DRpid;
+	}
+}
+
+static int motor_old_board_get_filtered_speed(uint8 wheel)
+{
+	switch (wheel)
+	{
+		case MOTOR_WHEEL_UL: return up_L_all;
+		case MOTOR_WHEEL_UR: return up_R_all;
+		case MOTOR_WHEEL_DL: return down_L_all;
+		default:             return down_R_all;
+	}
+}
+
+static uint8 motor_old_board_use_startup_kick(uint8 wheel, int target_speed)
+{
+	int target_sign;
+	int directed_raw;
+	tagPID_T *pid = motor_old_board_get_pid(wheel);
+
+	if (target_speed >= motor_deadzone_target_min_counts)
+	{
+		target_sign = 1;
+	}
+	else if (target_speed <= -motor_deadzone_target_min_counts)
+	{
+		target_sign = -1;
+	}
+	else
+	{
+		g_motor_running[wheel] = 0U;
+		g_motor_startup_ticks[wheel] = 0U;
+		g_motor_last_target_sign[wheel] = 0;
+		PID_Clear(pid);
+		return 0U;
+	}
+
+	if (g_motor_last_target_sign[wheel] != target_sign)
+	{
+		g_motor_running[wheel] = 0U;
+		g_motor_startup_ticks[wheel] = 0U;
+		g_motor_last_target_sign[wheel] = (int8)target_sign;
+		PID_Clear(pid);
+	}
+
+	directed_raw = g_motor_debug_raw[wheel] * target_sign;
+	if (directed_raw >= MOTOR_STARTUP_MOVING_MIN_COUNTS)
+	{
+		if (!g_motor_running[wheel])
+		{
+			PID_Clear(pid);
+		}
+		g_motor_running[wheel] = 1U;
+		g_motor_startup_ticks[wheel] = 0U;
+		return 0U;
+	}
+
+	if (g_motor_running[wheel])
+	{
+		return 0U;
+	}
+
+	if (g_motor_startup_ticks[wheel] < MOTOR_STARTUP_KICK_MAX_TICKS)
+	{
+		g_motor_startup_ticks[wheel]++;
+		return 1U;
+	}
+
+	g_motor_running[wheel] = 1U;
+	PID_Clear(pid);
+	return 0U;
+}
+
+static int motor_old_board_calculate_output(uint8 wheel, int target_speed)
+{
+	tagPID_T *pid;
+	int output;
+
+	if (motor_old_board_use_startup_kick(wheel, target_speed))
+	{
+		g_motor_debug_pid_pwm[wheel] = 0;
+		return (target_speed > 0) ? g_motor_startup_fwd[wheel] :
+		       (target_speed < 0) ? -g_motor_startup_rev[wheel] : 0;
+	}
+
+	pid = motor_old_board_get_pid(wheel);
+	output = Limit_int(LIMIT_PWM_MIN,
+	                   PID_Add_Calculate(pid,
+	                                     motor_old_board_get_filtered_speed(wheel),
+	                                     target_speed),
+	                   LIMIT_PWM_MAX);
+	g_motor_debug_pid_pwm[wheel] = output;
+	return motor_apply_deadzone_compensation(output,
+	                                         target_speed,
+	                                         motor_deadzone_fwd[wheel],
+	                                         motor_deadzone_rev[wheel]);
+}
+#endif
+
 void motor_control(int* input_speed_encoder)
 {
 	int limited_speed_encoder[MOTOR_WHEEL_COUNT];
@@ -462,6 +640,7 @@ void motor_control(int* input_speed_encoder)
 	g_motor_debug_cumulative_target[MOTOR_WHEEL_DR] += limited_speed_encoder[MOTOR_WHEEL_DR];
 	g_motor_debug_control_ticks++;
 
+#if MOTOR_BOARD_USE_NEW
 	motorUL_pwm_value = Limit_int(LIMIT_PWM_MIN, PID_Add_Calculate(&ULpid, up_L_all, limited_speed_encoder[0]), LIMIT_PWM_MAX);   //上左
 	motorUR_pwm_value = Limit_int(LIMIT_PWM_MIN, PID_Add_Calculate(&URpid, up_R_all, limited_speed_encoder[1]), LIMIT_PWM_MAX);   //上右
 	motorDL_pwm_value = Limit_int(LIMIT_PWM_MIN, PID_Add_Calculate(&DLpid, down_L_all, limited_speed_encoder[2]), LIMIT_PWM_MAX);   //下左
@@ -474,6 +653,16 @@ void motor_control(int* input_speed_encoder)
 	motorUR_pwm_value = motor_apply_deadzone_compensation(motorUR_pwm_value, limited_speed_encoder[1], motor_deadzone_fwd[MOTOR_WHEEL_UR], motor_deadzone_rev[MOTOR_WHEEL_UR]);
 	motorDL_pwm_value = motor_apply_deadzone_compensation(motorDL_pwm_value, limited_speed_encoder[2], motor_deadzone_fwd[MOTOR_WHEEL_DL], motor_deadzone_rev[MOTOR_WHEEL_DL]);
 	motorDR_pwm_value = motor_apply_deadzone_compensation(motorDR_pwm_value, limited_speed_encoder[3], motor_deadzone_fwd[MOTOR_WHEEL_DR], motor_deadzone_rev[MOTOR_WHEEL_DR]);
+#else
+	motorUL_pwm_value = motor_old_board_calculate_output(
+		MOTOR_WHEEL_UL, limited_speed_encoder[MOTOR_WHEEL_UL]);
+	motorUR_pwm_value = motor_old_board_calculate_output(
+		MOTOR_WHEEL_UR, limited_speed_encoder[MOTOR_WHEEL_UR]);
+	motorDL_pwm_value = motor_old_board_calculate_output(
+		MOTOR_WHEEL_DL, limited_speed_encoder[MOTOR_WHEEL_DL]);
+	motorDR_pwm_value = motor_old_board_calculate_output(
+		MOTOR_WHEEL_DR, limited_speed_encoder[MOTOR_WHEEL_DR]);
+#endif
 	motor_pwm(motorUL_pwm_value, motorUR_pwm_value,motorDL_pwm_value,motorDR_pwm_value);
 }
 

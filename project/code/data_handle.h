@@ -5,6 +5,7 @@
 #include "zf_common_typedef.h"
 #include "zf_driver_uart.h"
 #include "Map_Path_Data.h"
+#include "Motor.h"
 
 /* 摄像头通信串口参数 */
 #define UART_INDEX UART_1
@@ -15,14 +16,27 @@
 /*
  * 图案/数字识别摄像头通信串口参数。
  *
- * OpenMV 端使用 UART(12), baudrate=115200，
- * 主控端通过 UART4 与之相连。若实际接线不是 UART4，
- * 只需要改下面 4 个宏，不影响地图/车姿串口 UART1 的解析。
+ * OpenMV 端使用 UART(12), baudrate=115200。
+ * 新主板使用 UART4/C16/C17，旧主板使用 UART8/D16/D17；旧主板将
+ * UART8 临时切换给蓝牙调参时，识别摄像头通道会自动停用。
  */
+#if MOTOR_BOARD_USE_NEW
+#define VISION_UART_AVAILABLE 1
 #define VISION_UART_INDEX UART_4
 #define VISION_UART_BAUDRATE 115200
 #define VISION_UART_TX_PIN UART4_TX_C16
 #define VISION_UART_RX_PIN UART4_RX_C17
+#else
+#if MOTOR_OLD_BOARD_UART8_USE_BLUETOOTH
+#define VISION_UART_AVAILABLE 0
+#else
+#define VISION_UART_AVAILABLE 1
+#endif
+#define VISION_UART_INDEX UART_8
+#define VISION_UART_BAUDRATE 115200
+#define VISION_UART_TX_PIN UART8_TX_D16
+#define VISION_UART_RX_PIN UART8_RX_D17
+#endif
 
 /* FIFO 与解析缓冲大小 */
 #define FIFO_SIZE 512
@@ -104,7 +118,7 @@ bool parse_map_from_string(const char *map_text);
 
 /* 串口接收中断回调（由 LPUART1_IRQHandler 调用） */
 void uart_blob_rx_interrupt_handler(void);
-/* 视觉识别串口接收中断回调（默认由 LPUART4_IRQHandler 调用）。 */
+/* 视觉识别串口接收中断回调（由当前板型选择的 UART IRQ 调用）。 */
 void vision_uart_rx_interrupt_handler(void);
 /* 发送 "MAP" 请求命令 */
 void uart_send_map_request(void);

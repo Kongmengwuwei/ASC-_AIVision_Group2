@@ -15,9 +15,9 @@
 #define MOTOR4_DIR              (D3)                           //下右
 #define MOTOR4_PWM              (PWM2_MODULE3_CHA_D2)
 
-// Motor board selection:
-// 0: old board pin/direction configuration.
-// 1: new board wiring adaptation, enabled by default.
+// Motor board selection (the new board remains the default build):
+// 0: old board wiring and board-specific motor parameters.
+// 1: new board wiring and the current validated parameters.
 #define MOTOR_BOARD_USE_NEW          (1)
 
 #if MOTOR_BOARD_USE_NEW
@@ -31,6 +31,13 @@
 #define MOTOR_BOARD_REVERSE_DR_DIR   (1)
 #define MOTOR_BOARD_REVERSE_ENCODER_ALL_DIR (1)
 #else
+/*
+ * UART8/D16/D17 is shared on the old board:
+ * 0 = recognition camera (normal competition firmware).
+ * 1 = Bluetooth tuning (recognition camera disabled).
+ */
+#define MOTOR_OLD_BOARD_UART8_USE_BLUETOOTH (0)
+
 #define MOTOR_BOARD_REMAP_LOGICAL_WHEELS (0)
 #define MOTOR_BOARD_REVERSE_ALL_DIR  (0)
 #define MOTOR_BOARD_REVERSE_UL_DIR   (0)
@@ -68,8 +75,13 @@
 #define LIMIT_PWM_MIN              -6000
 #define LIMIT_PWM_MAX               6000
 
-/* Closed-loop tuned dead-zone feedforward for the final motor driver board. */
+/* Board-specific closed-loop motor parameters. */
 #define MOTOR_DEADZONE_TARGET_MIN_COUNTS  2
+#define MOTOR_DEADZONE_BLEND_PWM          120
+#define MOTOR_STARTUP_MOVING_MIN_COUNTS    1
+#define MOTOR_STARTUP_KICK_MAX_TICKS       8U
+
+#if MOTOR_BOARD_USE_NEW
 #define MOTOR_UL_DEADZONE_FWD             420
 #define MOTOR_UL_DEADZONE_REV             390
 #define MOTOR_UR_DEADZONE_FWD             495
@@ -78,6 +90,34 @@
 #define MOTOR_DL_DEADZONE_REV             390
 #define MOTOR_DR_DEADZONE_FWD             550
 #define MOTOR_DR_DEADZONE_REV             637
+#define MOTOR_UL_STARTUP_FWD              MOTOR_UL_DEADZONE_FWD
+#define MOTOR_UL_STARTUP_REV              MOTOR_UL_DEADZONE_REV
+#define MOTOR_UR_STARTUP_FWD              MOTOR_UR_DEADZONE_FWD
+#define MOTOR_UR_STARTUP_REV              MOTOR_UR_DEADZONE_REV
+#define MOTOR_DL_STARTUP_FWD              MOTOR_DL_DEADZONE_FWD
+#define MOTOR_DL_STARTUP_REV              MOTOR_DL_DEADZONE_REV
+#define MOTOR_DR_STARTUP_FWD              MOTOR_DR_DEADZONE_FWD
+#define MOTOR_DR_STARTUP_REV              MOTOR_DR_DEADZONE_REV
+#else
+/* Old-board kinetic-friction compensation measured by descending PWM sweeps. */
+#define MOTOR_UL_DEADZONE_FWD             380
+#define MOTOR_UL_DEADZONE_REV             420
+#define MOTOR_UR_DEADZONE_FWD             360
+#define MOTOR_UR_DEADZONE_REV             370
+#define MOTOR_DL_DEADZONE_FWD             440
+#define MOTOR_DL_DEADZONE_REV             410
+#define MOTOR_DR_DEADZONE_FWD             390
+#define MOTOR_DR_DEADZONE_REV             380
+/* Old-board static breakaway kicks; running compensation is separate. */
+#define MOTOR_UL_STARTUP_FWD              850
+#define MOTOR_UL_STARTUP_REV              800
+#define MOTOR_UR_STARTUP_FWD              800
+#define MOTOR_UR_STARTUP_REV              750
+#define MOTOR_DL_STARTUP_FWD              1050
+#define MOTOR_DL_STARTUP_REV              1100
+#define MOTOR_DR_STARTUP_FWD              800
+#define MOTOR_DR_STARTUP_REV              900
+#endif
 
 /* Right-strafe launch compensation.
  * 1 target count is about 0.82 cm/s with the current encoder calibration.
@@ -140,6 +180,7 @@ void encoder_get(void);
 int Limit_int(int left_limit, int target_num, int right_limit);
 void motor_pwm(int up_left_speed,int up_right_speed,int down_left_speed,int down_right_speed);
 void motor_control(int* input_speed_encoder);
+void motor_control_reset_state(void);
 void motor_limit_right_start_forward_offset(const int *input_speed_encoder,
                                             int *limited_speed_encoder);
 void motor_right_start_compensation_reset(void);

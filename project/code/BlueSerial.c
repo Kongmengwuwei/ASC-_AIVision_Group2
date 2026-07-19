@@ -411,6 +411,9 @@ static void BlueSerial_ClearWheelPid(void)
     PID_Clear(&URpid);
     PID_Clear(&DLpid);
     PID_Clear(&DRpid);
+#if !MOTOR_BOARD_USE_NEW
+    motor_control_reset_state();
+#endif
 }
 
 static void BlueSerial_ZeroSpeedCommand(void)
@@ -1223,6 +1226,16 @@ static void BlueSerial_EnterRawPwmMode(void)
 
 void Blue_Serial_Init(void)
 {
+#if !MOTOR_BOARD_USE_NEW && !MOTOR_OLD_BOARD_UART8_USE_BLUETOOTH
+    /* Old-board competition firmware reserves UART8/D16/D17 for recognition. */
+    g_enabled = 0U;
+    g_initialized = 0U;
+    return;
+#endif
+#if !MOTOR_BOARD_USE_NEW && MOTOR_OLD_BOARD_UART8_USE_BLUETOOTH
+    /* The dedicated old-board tuning build always enables its UART owner. */
+    g_enabled = 1U;
+#endif
     g_rx_collecting = 0U;
     g_rx_work_len = 0U;
     g_rx_queue_write = 0U;
@@ -1250,6 +1263,11 @@ void BlueSerial_SetEnabled(uint8 enabled)
 {
     uint32 primask;
     uint8 new_enabled = enabled ? 1U : 0U;
+
+#if !MOTOR_BOARD_USE_NEW && !MOTOR_OLD_BOARD_UART8_USE_BLUETOOTH
+    /* Do not let menu state steal the recognition camera's UART8 pins. */
+    new_enabled = 0U;
+#endif
 
     primask = interrupt_global_disable();
     if (g_initialized && g_enabled && !new_enabled)
@@ -1980,8 +1998,8 @@ static const char *BlueSerial_LogicalWheelName(uint8 wheel_index)
 
 static const char *BlueSerial_PhysicalMotorName(uint8 logical_wheel_index)
 {
-#if MOTOR_BOARD_REMAP_ORDER_2341
-    static const char *const names[4] = {"m4", "m2", "m3", "m1"};
+#if MOTOR_BOARD_REMAP_LOGICAL_WHEELS
+    static const char *const names[4] = {"m1", "m2", "m4", "m3"};
 #else
     static const char *const names[4] = {"m1", "m2", "m3", "m4"};
 #endif
@@ -2008,10 +2026,10 @@ static int BlueSerial_GetLogicalWheelIndex(const char *name)
         return 3;
     }
 
-#if MOTOR_BOARD_REMAP_ORDER_2341
+#if MOTOR_BOARD_REMAP_LOGICAL_WHEELS
     if (strcmp(name, "pwm.m1") == 0)
     {
-        return 3;
+        return 0;
     }
     if (strcmp(name, "pwm.m2") == 0)
     {
@@ -2019,11 +2037,11 @@ static int BlueSerial_GetLogicalWheelIndex(const char *name)
     }
     if (strcmp(name, "pwm.m3") == 0)
     {
-        return 2;
+        return 3;
     }
     if (strcmp(name, "pwm.m4") == 0)
     {
-        return 0;
+        return 2;
     }
 #else
     if (strcmp(name, "pwm.m1") == 0)

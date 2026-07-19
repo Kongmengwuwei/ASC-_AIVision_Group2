@@ -122,11 +122,13 @@ void LPUART3_IRQHandler(void)
 
 void LPUART4_IRQHandler(void)
 {
+#if MOTOR_BOARD_USE_NEW
     if(kLPUART_RxDataRegFullFlag & LPUART_GetStatusFlags(LPUART4))
     {
         extern void vision_uart_rx_interrupt_handler(void);
         vision_uart_rx_interrupt_handler();
     }
+#endif
 
     LPUART_ClearStatusFlags(LPUART4, kLPUART_RxOverrunFlag);
 }
@@ -158,8 +160,19 @@ void LPUART8_IRQHandler(void)
 {
     if(kLPUART_RxDataRegFullFlag & LPUART_GetStatusFlags(LPUART8))
     {
-        /* UART8 is dedicated to the stand-alone Bluetooth tuning firmware. */
+#if MOTOR_BOARD_USE_NEW
+        /* New board: UART8 is the Bluetooth tuning port. */
         BlueSerial_RxIrqHandler();
+#else
+#if MOTOR_OLD_BOARD_UART8_USE_BLUETOOTH
+        /* Old board temporarily assigns UART8 to Bluetooth tuning. */
+        BlueSerial_RxIrqHandler();
+#else
+        /* Old-board competition firmware assigns UART8 to recognition. */
+        extern void vision_uart_rx_interrupt_handler(void);
+        vision_uart_rx_interrupt_handler();
+#endif
+#endif
     }
 
     LPUART_ClearStatusFlags(LPUART8, kLPUART_RxOverrunFlag);

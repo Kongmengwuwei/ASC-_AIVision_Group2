@@ -10,27 +10,51 @@ float speed_three_array[3] = {0};
 int speed_encoder[4] = {0};
 int car_stop_array[4] = {0};
 
+volatile int motor_deadzone_target_min_counts = MOTOR_DEADZONE_TARGET_MIN_COUNTS;
+volatile int motor_deadzone_fwd[MOTOR_WHEEL_COUNT] =
+{
+    MOTOR_UL_DEADZONE_FWD,
+    MOTOR_UR_DEADZONE_FWD,
+    MOTOR_DL_DEADZONE_FWD,
+    MOTOR_DR_DEADZONE_FWD
+};
+volatile int motor_deadzone_rev[MOTOR_WHEEL_COUNT] =
+{
+    MOTOR_UL_DEADZONE_REV,
+    MOTOR_UR_DEADZONE_REV,
+    MOTOR_DL_DEADZONE_REV,
+    MOTOR_DR_DEADZONE_REV
+};
+
+static volatile int g_motor_debug_target[MOTOR_WHEEL_COUNT];
+static volatile int g_motor_debug_raw[MOTOR_WHEEL_COUNT];
+static volatile int g_motor_debug_pid_pwm[MOTOR_WHEEL_COUNT];
+static volatile int g_motor_debug_final_pwm[MOTOR_WHEEL_COUNT];
+static volatile int32 g_motor_debug_cumulative_target[MOTOR_WHEEL_COUNT];
+static volatile int32 g_motor_debug_cumulative_raw[MOTOR_WHEEL_COUNT];
+static volatile uint32 g_motor_debug_control_ticks;
+
 void motor_init(void)
 {
-	gpio_init(MOTOR1_DIR, GPO, GPIO_HIGH, GPO_PUSH_PULL);                            // GPIO ³õÊ¼»¯ÎªÊä³ö Ä¬ÈÏÉÏÀ­Êä³ö¸ß
-    pwm_init(MOTOR1_PWM, 17000, 0);                                                  // PWM Í¨µÀ³õÊ¼»¯ÆµÂÊ 17KHz Õ¼¿Õ±È³õÊ¼Îª 0
+	gpio_init(MOTOR1_DIR, GPO, GPIO_HIGH, GPO_PUSH_PULL);                            // GPIO åˆå§‹åŒ–ä¸ºè¾“å‡º é»˜è®¤ä¸Šæ‹‰è¾“å‡ºé«˜
+    pwm_init(MOTOR1_PWM, 17000, 0);                                                  // PWM é€šé“åˆå§‹åŒ–é¢‘ç‡ 17KHz å ç©ºæ¯”åˆå§‹ä¸º 0
     
-    gpio_init(MOTOR2_DIR, GPO, GPIO_HIGH, GPO_PUSH_PULL);                            // GPIO ³õÊ¼»¯ÎªÊä³ö Ä¬ÈÏÉÏÀ­Êä³ö¸ß
-    pwm_init(MOTOR2_PWM, 17000, 0);                                                  // PWM Í¨µÀ³õÊ¼»¯ÆµÂÊ 17KHz Õ¼¿Õ±È³õÊ¼Îª 0
+    gpio_init(MOTOR2_DIR, GPO, GPIO_HIGH, GPO_PUSH_PULL);                            // GPIO åˆå§‹åŒ–ä¸ºè¾“å‡º é»˜è®¤ä¸Šæ‹‰è¾“å‡ºé«˜
+    pwm_init(MOTOR2_PWM, 17000, 0);                                                  // PWM é€šé“åˆå§‹åŒ–é¢‘ç‡ 17KHz å ç©ºæ¯”åˆå§‹ä¸º 0
 
-    gpio_init(MOTOR3_DIR, GPO, GPIO_HIGH, GPO_PUSH_PULL);                            // GPIO ³õÊ¼»¯ÎªÊä³ö Ä¬ÈÏÉÏÀ­Êä³ö¸ß
-    pwm_init(MOTOR3_PWM, 17000, 0);                                                  // PWM Í¨µÀ³õÊ¼»¯ÆµÂÊ 17KHz Õ¼¿Õ±È³õÊ¼Îª 0
+    gpio_init(MOTOR3_DIR, GPO, GPIO_HIGH, GPO_PUSH_PULL);                            // GPIO åˆå§‹åŒ–ä¸ºè¾“å‡º é»˜è®¤ä¸Šæ‹‰è¾“å‡ºé«˜
+    pwm_init(MOTOR3_PWM, 17000, 0);                                                  // PWM é€šé“åˆå§‹åŒ–é¢‘ç‡ 17KHz å ç©ºæ¯”åˆå§‹ä¸º 0
 
-    gpio_init(MOTOR4_DIR, GPO, GPIO_HIGH, GPO_PUSH_PULL);                            // GPIO ³õÊ¼»¯ÎªÊä³ö Ä¬ÈÏÉÏÀ­Êä³ö¸ß
-    pwm_init(MOTOR4_PWM, 17000, 0);                                                  // PWM Í¨µÀ³õÊ¼»¯ÆµÂÊ 17KHz Õ¼¿Õ±È³õÊ¼Îª 0
+    gpio_init(MOTOR4_DIR, GPO, GPIO_HIGH, GPO_PUSH_PULL);                            // GPIO åˆå§‹åŒ–ä¸ºè¾“å‡º é»˜è®¤ä¸Šæ‹‰è¾“å‡ºé«˜
+    pwm_init(MOTOR4_PWM, 17000, 0);                                                  // PWM é€šé“åˆå§‹åŒ–é¢‘ç‡ 17KHz å ç©ºæ¯”åˆå§‹ä¸º 0
 }
 
 void encoder_init(void)
 {
-	encoder_quad_init(ENCODER_1, ENCODER_1_A, ENCODER_1_B);                     // ³õÊ¼»¯±àÂëÆ÷Ä£¿éÓëÒı½Å Õı½»½âÂë±àÂëÆ÷Ä£Ê½
-    encoder_quad_init(ENCODER_2, ENCODER_2_A, ENCODER_2_B);                     // ³õÊ¼»¯±àÂëÆ÷Ä£¿éÓëÒı½Å Õı½»½âÂë±àÂëÆ÷Ä£Ê½
-    encoder_quad_init(ENCODER_3, ENCODER_3_A, ENCODER_3_B);                     // ³õÊ¼»¯±àÂëÆ÷Ä£¿éÓëÒı½Å Õı½»½âÂë±àÂëÆ÷Ä£Ê½
-    encoder_quad_init(ENCODER_4, ENCODER_4_A, ENCODER_4_B);                     // ³õÊ¼»¯±àÂëÆ÷Ä£¿éÓëÒı½Å Õı½»½âÂë±àÂëÆ÷Ä£Ê½
+	encoder_quad_init(ENCODER_1, ENCODER_1_A, ENCODER_1_B);                     // åˆå§‹åŒ–ç¼–ç å™¨æ¨¡å—ä¸å¼•è„š æ­£äº¤è§£ç ç¼–ç å™¨æ¨¡å¼
+    encoder_quad_init(ENCODER_2, ENCODER_2_A, ENCODER_2_B);                     // åˆå§‹åŒ–ç¼–ç å™¨æ¨¡å—ä¸å¼•è„š æ­£äº¤è§£ç ç¼–ç å™¨æ¨¡å¼
+    encoder_quad_init(ENCODER_3, ENCODER_3_A, ENCODER_3_B);                     // åˆå§‹åŒ–ç¼–ç å™¨æ¨¡å—ä¸å¼•è„š æ­£äº¤è§£ç ç¼–ç å™¨æ¨¡å¼
+    encoder_quad_init(ENCODER_4, ENCODER_4_A, ENCODER_4_B);                     // åˆå§‹åŒ–ç¼–ç å™¨æ¨¡å—ä¸å¼•è„š æ­£äº¤è§£ç ç¼–ç å™¨æ¨¡å¼
 }
 
 static float speed_L_up[2];
@@ -42,17 +66,17 @@ int all=0;
 int16 up_L_all=0;
 int16 down_L_all=0;
 int16 up_R_all=0;
-int16 down_R_all=0;//±àÂëÆ÷»ı·Ö±äÁ¿
+int16 down_R_all=0;//ç¼–ç å™¨ç§¯åˆ†å˜é‡
 int32 encoder_all=0;
-int16 encoders_average;//»ı·ÖÆ½¾ùÖµ
+int16 encoders_average;//ç§¯åˆ†å¹³å‡å€¼
 
-int16 encoder_data_quaddec1 = 0;//±àÂëÆ÷µÄÖµ
+int16 encoder_data_quaddec1 = 0;//ç¼–ç å™¨çš„å€¼
 int16 encoder_data_quaddec2 = 0;
 int16 encoder_data_quaddec3 = 0;
 int16 encoder_data_quaddec4 = 0;
 
 /**************************************************************************
-º¯Êı¹¦ÄÜ£º±àÂëÆ÷ÂË²¨
+å‡½æ•°åŠŸèƒ½ï¼šç¼–ç å™¨æ»¤æ³¢
 **************************************************************************/                                      
 void encoder_get(void)
 {
@@ -63,15 +87,15 @@ void encoder_get(void)
 	int16 encoder_raw_quaddec4 = encoder_get_count(ENCODER_4);
 
 #if MOTOR_BOARD_USE_NEW
-	encoder_data_quaddec1 = -encoder_raw_quaddec4;                  // »ñÈ¡±àÂëÆ÷¼ÆÊı ×óÉÏ
-	encoder_data_quaddec2 = -encoder_raw_quaddec3;                  // »ñÈ¡±àÂëÆ÷¼ÆÊı ÓÒÉÏ
-	encoder_data_quaddec3 = -encoder_raw_quaddec1;                  // »ñÈ¡±àÂëÆ÷¼ÆÊı ×óÏÂ
-	encoder_data_quaddec4 = -encoder_raw_quaddec2;                  // »ñÈ¡±àÂëÆ÷¼ÆÊı ÓÒÏÂ
+	encoder_data_quaddec1 = -encoder_raw_quaddec4;                  // è·å–ç¼–ç å™¨è®¡æ•° å·¦ä¸Š
+	encoder_data_quaddec2 = -encoder_raw_quaddec3;                  // è·å–ç¼–ç å™¨è®¡æ•° å³ä¸Š
+	encoder_data_quaddec3 = -encoder_raw_quaddec1;                  // è·å–ç¼–ç å™¨è®¡æ•° å·¦ä¸‹
+	encoder_data_quaddec4 = -encoder_raw_quaddec2;                  // è·å–ç¼–ç å™¨è®¡æ•° å³ä¸‹
 #else
-	encoder_data_quaddec1 = -encoder_raw_quaddec1;                  // »ñÈ¡±àÂëÆ÷¼ÆÊı ×óÉÏ
-	encoder_data_quaddec2 = -encoder_raw_quaddec4;                  // »ñÈ¡±àÂëÆ÷¼ÆÊı ÓÒÉÏ
-	encoder_data_quaddec3 = -encoder_raw_quaddec3;                  // »ñÈ¡±àÂëÆ÷¼ÆÊı ×óÏÂ
-	encoder_data_quaddec4 = -encoder_raw_quaddec2;                  // »ñÈ¡±àÂëÆ÷¼ÆÊı ÓÒÏÂ
+	encoder_data_quaddec1 = -encoder_raw_quaddec1;                  // è·å–ç¼–ç å™¨è®¡æ•° å·¦ä¸Š
+	encoder_data_quaddec2 = -encoder_raw_quaddec4;                  // è·å–ç¼–ç å™¨è®¡æ•° å³ä¸Š
+	encoder_data_quaddec3 = -encoder_raw_quaddec3;                  // è·å–ç¼–ç å™¨è®¡æ•° å·¦ä¸‹
+	encoder_data_quaddec4 = -encoder_raw_quaddec2;                  // è·å–ç¼–ç å™¨è®¡æ•° å³ä¸‹
 #endif
 
 #if MOTOR_BOARD_REVERSE_ENCODER_ALL_DIR
@@ -80,18 +104,28 @@ void encoder_get(void)
 	encoder_data_quaddec3 = -encoder_data_quaddec3;
 	encoder_data_quaddec4 = -encoder_data_quaddec4;
 #endif
+
+	/* Logical wheel order and sign before filtering: UL, UR, DL, DR. */
+	g_motor_debug_raw[MOTOR_WHEEL_UL] = encoder_data_quaddec1;
+	g_motor_debug_raw[MOTOR_WHEEL_UR] = -encoder_data_quaddec2;
+	g_motor_debug_raw[MOTOR_WHEEL_DL] = encoder_data_quaddec3;
+	g_motor_debug_raw[MOTOR_WHEEL_DR] = -encoder_data_quaddec4;
+	g_motor_debug_cumulative_raw[MOTOR_WHEEL_UL] += g_motor_debug_raw[MOTOR_WHEEL_UL];
+	g_motor_debug_cumulative_raw[MOTOR_WHEEL_UR] += g_motor_debug_raw[MOTOR_WHEEL_UR];
+	g_motor_debug_cumulative_raw[MOTOR_WHEEL_DL] += g_motor_debug_raw[MOTOR_WHEEL_DL];
+	g_motor_debug_cumulative_raw[MOTOR_WHEEL_DR] += g_motor_debug_raw[MOTOR_WHEEL_DR];
 	
 	
-	encoder_L_up[4]=encoder_L_up[3];//×óÉÏ±àÂëÆ÷
+	encoder_L_up[4]=encoder_L_up[3];//å·¦ä¸Šç¼–ç å™¨
 	encoder_L_up[3]=encoder_L_up[2];
 	encoder_L_up[2]=encoder_L_up[1];
 	encoder_L_up[1]=encoder_L_up[0];
-	encoder_L_up[0]=encoder_data_quaddec1;   //ÊäÈëµÚÒ»¿ÌÊı
+	encoder_L_up[0]=encoder_data_quaddec1;   //è¾“å…¥ç¬¬ä¸€åˆ»æ•°
 	speed_L_up[1]=speed_L_up[0];
 	speed_L_up[0]=(encoder_L_up[4]*0.5f+encoder_L_up[3]*0.5f+encoder_L_up[2]*2.0f+encoder_L_up[1]*3.0f+encoder_L_up[0]*4.0f)/10.0f;
 	up_L_all=Lowpass(speed_L_up[1],speed_L_up[0]);
 	
-	encoder_R_up[4]=encoder_R_up[3];//ÓÒÉÏ±àÂëÆ÷
+	encoder_R_up[4]=encoder_R_up[3];//å³ä¸Šç¼–ç å™¨
 	encoder_R_up[3]=encoder_R_up[2];
 	encoder_R_up[2]=encoder_R_up[1];
 	encoder_R_up[1]=encoder_R_up[0];
@@ -100,7 +134,7 @@ void encoder_get(void)
 	speed_R_up[0]=(encoder_R_up[4]*0.5f+encoder_R_up[3]*0.5f+encoder_R_up[2]*2+encoder_R_up[1]*3.0f+encoder_R_up[0]*4.0f)/10.0f;
 	up_R_all=Lowpass(speed_R_up[1],speed_R_up[0]);
 	
-	encoder_L_down[4]=encoder_L_down[3];//×óÏÂ±àÂëÆ÷
+	encoder_L_down[4]=encoder_L_down[3];//å·¦ä¸‹ç¼–ç å™¨
 	encoder_L_down[3]=encoder_L_down[2];
 	encoder_L_down[2]=encoder_L_down[1];
 	encoder_L_down[1]=encoder_L_down[0];
@@ -109,7 +143,7 @@ void encoder_get(void)
 	speed_L_down[0]=(encoder_L_down[4]*0.5f+encoder_L_down[3]*0.5f+encoder_L_down[2]*2+encoder_L_down[1]*3.0f+encoder_L_down[0]*4.0f)/10.0f;
 	down_L_all=Lowpass(speed_L_down[1],speed_L_down[0]);
 	
-	encoder_R_down[4]=encoder_R_down[3];//ÓÒÏÂ±àÂëÆ÷
+	encoder_R_down[4]=encoder_R_down[3];//å³ä¸‹ç¼–ç å™¨
 	encoder_R_down[3]=encoder_R_down[2];
 	encoder_R_down[2]=encoder_R_down[1];
 	encoder_R_down[1]=encoder_R_down[0];
@@ -118,9 +152,9 @@ void encoder_get(void)
 	speed_R_down[0]=(encoder_R_down[4]*0.5f+encoder_R_down[3]*0.5f+encoder_R_down[2]*2+encoder_R_down[1]*3.0f+encoder_R_down[0]*4.0f)/10.0f;
 	down_R_all=Lowpass(speed_R_down[1],speed_R_down[0]);
 	
-	encoder_clear_count(ENCODER_1);                                       // Çå¿Õ±àÂëÆ÷¼ÆÊı
-	encoder_clear_count(ENCODER_2);                                       // Çå¿Õ±àÂëÆ÷¼ÆÊı
-	encoder_clear_count(ENCODER_3);                                       // Çå¿Õ±àÂëÆ÷¼ÆÊı
+	encoder_clear_count(ENCODER_1);                                       // æ¸…ç©ºç¼–ç å™¨è®¡æ•°
+	encoder_clear_count(ENCODER_2);                                       // æ¸…ç©ºç¼–ç å™¨è®¡æ•°
+	encoder_clear_count(ENCODER_3);                                       // æ¸…ç©ºç¼–ç å™¨è®¡æ•°
 	encoder_clear_count(ENCODER_4);
 
 	all = all + down_R_all+down_L_all+up_L_all+up_R_all;
@@ -131,9 +165,9 @@ void encoder_get(void)
 }
 
 /**************************************************************************
-º¯Êı¹¦ÄÜ£ºµÍÍ¨ÂË²¨
-Èë¿Ú²ÎÊı£º¾ÉX£¬ĞÂX
-·µ»Ø  Öµ£ºĞÂÖµ
+å‡½æ•°åŠŸèƒ½ï¼šä½é€šæ»¤æ³¢
+å…¥å£å‚æ•°ï¼šæ—§Xï¼Œæ–°X
+è¿”å›  å€¼ï¼šæ–°å€¼
 **************************************************************************/
 int16 Lowpass(int16 X_last,int16 X_new)
 { 
@@ -147,6 +181,11 @@ int16 Lowpass(int16 X_last,int16 X_new)
 
 void motor_pwm(int up_left_speed,int up_right_speed,int down_left_speed,int down_right_speed)
 {
+	g_motor_debug_final_pwm[MOTOR_WHEEL_UL] = up_left_speed;
+	g_motor_debug_final_pwm[MOTOR_WHEEL_UR] = up_right_speed;
+	g_motor_debug_final_pwm[MOTOR_WHEEL_DL] = down_left_speed;
+	g_motor_debug_final_pwm[MOTOR_WHEEL_DR] = down_right_speed;
+
 #if MOTOR_BOARD_REMAP_LOGICAL_WHEELS
 	int logical_ul = up_left_speed;
 	int logical_ur = up_right_speed;
@@ -180,69 +219,69 @@ void motor_pwm(int up_left_speed,int up_right_speed,int down_left_speed,int down
 	down_right_speed = -down_right_speed;
 #endif
 
-	if(up_left_speed > 0)                                                           // Õı×ª
+	if(up_left_speed > 0)                                                           // æ­£è½¬
     {
-		gpio_set_level(MOTOR1_DIR, GPIO_LOW);                     // DIRÊä³ö¸ßµçÆ½
-        pwm_set_duty(MOTOR1_PWM, up_left_speed);                   // ¼ÆËãÕ¼¿Õ±È
+		gpio_set_level(MOTOR1_DIR, GPIO_LOW);                     // DIRè¾“å‡ºé«˜ç”µå¹³
+        pwm_set_duty(MOTOR1_PWM, up_left_speed);                   // è®¡ç®—å ç©ºæ¯”
      }
-     else if (up_left_speed < 0)                                                                  // ·´×ª
+     else if (up_left_speed < 0)                                                                  // åè½¬
      {
-		gpio_set_level(MOTOR1_DIR, GPIO_HIGH);                    // DIRÊä³öµÍµçÆ½
-        pwm_set_duty(MOTOR1_PWM, -up_left_speed);                // ¼ÆËãÕ¼¿Õ±È
+		gpio_set_level(MOTOR1_DIR, GPIO_HIGH);                    // DIRè¾“å‡ºä½ç”µå¹³
+        pwm_set_duty(MOTOR1_PWM, -up_left_speed);                // è®¡ç®—å ç©ºæ¯”
 
      }
 	 else if (up_left_speed == 0)
 	 {
-		gpio_set_level(MOTOR1_DIR, GPIO_LOW);                     // DIRÊä³ö¸ßµçÆ½
-		 pwm_set_duty(MOTOR1_PWM, 0);                                 // Í£Ö¹
+		gpio_set_level(MOTOR1_DIR, GPIO_LOW);                     // DIRè¾“å‡ºé«˜ç”µå¹³
+		 pwm_set_duty(MOTOR1_PWM, 0);                                 // åœæ­¢
 	 }
 
 	 if (up_right_speed > 0)
 	 {
-		 gpio_set_level(MOTOR2_DIR, GPIO_HIGH);                       // DIRÊä³ö¸ßµçÆ½
-         pwm_set_duty(MOTOR2_PWM, up_right_speed);                   // ¼ÆËãÕ¼¿Õ±È
+		 gpio_set_level(MOTOR2_DIR, GPIO_HIGH);                       // DIRè¾“å‡ºé«˜ç”µå¹³
+         pwm_set_duty(MOTOR2_PWM, up_right_speed);                   // è®¡ç®—å ç©ºæ¯”
 	 }
 	 else if (up_right_speed < 0)
 	 {
-		 gpio_set_level(MOTOR2_DIR, GPIO_LOW);                     // DIRÊä³öµÍµçÆ½
-         pwm_set_duty(MOTOR2_PWM, -up_right_speed);                // ¼ÆËãÕ¼¿Õ±È
+		 gpio_set_level(MOTOR2_DIR, GPIO_LOW);                     // DIRè¾“å‡ºä½ç”µå¹³
+         pwm_set_duty(MOTOR2_PWM, -up_right_speed);                // è®¡ç®—å ç©ºæ¯”
 	 }
 	 else if (up_right_speed == 0)
 	 {
-		 gpio_set_level(MOTOR2_DIR, GPIO_HIGH);                       // DIRÊä³ö¸ßµçÆ½
-		 pwm_set_duty(MOTOR2_PWM, 0);                                 // Í£Ö¹
+		 gpio_set_level(MOTOR2_DIR, GPIO_HIGH);                       // DIRè¾“å‡ºé«˜ç”µå¹³
+		 pwm_set_duty(MOTOR2_PWM, 0);                                 // åœæ­¢
 	 }
 
 	 if (down_left_speed > 0)
 	 {
-		 gpio_set_level(MOTOR3_DIR, GPIO_LOW);                       // DIRÊä³ö¸ßµçÆ½
-         pwm_set_duty(MOTOR3_PWM, down_left_speed);                   // ¼ÆËãÕ¼¿Õ±È
+		 gpio_set_level(MOTOR3_DIR, GPIO_LOW);                       // DIRè¾“å‡ºé«˜ç”µå¹³
+         pwm_set_duty(MOTOR3_PWM, down_left_speed);                   // è®¡ç®—å ç©ºæ¯”
 	 }
 	 else if (down_left_speed < 0)
 	 {
-		 gpio_set_level(MOTOR3_DIR, GPIO_HIGH);                      // DIRÊä³öµÍµçÆ½
-         pwm_set_duty(MOTOR3_PWM, -down_left_speed);                // ¼ÆËãÕ¼¿Õ±È
+		 gpio_set_level(MOTOR3_DIR, GPIO_HIGH);                      // DIRè¾“å‡ºä½ç”µå¹³
+         pwm_set_duty(MOTOR3_PWM, -down_left_speed);                // è®¡ç®—å ç©ºæ¯”
 	 }
 	 else if (down_left_speed == 0)
 	 {
-		 gpio_set_level(MOTOR3_DIR, GPIO_LOW);                       // DIRÊä³ö¸ßµçÆ½
-		 pwm_set_duty(MOTOR3_PWM, 0);                                 // Í£Ö¹
+		 gpio_set_level(MOTOR3_DIR, GPIO_LOW);                       // DIRè¾“å‡ºé«˜ç”µå¹³
+		 pwm_set_duty(MOTOR3_PWM, 0);                                 // åœæ­¢
 	 }
 
 	 if (down_right_speed > 0)
 	 {
-		 gpio_set_level(MOTOR4_DIR, GPIO_HIGH);                       // DIRÊä³ö¸ßµçÆ½
-         pwm_set_duty(MOTOR4_PWM, down_right_speed);                  // ¼ÆËãÕ¼¿Õ±È
+		 gpio_set_level(MOTOR4_DIR, GPIO_HIGH);                       // DIRè¾“å‡ºé«˜ç”µå¹³
+         pwm_set_duty(MOTOR4_PWM, down_right_speed);                  // è®¡ç®—å ç©ºæ¯”
 	 }
 	 else if (down_right_speed < 0)
 	 {
-		 gpio_set_level(MOTOR4_DIR, GPIO_LOW);                       // DIRÊä³öµÍµçÆ½
-         pwm_set_duty(MOTOR4_PWM, -down_right_speed);                // ¼ÆËãÕ¼¿Õ±È
+		 gpio_set_level(MOTOR4_DIR, GPIO_LOW);                       // DIRè¾“å‡ºä½ç”µå¹³
+         pwm_set_duty(MOTOR4_PWM, -down_right_speed);                // è®¡ç®—å ç©ºæ¯”
 	 }
 	 else if (down_right_speed == 0)
 	 {
-		 gpio_set_level(MOTOR4_DIR, GPIO_HIGH);                       // DIRÊä³ö¸ßµçÆ½
-		 pwm_set_duty(MOTOR4_PWM, 0);                                 // Í£Ö¹	
+		 gpio_set_level(MOTOR4_DIR, GPIO_HIGH);                       // DIRè¾“å‡ºé«˜ç”µå¹³
+		 pwm_set_duty(MOTOR4_PWM, 0);                                 // åœæ­¢	
 	 }
 }
 
@@ -267,17 +306,19 @@ int Limit_int(int left_limit, int target_num, int right_limit)
 		return target_num;
 	}
 }
-//ÔÚÕâÀïĞŞ¸Ä
+//åœ¨è¿™é‡Œä¿®æ”¹
 static int motor_apply_deadzone_compensation(int pid_output,
                                              int target_speed,
                                              int deadzone_fwd,
                                              int deadzone_rev)
 {
-    if (target_speed >= MOTOR_DEADZONE_TARGET_MIN_COUNTS)
+    if (target_speed > 0 &&
+        target_speed >= motor_deadzone_target_min_counts)
     {
         pid_output += deadzone_fwd;
     }
-    else if (target_speed <= -MOTOR_DEADZONE_TARGET_MIN_COUNTS)
+    else if (target_speed < 0 &&
+             target_speed <= -motor_deadzone_target_min_counts)
     {
         pid_output -= deadzone_rev;
     }
@@ -291,15 +332,74 @@ void motor_control(int* input_speed_encoder)
 	int motorUR_pwm_value = 0;
 	int motorDL_pwm_value = 0;
 	int motorDR_pwm_value = 0;
-	motorUL_pwm_value = Limit_int(LIMIT_PWM_MIN, PID_Add_Calculate(&ULpid, up_L_all, input_speed_encoder[0]), LIMIT_PWM_MAX);   //ÉÏ×ó
-	motorUR_pwm_value = Limit_int(LIMIT_PWM_MIN, PID_Add_Calculate(&URpid, up_R_all, input_speed_encoder[1]), LIMIT_PWM_MAX);   //ÉÏÓÒ
-	motorDL_pwm_value = Limit_int(LIMIT_PWM_MIN, PID_Add_Calculate(&DLpid, down_L_all, input_speed_encoder[2]), LIMIT_PWM_MAX);   //ÏÂ×ó
-	motorDR_pwm_value = Limit_int(LIMIT_PWM_MIN, PID_Add_Calculate(&DRpid, down_R_all, input_speed_encoder[3]), LIMIT_PWM_MAX);   //ÏÂÓÒ
-	motorUL_pwm_value = motor_apply_deadzone_compensation(motorUL_pwm_value, input_speed_encoder[0], MOTOR_UL_DEADZONE_FWD, MOTOR_UL_DEADZONE_REV);
-	motorUR_pwm_value = motor_apply_deadzone_compensation(motorUR_pwm_value, input_speed_encoder[1], MOTOR_UR_DEADZONE_FWD, MOTOR_UR_DEADZONE_REV);
-	motorDL_pwm_value = motor_apply_deadzone_compensation(motorDL_pwm_value, input_speed_encoder[2], MOTOR_DL_DEADZONE_FWD, MOTOR_DL_DEADZONE_REV);
-	motorDR_pwm_value = motor_apply_deadzone_compensation(motorDR_pwm_value, input_speed_encoder[3], MOTOR_DR_DEADZONE_FWD, MOTOR_DR_DEADZONE_REV);
+	g_motor_debug_target[MOTOR_WHEEL_UL] = input_speed_encoder[MOTOR_WHEEL_UL];
+	g_motor_debug_target[MOTOR_WHEEL_UR] = input_speed_encoder[MOTOR_WHEEL_UR];
+	g_motor_debug_target[MOTOR_WHEEL_DL] = input_speed_encoder[MOTOR_WHEEL_DL];
+	g_motor_debug_target[MOTOR_WHEEL_DR] = input_speed_encoder[MOTOR_WHEEL_DR];
+	g_motor_debug_cumulative_target[MOTOR_WHEEL_UL] += input_speed_encoder[MOTOR_WHEEL_UL];
+	g_motor_debug_cumulative_target[MOTOR_WHEEL_UR] += input_speed_encoder[MOTOR_WHEEL_UR];
+	g_motor_debug_cumulative_target[MOTOR_WHEEL_DL] += input_speed_encoder[MOTOR_WHEEL_DL];
+	g_motor_debug_cumulative_target[MOTOR_WHEEL_DR] += input_speed_encoder[MOTOR_WHEEL_DR];
+	g_motor_debug_control_ticks++;
+
+	motorUL_pwm_value = Limit_int(LIMIT_PWM_MIN, PID_Add_Calculate(&ULpid, up_L_all, input_speed_encoder[0]), LIMIT_PWM_MAX);   //ä¸Šå·¦
+	motorUR_pwm_value = Limit_int(LIMIT_PWM_MIN, PID_Add_Calculate(&URpid, up_R_all, input_speed_encoder[1]), LIMIT_PWM_MAX);   //ä¸Šå³
+	motorDL_pwm_value = Limit_int(LIMIT_PWM_MIN, PID_Add_Calculate(&DLpid, down_L_all, input_speed_encoder[2]), LIMIT_PWM_MAX);   //ä¸‹å·¦
+	motorDR_pwm_value = Limit_int(LIMIT_PWM_MIN, PID_Add_Calculate(&DRpid, down_R_all, input_speed_encoder[3]), LIMIT_PWM_MAX);   //ä¸‹å³
+	g_motor_debug_pid_pwm[MOTOR_WHEEL_UL] = motorUL_pwm_value;
+	g_motor_debug_pid_pwm[MOTOR_WHEEL_UR] = motorUR_pwm_value;
+	g_motor_debug_pid_pwm[MOTOR_WHEEL_DL] = motorDL_pwm_value;
+	g_motor_debug_pid_pwm[MOTOR_WHEEL_DR] = motorDR_pwm_value;
+	motorUL_pwm_value = motor_apply_deadzone_compensation(motorUL_pwm_value, input_speed_encoder[0], motor_deadzone_fwd[MOTOR_WHEEL_UL], motor_deadzone_rev[MOTOR_WHEEL_UL]);
+	motorUR_pwm_value = motor_apply_deadzone_compensation(motorUR_pwm_value, input_speed_encoder[1], motor_deadzone_fwd[MOTOR_WHEEL_UR], motor_deadzone_rev[MOTOR_WHEEL_UR]);
+	motorDL_pwm_value = motor_apply_deadzone_compensation(motorDL_pwm_value, input_speed_encoder[2], motor_deadzone_fwd[MOTOR_WHEEL_DL], motor_deadzone_rev[MOTOR_WHEEL_DL]);
+	motorDR_pwm_value = motor_apply_deadzone_compensation(motorDR_pwm_value, input_speed_encoder[3], motor_deadzone_fwd[MOTOR_WHEEL_DR], motor_deadzone_rev[MOTOR_WHEEL_DR]);
 	motor_pwm(motorUL_pwm_value, motorUR_pwm_value,motorDL_pwm_value,motorDR_pwm_value);
+}
+
+void motor_speed_debug_reset(void)
+{
+	uint8 i;
+
+	for (i = 0U; i < MOTOR_WHEEL_COUNT; ++i)
+	{
+		g_motor_debug_target[i] = 0;
+		g_motor_debug_raw[i] = 0;
+		g_motor_debug_pid_pwm[i] = 0;
+		g_motor_debug_final_pwm[i] = 0;
+		g_motor_debug_cumulative_target[i] = 0;
+		g_motor_debug_cumulative_raw[i] = 0;
+	}
+	g_motor_debug_control_ticks = 0U;
+}
+
+void motor_speed_debug_get_snapshot(motor_speed_debug_snapshot_t *snapshot)
+{
+	uint8 i;
+	const int filtered[MOTOR_WHEEL_COUNT] =
+	{
+		up_L_all,
+		up_R_all,
+		down_L_all,
+		down_R_all
+	};
+
+	if (snapshot == NULL)
+	{
+		return;
+	}
+
+	for (i = 0U; i < MOTOR_WHEEL_COUNT; ++i)
+	{
+		snapshot->target_counts[i] = g_motor_debug_target[i];
+		snapshot->raw_counts[i] = g_motor_debug_raw[i];
+		snapshot->filtered_counts[i] = filtered[i];
+		snapshot->pid_pwm[i] = g_motor_debug_pid_pwm[i];
+		snapshot->final_pwm[i] = g_motor_debug_final_pwm[i];
+		snapshot->cumulative_target_counts[i] = g_motor_debug_cumulative_target[i];
+		snapshot->cumulative_raw_counts[i] = g_motor_debug_cumulative_raw[i];
+	}
+	snapshot->control_ticks = g_motor_debug_control_ticks;
 }
 
 
@@ -312,13 +412,13 @@ float r_x = 0;
 float r_y = 0;
 
 /**
-  * @º¯Êı×÷ÓÃ£ºÔË¶¯Ñ§½âÎö²ÎÊı³õÊ¼»¯
+  * @å‡½æ•°ä½œç”¨ï¼šè¿åŠ¨å­¦è§£æå‚æ•°åˆå§‹åŒ–
   */
 void Kinematics_Init(void)
 {
-	//ÂÖ×Ó×ª¶¯Ò»È¦£¬ÒÆ¶¯µÄ¾àÀëÎªÂÖ×ÓµÄÖÜ³¤WHEEL_DIAMETER*3.1415926£¬±àÂëÆ÷²úÉúµÄÂö³åĞÅºÅÎªENCODER_RESOLUTION¡£Ôòµç»ú±àÂëÆ÷×ªÒ»È¦²úÉúµÄÂö³åĞÅºÅ³ıÒÔÂÖ×ÓÖÜ³¤¿ÉµÃÂÖ×ÓÇ°½ø1mµÄ¾àÀëËù¶ÔÓ¦±àÂëÆ÷¼ÆÊıµÄ±ä»¯
+	//è½®å­è½¬åŠ¨ä¸€åœˆï¼Œç§»åŠ¨çš„è·ç¦»ä¸ºè½®å­çš„å‘¨é•¿WHEEL_DIAMETER*3.1415926ï¼Œç¼–ç å™¨äº§ç”Ÿçš„è„‰å†²ä¿¡å·ä¸ºENCODER_RESOLUTIONã€‚åˆ™ç”µæœºç¼–ç å™¨è½¬ä¸€åœˆäº§ç”Ÿçš„è„‰å†²ä¿¡å·é™¤ä»¥è½®å­å‘¨é•¿å¯å¾—è½®å­å‰è¿›1mçš„è·ç¦»æ‰€å¯¹åº”ç¼–ç å™¨è®¡æ•°çš„å˜åŒ–
     pulse_per_meter = (float)(ENCODER_RESOLUTION/(WHEEL_DIAMETER*3.1415926f))/linear_correction_factor;      //12513
-    //ºê¶¨ÒåÒÀ´Î¶ÔÓ¦ 2280 0.058 ĞŞÕıÏµÊı¸øÁË1.0
+    //å®å®šä¹‰ä¾æ¬¡å¯¹åº” 2280 0.058 ä¿®æ­£ç³»æ•°ç»™äº†1.0
     r_x = D_X/2;
     r_y = D_Y/2;
     rx_plus_ry_cali = (r_x + r_y)/angular_correction_factor;
@@ -327,9 +427,9 @@ void Kinematics_Init(void)
 }
 
 /**
-  * @º¯Êı×÷ÓÃ£ºÄæÏòÔË¶¯Ñ§½âÎö£¬µ×ÅÌÈıÖáËÙ¶È-->ÂÖ×ÓËÙ¶È
-  * @ÊäÈë£ºÂóÂÖ³µÈıÖáËÙ¶È m/s
-  * @Êä³ö£ºµç»úÓ¦´ïµ½µÄÄ¿±êËÙ¶È£¨Ò»¸öPID¿ØÖÆÖÜÆÚÄÚ£¬µç»ú±àÂëÆ÷¼ÆÊıÖµµÄ±ä»¯£©
+  * @å‡½æ•°ä½œç”¨ï¼šé€†å‘è¿åŠ¨å­¦è§£æï¼Œåº•ç›˜ä¸‰è½´é€Ÿåº¦-->è½®å­é€Ÿåº¦
+  * @è¾“å…¥ï¼šéº¦è½®è½¦ä¸‰è½´é€Ÿåº¦ m/s
+  * @è¾“å‡ºï¼šç”µæœºåº”è¾¾åˆ°çš„ç›®æ ‡é€Ÿåº¦ï¼ˆä¸€ä¸ªPIDæ§åˆ¶å‘¨æœŸå†…ï¼Œç”µæœºç¼–ç å™¨è®¡æ•°å€¼çš„å˜åŒ–ï¼‰
   */
 void Kinematics_Inverse(float* input, int* output)
 {
@@ -337,7 +437,7 @@ void Kinematics_Inverse(float* input, int* output)
 	float v_tx = input[0] * 0.01f -
 	             LATERAL_TO_LONGITUDINAL_COUPLING_FACTOR * desired_vy_mps;
 	float v_ty = desired_vy_mps / LATERAL_CORRECTION_FACTOR;
-	float omega = input[2];                //rad/s£¨»¡¶È/Ãë£©
+	float omega = input[2];                //rad/sï¼ˆå¼§åº¦/ç§’ï¼‰
 	static float v_w[4] = {0};
 	
 	v_w[0] = v_tx - v_ty - (r_x + r_y)*omega;               //rx+ry=0.215
@@ -345,11 +445,11 @@ void Kinematics_Inverse(float* input, int* output)
 	v_w[2] = v_tx + v_ty - (r_x + r_y)*omega;
 	v_w[3] = v_tx - v_ty + (r_x + r_y)*omega;
 
-    //¼ÆËãÒ»¸öPID¿ØÖÆÖÜÆÚÄÚ£¬µç»ú±àÂëÆ÷¼ÆÊıÖµµÄ±ä»¯
-	output[0] = (int)(v_w[0] * pulse_per_meter/PID_RATE);   //ÉÏ×ó    *125
-	output[1] = (int)(v_w[1] * pulse_per_meter/PID_RATE);   //ÉÏÓÒ
-	output[2] = (int)(v_w[2] * pulse_per_meter/PID_RATE);   //ÏÂ×ó
-	output[3] = (int)(v_w[3] * pulse_per_meter/PID_RATE);   //ÏÂÓÒ
+    //è®¡ç®—ä¸€ä¸ªPIDæ§åˆ¶å‘¨æœŸå†…ï¼Œç”µæœºç¼–ç å™¨è®¡æ•°å€¼çš„å˜åŒ–
+	output[0] = (int)(v_w[0] * pulse_per_meter/PID_RATE);   //ä¸Šå·¦    *125
+	output[1] = (int)(v_w[1] * pulse_per_meter/PID_RATE);   //ä¸Šå³
+	output[2] = (int)(v_w[2] * pulse_per_meter/PID_RATE);   //ä¸‹å·¦
+	output[3] = (int)(v_w[3] * pulse_per_meter/PID_RATE);   //ä¸‹å³
 	
 	output[0] = Limit_int(LIMIT_ENCODER_MIN, output[0], LIMIT_ENCODER_MAX);
 	output[1] = Limit_int(LIMIT_ENCODER_MIN, output[1], LIMIT_ENCODER_MAX);

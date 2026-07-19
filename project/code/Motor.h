@@ -3,16 +3,16 @@
 
 #include "zf_common_typedef.h"
 
-#define MOTOR1_DIR              (C7)                           //ÉÏ×ó
+#define MOTOR1_DIR              (C7)                           //ä¸Šå·¦
 #define MOTOR1_PWM              (PWM2_MODULE0_CHA_C6)
 
-#define MOTOR2_DIR              (C9)                          //ÉÏÓÒ
+#define MOTOR2_DIR              (C9)                          //ä¸Šå³
 #define MOTOR2_PWM              (PWM2_MODULE1_CHA_C8)
 
-#define MOTOR3_DIR              (C11)                          //ÏÂ×ó
+#define MOTOR3_DIR              (C11)                          //ä¸‹å·¦
 #define MOTOR3_PWM              (PWM2_MODULE2_CHA_C10)
 
-#define MOTOR4_DIR              (D3)                           //ÏÂÓÒ
+#define MOTOR4_DIR              (D3)                           //ä¸‹å³
 #define MOTOR4_PWM              (PWM2_MODULE3_CHA_D2)
 
 // Motor board selection:
@@ -56,28 +56,46 @@
 #define ENCODER_4_A                 (QTIMER1_ENCODER1_CH1_C0)
 #define ENCODER_4_B                 (QTIMER1_ENCODER1_CH2_C1)
 
-//²ÎÊıºê¶¨Òå
-#define ENCODER_RESOLUTION      2390.0   //±àÂëÆ÷·Ö±æÂÊ, ÂÖ×Ó×ªÒ»È¦£¬±àÂëÆ÷²úÉúµÄÂö³åÊı
-#define WHEEL_DIAMETER          0.06239  //ÂÖ×ÓÖ±¾¶,µ¥Î»£ºÃ×@
-#define LATERAL_CORRECTION_FACTOR 0.901589f  //Êµ¼ÊºáÒÆ¾àÀë / ¼Æ»®ºáÒÆ¾àÀë
+//å‚æ•°å®å®šä¹‰
+#define ENCODER_RESOLUTION      2390.0   //ç¼–ç å™¨åˆ†è¾¨ç‡, è½®å­è½¬ä¸€åœˆï¼Œç¼–ç å™¨äº§ç”Ÿçš„è„‰å†²æ•°
+#define WHEEL_DIAMETER          0.06239  //è½®å­ç›´å¾„,å•ä½ï¼šç±³@
+#define LATERAL_CORRECTION_FACTOR 0.901589f  //å®é™…æ¨ªç§»è·ç¦» / è®¡åˆ’æ¨ªç§»è·ç¦»
 #define LATERAL_TO_LONGITUDINAL_COUPLING_FACTOR 0.0f  // dx drift / dy travel
-#define D_X                     0.176     //µ×ÅÌYÖáÉÏÁ½ÂÖÖĞĞÄµÄ¼ä¾à
-#define D_Y                     0.20     //µ×ÅÌXÖáÉÏÁ½ÂÖÖĞĞÄµÄ¼ä¾à
-#define PID_RATE                100       //PIDµ÷½ÚPWMÖµµÄÆµÂÊ
+#define D_X                     0.176     //åº•ç›˜Yè½´ä¸Šä¸¤è½®ä¸­å¿ƒçš„é—´è·
+#define D_Y                     0.20     //åº•ç›˜Xè½´ä¸Šä¸¤è½®ä¸­å¿ƒçš„é—´è·
+#define PID_RATE                100       //PIDè°ƒèŠ‚PWMå€¼çš„é¢‘ç‡
 
 #define LIMIT_PWM_MIN              -6000
 #define LIMIT_PWM_MAX               6000
 
 /* Closed-loop tuned dead-zone feedforward for the final motor driver board. */
 #define MOTOR_DEADZONE_TARGET_MIN_COUNTS  2
-#define MOTOR_UL_DEADZONE_FWD             420
-#define MOTOR_UL_DEADZONE_REV             390
-#define MOTOR_UR_DEADZONE_FWD             495
-#define MOTOR_UR_DEADZONE_REV             429
-#define MOTOR_DL_DEADZONE_FWD             435
-#define MOTOR_DL_DEADZONE_REV             390
-#define MOTOR_DR_DEADZONE_FWD             550
-#define MOTOR_DR_DEADZONE_REV             637
+#define MOTOR_UL_DEADZONE_FWD             280
+#define MOTOR_UL_DEADZONE_REV             210
+#define MOTOR_UR_DEADZONE_FWD             325
+#define MOTOR_UR_DEADZONE_REV             245
+#define MOTOR_DL_DEADZONE_FWD             290
+#define MOTOR_DL_DEADZONE_REV             230
+#define MOTOR_DR_DEADZONE_FWD             380
+#define MOTOR_DR_DEADZONE_REV             360
+
+#define MOTOR_WHEEL_COUNT                  4
+#define MOTOR_WHEEL_UL                     0
+#define MOTOR_WHEEL_UR                     1
+#define MOTOR_WHEEL_DL                     2
+#define MOTOR_WHEEL_DR                     3
+
+typedef struct
+{
+    int target_counts[MOTOR_WHEEL_COUNT];
+    int raw_counts[MOTOR_WHEEL_COUNT];
+    int filtered_counts[MOTOR_WHEEL_COUNT];
+    int pid_pwm[MOTOR_WHEEL_COUNT];
+    int final_pwm[MOTOR_WHEEL_COUNT];
+    int32 cumulative_target_counts[MOTOR_WHEEL_COUNT];
+    int32 cumulative_raw_counts[MOTOR_WHEEL_COUNT];
+    uint32 control_ticks;
+} motor_speed_debug_snapshot_t;
 
 #define LIMIT_ENCODER_MIN          -500
 #define LIMIT_ENCODER_MAX           500
@@ -102,6 +120,9 @@ extern float rx_plus_ry_cali;
 extern float speed_three_array[3];
 extern int speed_encoder[4];
 extern int car_stop_array[4];
+extern volatile int motor_deadzone_target_min_counts;
+extern volatile int motor_deadzone_fwd[MOTOR_WHEEL_COUNT];
+extern volatile int motor_deadzone_rev[MOTOR_WHEEL_COUNT];
 
 void motor_init(void);
 void encoder_init(void);
@@ -109,6 +130,8 @@ void encoder_get(void);
 int Limit_int(int left_limit, int target_num, int right_limit);
 void motor_pwm(int up_left_speed,int up_right_speed,int down_left_speed,int down_right_speed);
 void motor_control(int* input_speed_encoder);
+void motor_speed_debug_reset(void);
+void motor_speed_debug_get_snapshot(motor_speed_debug_snapshot_t *snapshot);
 //void encoder_read_filtered(int *enc1, int *enc2, int *enc3, int *enc4);
 int16 Lowpass(int16 X_last,int16 X_new);
 void Kinematics_Init(void);

@@ -58,7 +58,7 @@ float g_control_prestart_depart_compensate_m = -0.0f;
 #define CONTROL_LOCALIZE_POST_STOP_DRAIN_TICKS 10U
 #define CONTROL_LOCALIZE_WHEEL_STOP_ENCODER_TOL 5
 #define CONTROL_LOCALIZE_MAX_SAMPLES 5U
-#define CONTROL_LOCALIZE_TWO_SAMPLE_MATCH_M 0.03f
+#define CONTROL_LOCALIZE_TWO_SAMPLE_MATCH_M 0.05f
 /* 检查点视觉位置偏离事件目标超过 3 cm 时，先回移到目标点再继续流程。 */
 #define CONTROL_CHECKPOINT_REPOSITION_THRESHOLD_M 0.03f
 /* A compressed straight/slanted segment of at least three grid cells ends at

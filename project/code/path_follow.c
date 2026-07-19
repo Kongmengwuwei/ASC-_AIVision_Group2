@@ -38,6 +38,13 @@
 #define PF_LINE_GUIDE_START_BOOST        2.0f
 #define PF_LINE_GUIDE_START_BOOST_M      0.03f
 
+/*
+ * Body-X feedforward used to cancel the direction-dependent longitudinal
+ * drift while strafing.  +Y is left and -Y is right; +X is forward.
+ */
+#define PF_Y_CROSSTALK_LEFT_X_COMP_K      0.005f
+#define PF_Y_CROSSTALK_RIGHT_X_COMP_K    -0.02f
+
 #define PF_YAW_KP                        6.0f
 #define PF_YAW_KI                        0.0f
 #define PF_YAW_KD                        10.5f
@@ -193,13 +200,9 @@ float path_yaw_feedforward_min_degps = PF_YAW_FEEDFORWARD_MIN_DEGPS;
 float path_yaw_feedforward_deadband_deg = PF_YAW_TOLERANCE_DEG;
 static float path_rotate_yaw_feedforward_degps = PF_ROTATE_YAW_FEEDFORWARD_DEGPS;
 
-/*
- * Kept as runtime variables for compatibility with the current BlueSerial
- * tuning interface.  Zero defaults preserve the 39af7ab motion behaviour;
- * non-zero values add a signed body-X feedforward while strafing.
- */
-float path_y_crosstalk_left_x_comp_k = 0.0f;
-float path_y_crosstalk_right_x_comp_k = 0.0f;
+/* Runtime copies of the boot defaults; BlueSerial sliders tune these. */
+float path_y_crosstalk_left_x_comp_k = PF_Y_CROSSTALK_LEFT_X_COMP_K;
+float path_y_crosstalk_right_x_comp_k = PF_Y_CROSSTALK_RIGHT_X_COMP_K;
 
 /* Other legacy compensation variables remain link-compatible but unused. */
 float path_yaw_target_base_comp_deg = 0.0f;

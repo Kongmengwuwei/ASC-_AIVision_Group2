@@ -268,6 +268,24 @@ static float pf_wrap_deg(float angle_deg)
     return angle_deg;
 }
 
+static float pf_cardinal_target_deg(float angle_deg)
+{
+    uint8 quarter;
+
+    angle_deg = fmodf(angle_deg, 360.0f);
+    if (angle_deg < 0.0f)
+    {
+        angle_deg += 360.0f;
+    }
+
+    quarter = (uint8)floorf((angle_deg + 45.0f) / 90.0f);
+    if (quarter >= 4U)
+    {
+        quarter = 0U;
+    }
+    return (float)quarter * 90.0f;
+}
+
 static float pf_yaw_error_deg(float current_deg, float target_deg)
 {
     return pf_wrap_deg(target_deg - current_deg);
@@ -1694,6 +1712,8 @@ void path_follow_reset_pose(float x_m, float y_m, float yaw_deg)
 {
     g_pf.pose.x_m = x_m;
     g_pf.pose.y_m = y_m;
+    /* yaw_deg is a measurement used only to reset the pose.  The commanded
+       map-cardinal heading remains unchanged across localization and segments. */
     g_pf.pose.yaw_deg = pf_wrap_deg(yaw_deg);
     pf_reset_motion_state();
     PID_Clear(&pid_yaw);
@@ -1771,12 +1791,9 @@ void path_follow_set_target(int target_row, int target_col)
 
 void path_follow_set_target_yaw(float target_yaw_deg)
 {
-    g_pf.target_yaw_deg = pf_wrap_deg(target_yaw_deg);
-}
-
-void path_follow_hold_current_yaw(void)
-{
-    path_follow_set_target_yaw(g_pf.pose.yaw_deg);
+    /* Global invariant: commanded headings are absolute map axes.  Measured
+       yaw must never become the following segment's heading reference. */
+    g_pf.target_yaw_deg = pf_cardinal_target_deg(target_yaw_deg);
 }
 
 void path_follow_set_stationary_yaw_hold_enabled(uint8 enabled)

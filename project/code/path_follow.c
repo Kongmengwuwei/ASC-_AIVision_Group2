@@ -36,29 +36,29 @@
 #define PF_SPEED_TEST_SETTLE_TICKS       5U      /* 四轮连续静止50ms后结束测试。 */
 #define PF_SPEED_TEST_SETTLE_TIMEOUT     500U    /* 最长保留5s零速闭环尾段。 */
 
-/* Y-to-X crosstalk feedforward boot defaults.
- * Unit: X correction / absolute Y command. The gains are signed and
- * independent: +Y is left, -Y is right. X-only commands are unaffected. */
-#define PF_Y_CROSSTALK_LEFT_X_COMP_K      0.005f /* 多组左移原始串轴均值接近 0，先不补偿。 */
-#define PF_Y_CROSSTALK_RIGHT_X_COMP_K     -0.016f /* 多组右移原始串轴均值接近 0，先不补偿。 */
+/* Y-to-X crosstalk feedforward boot defaults, copied from the tuned branch.
+ * Unit: X correction / absolute Y command. +Y selects LEFT and -Y selects
+ * RIGHT. X-only commands are unaffected. */
+#define PF_Y_CROSSTALK_LEFT_X_COMP_K      0.005f
+#define PF_Y_CROSSTALK_RIGHT_X_COMP_K    -0.016f
 #define PF_LATERAL_LEFT_ODOMETRY_SCALE    1.0090f /* 三地图区域五组往返均值：左移里程约多 0.9%。 */
 
-#define PF_POSITION_X_KP                 3.7f    /* 车体 X 前进直走位置环。 */
+#define PF_POSITION_X_KP                 3.6f    /* 车体 X 前进直走位置环。 */
 #define PF_POSITION_X_KI                 0.0f
 #define PF_POSITION_X_KD                 5.9f
 #define PF_POSITION_Y_KP                 5.4f    /* 车体 Y 左右侧移位置环。 */
 #define PF_POSITION_Y_KI                 0.0f
 #define PF_POSITION_Y_KD                 7.7f
-#define PF_POSITION_BACKWARD_X_KP        PF_POSITION_X_KP /* 后退 X 位置环独立默认值。 */
-#define PF_POSITION_BACKWARD_X_KI        PF_POSITION_X_KI
-#define PF_POSITION_BACKWARD_X_KD        PF_POSITION_X_KD
+#define PF_POSITION_BACKWARD_X_KP        4.1f /* 后退 X 位置环独立默认值。 */
+#define PF_POSITION_BACKWARD_X_KI        0.0f
+#define PF_POSITION_BACKWARD_X_KD        6.3f
 #define PF_POSITION_X_MAX_IOUT_CMPS      200.0f  /* X轴位置环积分输出上限，单位 cm/s。 */
 #define PF_POSITION_X_MAX_OUT_CMPS       200.0f  /* X轴位置环总输出上限，单位 cm/s。 */
 #define PF_POSITION_Y_MAX_IOUT_CMPS      200.0f  /* Y轴位置环积分输出上限，单位 cm/s。 */
 #define PF_POSITION_Y_MAX_OUT_CMPS       200.0f  /* Y轴位置环总输出上限，单位 cm/s。 */
 #define PF_POSITION_FILTER_ALPHA         0.9f    /* 位置环微分滤波系数。 */
-#define PF_LINE_GUIDE_KP                 1.0f    /* 默认启用法向纠偏，单位 (cm/s)/cm。 */
-#define PF_LINE_GUIDE_MIN_CMPS           4.0f    /* 越过死区后的最小法向纠偏速度，单位 cm/s。 */
+#define PF_LINE_GUIDE_KP                 0.0f    /* 默认启用法向纠偏，单位 (cm/s)/cm。 */
+#define PF_LINE_GUIDE_MIN_CMPS           0.0f    /* 越过死区后的最小法向纠偏速度，单位 cm/s。 */
 #define PF_LINE_GUIDE_MAX_CMPS           12.0f   /* 法向纠偏速度上限，单位 cm/s。 */
 #define PF_LINE_GUIDE_DEADBAND_M         0.0025f /* 法向偏差死区，单位 m。 */
 #define PF_LINE_GUIDE_START_BOOST        2.0f    /* 首段刚起步时的法向纠偏倍率。 */
@@ -76,11 +76,6 @@
 #define PF_ROTATE_POSITION_HOLD_KP_CMPS_PER_CM 1.5f /* 每偏移 1 cm 产生的反向平移速度，单位 cm/s。 */
 #define PF_ROTATE_POSITION_HOLD_MAX_CMPS 12.0f  /* 旋转位置保持最大平移纠偏速度，单位 cm/s。 */
 #define PF_ROTATE_POSITION_HOLD_DEADBAND_CM 0.3f /* 旋转位置保持死区，避免编码器噪声引起抖动。 */
-
-/* Y-to-X crosstalk feedforward boot defaults, copied from the tuned branch.
- * +Y selects LEFT and -Y selects RIGHT.  X-only motion is unaffected. */
-#define PF_Y_CROSSTALK_LEFT_X_COMP_K      0.010f
-#define PF_Y_CROSSTALK_RIGHT_X_COMP_K    -0.017f
 
 typedef struct
 {
@@ -100,6 +95,7 @@ typedef struct
     float dir_y;
     float planned_distance_m;
     float along_track_remaining_m;
+    float lateral_error_m;
     uint8 within_tolerance;
     uint8 target_plane_crossed;
     uint8 segment_axis;
@@ -242,7 +238,7 @@ float prestart_move_forward_m = 0.35f;
 float prestart_move_backward_m = 0.00f;
 
 /* Position-loop tuning entry retained from the original module. */
-float path_corner_commit_lateral_gate_min_m = PF_POSITION_TOLERANCE_M;
+float path_corner_commit_lateral_gate_min_m = 0.01f;
 float path_hold_trim_release_distance = PF_POSITION_LOOP_RELEASE_M;
 
 /* Runtime-tunable line guidance and yaw low-speed feedforward. */
@@ -363,6 +359,7 @@ static void pf_reset_position_transition(void)
     g_pf.position_blend = 0.0f;
     PID_Clear(&pid_stay);
     PID_Clear(&pid_stay_y);
+    PID_Clear(&pid_stay_backward);
 }
 
 static void pf_reset_speed(void)
@@ -1136,6 +1133,7 @@ static void pf_apply_position_loop(const pf_geometry_t *geometry,
                                    float *vy_world_cmps,
                                    float blend)
 {
+    const float longitudinal_direction_epsilon = 0.001f;
     tagPID_T *position_pid_x;
     float error_x_world_cm;
     float error_y_world_cm;
@@ -1147,9 +1145,8 @@ static void pf_apply_position_loop(const pf_geometry_t *geometry,
     float position_vy_cmps;
     float speed_weight;
     float target_yaw_rad;
-    float pose_yaw_rad;
-    float cos_pose_yaw;
-    float sin_pose_yaw;
+    float cos_target_yaw;
+    float sin_target_yaw;
     float forward_projection;
     uint8 backward_segment;
 
@@ -1164,22 +1161,30 @@ static void pf_apply_position_loop(const pf_geometry_t *geometry,
     }
 
     target_yaw_rad = g_pf.target_yaw_deg * ((float)M_PI / 180.0f);
-    forward_projection = geometry->dir_x * cosf(target_yaw_rad) +
-                         geometry->dir_y * sinf(target_yaw_rad);
-    backward_segment = (forward_projection < -0.5f) ? 1U : 0U;
+    cos_target_yaw = cosf(target_yaw_rad);
+    sin_target_yaw = sinf(target_yaw_rad);
+    forward_projection = geometry->dir_x * cos_target_yaw +
+                         geometry->dir_y * sin_target_yaw;
+    /* Select the X controller from the sign of the segment's longitudinal
+     * component.  The previous -0.5 threshold misclassified diagonal motion
+     * with a smaller backward component as forward.  Keep a small tolerance
+     * so a nominally pure lateral segment is not flipped by trig roundoff. */
+    backward_segment =
+        (forward_projection < -longitudinal_direction_epsilon) ? 1U : 0U;
     position_pid_x = backward_segment ? &pid_stay_backward : &pid_stay;
 
-    /* Position is stored in the world frame, but X/Y tuning represents the
-     * mecanum body axes: X is straight motion and Y is lateral motion. */
-    pose_yaw_rad = g_pf.pose.yaw_deg * ((float)M_PI / 180.0f);
-    cos_pose_yaw = cosf(pose_yaw_rad);
-    sin_pose_yaw = sinf(pose_yaw_rad);
+    /* Keep the position controller in the segment target-heading frame:
+     * X is commanded straight motion and Y is commanded lateral motion.
+     * Using the live pose yaw here would rotate the error every control tick;
+     * with different X/Y gains that creates a false normal command while the
+     * yaw loop is correcting even a small heading error.  The final world-to-
+     * body conversion still uses the live yaw before wheel kinematics. */
     error_x_world_cm = geometry->dx_m * 100.0f;
     error_y_world_cm = geometry->dy_m * 100.0f;
-    error_x_body_cm = error_x_world_cm * cos_pose_yaw +
-                      error_y_world_cm * sin_pose_yaw;
-    error_y_body_cm = -error_x_world_cm * sin_pose_yaw +
-                       error_y_world_cm * cos_pose_yaw;
+    error_x_body_cm = error_x_world_cm * cos_target_yaw +
+                      error_y_world_cm * sin_target_yaw;
+    error_y_body_cm = -error_x_world_cm * sin_target_yaw +
+                       error_y_world_cm * cos_target_yaw;
 
     /* PID_Location_Calculate() keeps its historical int return type for
      * compatibility with the rest of the project.  Its internal controller
@@ -1197,10 +1202,10 @@ static void pf_apply_position_loop(const pf_geometry_t *geometry,
     position_vy_body_cmps = pid_stay_y.fCtrl_Out;
 
     /* The downstream blend and one-way limiter operate in the world frame. */
-    position_vx_cmps = position_vx_body_cmps * cos_pose_yaw -
-                       position_vy_body_cmps * sin_pose_yaw;
-    position_vy_cmps = position_vx_body_cmps * sin_pose_yaw +
-                       position_vy_body_cmps * cos_pose_yaw;
+    position_vx_cmps = position_vx_body_cmps * cos_target_yaw -
+                       position_vy_body_cmps * sin_target_yaw;
+    position_vy_cmps = position_vx_body_cmps * sin_target_yaw +
+                       position_vy_body_cmps * cos_target_yaw;
 
     blend = pf_clamp(blend, 0.0f, 1.0f);
     speed_weight = 1.0f - blend;
@@ -1216,6 +1221,7 @@ static void pf_apply_position_loop(const pf_geometry_t *geometry,
 
 static void pf_limit_along_track_command(const pf_geometry_t *geometry,
                                          float max_along_speed_cmps,
+                                         float max_reverse_speed_cmps,
                                          float *vx_world_cmps,
                                          float *vy_world_cmps,
                                          uint8 *speed_limit_active,
@@ -1233,18 +1239,21 @@ static void pf_limit_along_track_command(const pf_geometry_t *geometry,
     }
 
     max_along_speed_cmps = fmaxf(max_along_speed_cmps, 0.0f);
+    max_reverse_speed_cmps = fmaxf(max_reverse_speed_cmps, 0.0f);
     candidate_along_cmps = *vx_world_cmps * geometry->dir_x +
                            *vy_world_cmps * geometry->dir_y;
     actual_along_cmps = g_pf.velocity_x_world_cmps * geometry->dir_x +
                         g_pf.velocity_y_world_cmps * geometry->dir_y;
 
     if (speed_limit_active != NULL &&
-        candidate_along_cmps > max_along_speed_cmps)
+        (candidate_along_cmps > max_along_speed_cmps ||
+         candidate_along_cmps < -max_reverse_speed_cmps))
     {
         *speed_limit_active = 1U;
     }
     if (overspeed_guard_active != NULL &&
-        actual_along_cmps > max_along_speed_cmps)
+        (actual_along_cmps > max_along_speed_cmps ||
+         actual_along_cmps < -max_reverse_speed_cmps))
     {
         *overspeed_guard_active = 1U;
     }
@@ -1253,11 +1262,13 @@ static void pf_limit_along_track_command(const pf_geometry_t *geometry,
         *reverse_requested = 1U;
     }
 
-    /* Reverse is forbidden only along the fixed segment tangent.  The normal
-     * component keeps both signs so line/position correction can still move
-     * toward the path from either side. */
+    /* Before the target plane, forward-only limiting prevents the terminal
+     * position loop from reversing prematurely.  After an overshoot, the
+     * caller supplies a distance-based reverse cap so the position loop can
+     * pull the car back instead of being permanently clamped to zero.  The
+     * normal component keeps both signs for lateral correction. */
     limited_along_cmps = pf_clamp(candidate_along_cmps,
-                                  0.0f,
+                                  -max_reverse_speed_cmps,
                                   max_along_speed_cmps);
     delta_along_cmps = limited_along_cmps - candidate_along_cmps;
     *vx_world_cmps += delta_along_cmps * geometry->dir_x;
@@ -1667,7 +1678,8 @@ static uint8 pf_prepare_geometry(pf_geometry_t *geometry, path_follow_output_t *
         float segment_dy_m;
         float segment_dir_x = 0.0f;
         float segment_dir_y = 0.0f;
-        float actual_along_speed_cmps = 0.0f;
+        uint8 lateral_ready;
+        uint8 crossed_commit_allowed;
         uint8 position_ready;
 
         pf_sync_pause_cursor();
@@ -1693,9 +1705,11 @@ static uint8 pf_prepare_geometry(pf_geometry_t *geometry, path_follow_output_t *
         geometry->planned_distance_m = sqrtf(segment_dx_m * segment_dx_m +
                                              segment_dy_m * segment_dy_m);
         geometry->along_track_remaining_m = geometry->distance_m;
+        geometry->lateral_error_m = geometry->distance_m;
+        geometry->target_plane_crossed = 0U;
 
-        /* Signed remaining distance and the fixed segment direction are used
-         * by the one-way real-time limiter. */
+        /* Signed remaining distance and the fixed segment direction drive the
+         * forward braking cap and the post-overshoot recovery cap. */
         if (geometry->planned_distance_m > PF_MIN_VALID_GRID_M)
         {
             segment_dir_x = segment_dx_m / geometry->planned_distance_m;
@@ -1703,21 +1717,29 @@ static uint8 pf_prepare_geometry(pf_geometry_t *geometry, path_follow_output_t *
             geometry->along_track_remaining_m =
                 geometry->dx_m * segment_dir_x +
                 geometry->dy_m * segment_dir_y;
+            geometry->lateral_error_m =
+                fabsf(-geometry->dx_m * segment_dir_y +
+                        geometry->dy_m * segment_dir_x);
             geometry->target_plane_crossed =
                 (geometry->along_track_remaining_m <= 0.0f) ? 1U : 0U;
-            actual_along_speed_cmps =
-                g_pf.velocity_x_world_cmps * segment_dir_x +
-                g_pf.velocity_y_world_cmps * segment_dir_y;
         }
 
         geometry->within_tolerance =
             (geometry->distance_m <= g_pf.position_tolerance_m) ? 1U : 0U;
+        lateral_ready =
+            (geometry->lateral_error_m <=
+             fmaxf(path_corner_commit_lateral_gate_min_m, 0.0f)) ? 1U : 0U;
+        crossed_commit_allowed =
+            (((g_pf.target_idx + 1U) < g_pf.steps) &&
+             !pf_target_needs_pause()) ? 1U : 0U;
         position_ready =
-            ((geometry->within_tolerance &&
-              g_pf.linear_speed_cmps <= PF_ARRIVAL_MAX_SPEED_CMPS) ||
-             (geometry->target_plane_crossed &&
-              fabsf(actual_along_speed_cmps) <=
-                  PF_CROSSED_TARGET_MAX_SPEED_CMPS)) ? 1U : 0U;
+            (lateral_ready &&
+             ((geometry->within_tolerance &&
+               g_pf.linear_speed_cmps <= PF_ARRIVAL_MAX_SPEED_CMPS) ||
+              (crossed_commit_allowed &&
+               geometry->target_plane_crossed &&
+               g_pf.linear_speed_cmps <=
+                   PF_CROSSED_TARGET_MAX_SPEED_CMPS))) ? 1U : 0U;
 
         if (g_speed_test_enabled)
         {
@@ -1777,8 +1799,10 @@ static uint8 pf_prepare_geometry(pf_geometry_t *geometry, path_follow_output_t *
 
         if (!g_speed_test_enabled && position_ready)
         {
-            /* Accept either inside 1.5 cm below 5 cm/s, or after crossing the
-             * fixed target plane once along-track speed is below 3 cm/s. */
+            /* Every accepted point must be within the 1 cm lateral gate and
+             * below the total-speed limit.  Only ordinary intermediate points
+             * may commit after crossing the target plane; final and pause
+             * points stay under position control until they enter tolerance. */
             if (!pf_advance_reached_target(out))
             {
                 return 0U;
@@ -2319,6 +2343,7 @@ void path_follow_update(float yaw_deg, path_follow_output_t *out)
     float command_frame_yaw_deg;
     float position_blend;
     float position_speed_limit_cmps;
+    float position_reverse_speed_limit_cmps;
     float actual_along_speed_cmps;
     uint8 speed_limit_active = 0U;
     uint8 overspeed_guard_active = 0U;
@@ -2381,6 +2406,11 @@ void path_follow_update(float yaw_deg, path_follow_output_t *out)
         pf_position_speed_limit_cmps(
             fmaxf(geometry.along_track_remaining_m, 0.0f),
             geometry.segment_axis);
+    position_reverse_speed_limit_cmps =
+        (!g_speed_test_enabled && geometry.target_plane_crossed) ?
+        pf_position_speed_limit_cmps(
+            fmaxf(-geometry.along_track_remaining_m, 0.0f),
+            geometry.segment_axis) : 0.0f;
     actual_along_speed_cmps =
         g_pf.velocity_x_world_cmps * geometry.dir_x +
         g_pf.velocity_y_world_cmps * geometry.dir_y;
@@ -2410,11 +2440,12 @@ void path_follow_update(float yaw_deg, path_follow_output_t *out)
     }
     if (!g_speed_test_enabled)
     {
-        /* One continuous limiter owns normal endpoint deceleration.  It caps
-         * the already blended command every tick and records measured
-         * overspeed without entering a latched braking state. */
+        /* One continuous limiter owns endpoint deceleration and the bounded
+         * reverse recovery after an overshoot.  It caps the already blended
+         * command every tick without entering a latched braking state. */
         pf_limit_along_track_command(&geometry,
                                      position_speed_limit_cmps,
+                                     position_reverse_speed_limit_cmps,
                                      &vx_world_cmps,
                                      &vy_world_cmps,
                                      &speed_limit_active,

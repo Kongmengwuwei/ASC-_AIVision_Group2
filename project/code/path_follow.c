@@ -31,8 +31,12 @@
 #define PF_POSITION_MAX_IOUT_CMPS        200.0f
 #define PF_POSITION_MAX_OUT_CMPS         200.0f
 #define PF_POSITION_FILTER_ALPHA         0.9f
+#define PF_LINE_GUIDE_KP                 1.0f
+#define PF_LINE_GUIDE_MIN_CMPS           1.0f
 #define PF_LINE_GUIDE_MAX_CMPS           12.0f
 #define PF_LINE_GUIDE_DEADBAND_M         0.0025f
+#define PF_LINE_GUIDE_START_BOOST        2.0f
+#define PF_LINE_GUIDE_START_BOOST_M      0.03f
 
 #define PF_YAW_KP                        6.0f
 #define PF_YAW_KI                        0.0f
@@ -178,8 +182,8 @@ float path_corner_commit_lateral_gate_min_m = PF_POSITION_TOLERANCE_M;
 float path_hold_trim_release_distance = PF_POSITION_LOOP_RELEASE_M;
 
 /* Runtime-tunable line guidance and yaw low-speed feedforward. */
-float path_line_guide_kp = 0.0f;
-float path_line_guide_min_cmps = 0.0f;
+float path_line_guide_kp = PF_LINE_GUIDE_KP;
+float path_line_guide_min_cmps = PF_LINE_GUIDE_MIN_CMPS;
 float path_yaw_feedforward_min_degps = PF_YAW_FEEDFORWARD_MIN_DEGPS;
 float path_yaw_feedforward_deadband_deg = PF_YAW_TOLERANCE_DEG;
 
@@ -995,6 +999,7 @@ static uint8 pf_apply_line_guidance(const pf_geometry_t *geometry,
     float normal_error_m;
     float effective_error_m;
     float trim_cmps;
+    float start_boost = 1.0f;
 
     if (geometry == NULL || vx_world_cmps == NULL || vy_world_cmps == NULL ||
         g_pf.path == NULL || g_pf.target_idx == 0U ||
@@ -1042,6 +1047,22 @@ static uint8 pf_apply_line_guidance(const pf_geometry_t *geometry,
     if (trim_cmps > 0.0f)
     {
         trim_cmps += fmaxf(path_line_guide_min_cmps, 0.0f);
+
+        /* Match the new controller's launch correction: only the first
+         * segment is boosted, then the gain fades smoothly over 3 cm. */
+        if (g_pf.target_idx == 1U && PF_LINE_GUIDE_START_BOOST_M > 0.0f)
+        {
+            float traveled_m = relative_x_m * tangent_x +
+                               relative_y_m * tangent_y;
+            float boost_blend = 1.0f -
+                pf_clamp(traveled_m / PF_LINE_GUIDE_START_BOOST_M,
+                         0.0f,
+                         1.0f);
+
+            start_boost += (fmaxf(PF_LINE_GUIDE_START_BOOST, 1.0f) - 1.0f) *
+                           boost_blend;
+        }
+        trim_cmps *= start_boost;
     }
     trim_cmps = fminf(trim_cmps, PF_LINE_GUIDE_MAX_CMPS);
     if (effective_error_m > 0.0f)
@@ -1049,6 +1070,8 @@ static uint8 pf_apply_line_guidance(const pf_geometry_t *geometry,
         trim_cmps = -trim_cmps;
     }
 
+    /* The fixed segment tangent owns longitudinal motion.  Guidance supplies
+       only the normal component and therefore cannot alter arrival direction. */
     *vx_world_cmps = ref_speed_cmps * tangent_x + trim_cmps * normal_x;
     *vy_world_cmps = ref_speed_cmps * tangent_y + trim_cmps * normal_y;
     return 1U;

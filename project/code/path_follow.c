@@ -54,10 +54,12 @@
 #define PF_POSITION_Y_MAX_IOUT_CMPS      200.0f  /* Y轴位置环积分输出上限，单位 cm/s。 */
 #define PF_POSITION_Y_MAX_OUT_CMPS       200.0f  /* Y轴位置环总输出上限，单位 cm/s。 */
 #define PF_POSITION_FILTER_ALPHA         0.9f    /* 位置环微分滤波系数。 */
-#define PF_LINE_GUIDE_KP                 0.3f    /* 强航向闭环下默认关闭；保留运行时接口供特殊场地启用。 */
-#define PF_LINE_GUIDE_MIN_CMPS           0.0f    /* 法向纠偏非零时的最小附加速度，单位 cm/s。 */
+#define PF_LINE_GUIDE_KP                 1.0f    /* 默认启用法向纠偏，单位 (cm/s)/cm。 */
+#define PF_LINE_GUIDE_MIN_CMPS           4.0f    /* 越过死区后的最小法向纠偏速度，单位 cm/s。 */
 #define PF_LINE_GUIDE_MAX_CMPS           12.0f   /* 法向纠偏速度上限，单位 cm/s。 */
 #define PF_LINE_GUIDE_DEADBAND_M         0.0025f /* 法向偏差死区，单位 m。 */
+#define PF_LINE_GUIDE_START_BOOST        2.0f    /* 首段刚起步时的法向纠偏倍率。 */
+#define PF_LINE_GUIDE_START_BOOST_M      0.03f   /* 前 20 cm 内将倍率平滑退回 1。 */
 
 #define PF_YAW_KP                        7.0f    /* 高加速度平移保持环：提高负载扰动抑制。 */
 #define PF_YAW_KI                        0.00f  /* 平移保持环积分：抵消持续横移负载转矩。 */
@@ -1227,6 +1229,7 @@ static uint8 pf_apply_line_guidance(const pf_geometry_t *geometry,
     float normal_error_m;
     float effective_error_m;
     float trim_cmps;
+    float start_boost = 1.0f;
 
     if (geometry == NULL || vx_world_cmps == NULL || vy_world_cmps == NULL ||
         g_pf.path == NULL || g_pf.target_idx == 0U ||
@@ -1274,6 +1277,22 @@ static uint8 pf_apply_line_guidance(const pf_geometry_t *geometry,
     if (trim_cmps > 0.0f)
     {
         trim_cmps += fmaxf(path_line_guide_min_cmps, 0.0f);
+
+        /* Boost only the first segment's launch.  The gain fades with
+         * along-track travel, so later corners do not receive a fresh kick. */
+        if (g_pf.target_idx == 1U && PF_LINE_GUIDE_START_BOOST_M > 0.0f)
+        {
+            float traveled_m = relative_x_m * tangent_x +
+                               relative_y_m * tangent_y;
+            float boost_blend = 1.0f -
+                pf_clamp(traveled_m / PF_LINE_GUIDE_START_BOOST_M,
+                         0.0f,
+                         1.0f);
+
+            start_boost += (fmaxf(PF_LINE_GUIDE_START_BOOST, 1.0f) - 1.0f) *
+                           boost_blend;
+        }
+        trim_cmps *= start_boost;
     }
     trim_cmps = fminf(trim_cmps, PF_LINE_GUIDE_MAX_CMPS);
     if (effective_error_m > 0.0f)

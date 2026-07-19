@@ -57,8 +57,8 @@ static uint8 s_raw_stage_index[MAX_CAR_PATH] = {0U};
 static uint8 s_stage_model_valid = 0U;
 /* 运行期开关：1 允许动态规划选择斜线捷径，0 时只保留水平/竖直执行段。 */
 static uint8 g_path_diagonal_enabled = 1U;
-/* 识别路径默认启用“既有路径上的一格识别替换”。 */
-static uint8 g_path_identify_near_postprocess_enabled = 1U;
+/* 识别路径近距离替换后处理默认关闭；保留运行期开关便于对照测试。 */
+static uint8 g_path_identify_near_postprocess_enabled = 0U;
 
 void path_remap_exec_point(Position *p)
 {

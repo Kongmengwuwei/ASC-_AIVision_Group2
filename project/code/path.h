@@ -60,18 +60,8 @@ void path_remap_exec_point(Position *p);
  */
 void path_inverse_remap_exec_point(Position *p);
 
-/**
- * @brief 设置是否允许执行路径使用斜线捷径。
- *
- * @param enabled 1：允许斜线；0：只允许水平/竖直执行段。
- */
+/* Compatibility APIs. Diagonal shortcuts are always enabled. */
 void path_set_diagonal_enabled(uint8 enabled);
-
-/**
- * @brief 获取当前斜线捷径开关状态。
- *
- * @return uint8 1：允许斜线；0：只允许水平/竖直执行段。
- */
 uint8 path_get_diagonal_enabled(void);
 
 /* 识别路径后处理开关：保持原始路线坐标不变，只移动识别事件。先尽可能把三格识别

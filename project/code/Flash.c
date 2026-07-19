@@ -12,10 +12,10 @@
 #define MENU_FLASH_WORD_CHECKSUM 5U
 
 #define MENU_FLAG_CONTINUOUS_LEVELS (1UL << 0)
-#define MENU_FLAG_DIAGONAL_PATH (1UL << 1)
+/* Bits 1 and 3 are reserved for compatibility with old saved settings.
+ * Diagonal paths and identify pre-rotation are now permanently enabled. */
 /* Bit 2 was reserved; old saved configurations therefore keep this risky fallback off. */
 #define MENU_FLAG_IDENTIFY_ID_FALLBACK (1UL << 2)
-#define MENU_FLAG_IDENTIFY_PREROTATE (1UL << 3)
 #define MENU_FLAG_PRESET_INPUT (1UL << 4)
 #define MENU_FLAG_SHOW_MAP (1UL << 5)
 #define MENU_FLAG_SHOW_DATA (1UL << 6)
@@ -33,8 +33,6 @@ static uint32 menu_flash_build_flags(const menu_flash_config_t *config)
     uint32 flags = 0U;
 
     if (config->continuous_levels) flags |= MENU_FLAG_CONTINUOUS_LEVELS;
-    if (config->diagonal_path) flags |= MENU_FLAG_DIAGONAL_PATH;
-    if (config->identify_prerotate) flags |= MENU_FLAG_IDENTIFY_PREROTATE;
     if (config->preset_input) flags |= MENU_FLAG_PRESET_INPUT;
     if (config->show_map) flags |= MENU_FLAG_SHOW_MAP;
     if (config->show_data) flags |= MENU_FLAG_SHOW_DATA;
@@ -108,8 +106,6 @@ uint8 Data_load_from_flash(menu_flash_config_t *config)
     flags = flash_union_buffer[MENU_FLASH_WORD_FLAGS].uint32_type;
     config->start_dir = (uint8)flash_union_buffer[MENU_FLASH_WORD_START_DIR].uint32_type;
     config->continuous_levels = (flags & MENU_FLAG_CONTINUOUS_LEVELS) ? 1U : 0U;
-    config->diagonal_path = (flags & MENU_FLAG_DIAGONAL_PATH) ? 1U : 0U;
-    config->identify_prerotate = (flags & MENU_FLAG_IDENTIFY_PREROTATE) ? 1U : 0U;
     config->preset_input = (flags & MENU_FLAG_PRESET_INPUT) ? 1U : 0U;
     config->preset_map_index = (uint8)flash_union_buffer[MENU_FLASH_WORD_MAP_INDEX].uint32_type;
     config->show_map = (flags & MENU_FLAG_SHOW_MAP) ? 1U : 0U;

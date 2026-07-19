@@ -25,12 +25,6 @@
  */
 static uint8 g_control_prestart_depart_dir = 0U;
 
-/*
- * 手动开关：识别阶段是否启用“段前提前转向”。
- * 1：每段识别短路程出发前先转到识别朝向，到点后直接识别。
- * 0：关闭提前转向，恢复为到达识别点后再原地转向识别。
- */
-static uint8 g_control_identify_prerotate_enabled = 1U;
 static uint8 g_control_continuous_levels_enabled = 0U;
 /* Risky ID repair is opt-in. Normal recognition results are not rewritten by default. */
 static uint8 g_control_identify_id_fallback_enabled = 0U;
@@ -60,7 +54,7 @@ float g_control_prestart_depart_compensate_m = -0.0f;
 #define CONTROL_LOCALIZE_MAX_SAMPLES 5U
 #define CONTROL_LOCALIZE_TWO_SAMPLE_MATCH_M 0.03f
 /* 检查点视觉位置偏离事件目标超过 3 cm 时，先回移到目标点再继续流程。 */
-#define CONTROL_CHECKPOINT_REPOSITION_THRESHOLD_M 0.05f
+#define CONTROL_CHECKPOINT_REPOSITION_THRESHOLD_M 0.03f
 /* A compressed straight/slanted segment of at least three grid cells ends at
  * a visual checkpoint when checkpoint localization is enabled. */
 #define CONTROL_LONG_SEGMENT_CHECKPOINT_MIN_CELLS 3U
@@ -73,7 +67,7 @@ float g_control_prestart_depart_compensate_m = -0.0f;
 #define CONTROL_CONTINUOUS_STOP_ENCODER_TOL 5
 #define CONTROL_CONTINUOUS_STOP_STABLE_LOOPS 3U
 /* 10 ms 控制节拍；检测到仍有未推进箱子时，下一关发车前额外等待 5 s。 */
-#define CONTROL_CONTINUOUS_EXTRA_DEPART_WAIT_TICKS 500U
+#define CONTROL_CONTINUOUS_EXTRA_DEPART_WAIT_TICKS 300U
 #define CONTROL_DEPOT_CELL_HALF_EXTENT_M (0.5f * GRID_SIZE_M)
 
 
@@ -2691,7 +2685,7 @@ static uint8 start_identify_segment(size_t end_idx)
      * 识别短段开始前先查看该段终点旁边要识别的物体。
      * 若存在待识别目标，先在短段起点转到识别朝向，再保持该朝向行驶到识别位。
      */
-    if (g_control_identify_prerotate_enabled && has_identify_targets)
+    if (has_identify_targets)
     {
         car_go_flag = 1U;
         car_stop_flag = 0U;
@@ -3953,8 +3947,7 @@ static void handle_identify_execute_path(void)
                     g_identify_checkpoint_localized = 1U;
                 }
 
-                if (g_control_identify_prerotate_enabled &&
-                    !g_identify_targets_collected_at_endpoint)
+                if (!g_identify_targets_collected_at_endpoint)
                 {
                     enter_identify_recognition_state();
                 }
@@ -4672,12 +4665,13 @@ const Position *control_get_exec_path(size_t *steps)
 
 void control_set_diagonal_path_enabled(uint8 enabled)
 {
-    path_set_diagonal_enabled(enabled);
+    /* Compatibility API: diagonal execution paths are always enabled. */
+    (void)enabled;
 }
 
 uint8 control_get_diagonal_path_enabled(void)
 {
-    return path_get_diagonal_enabled();
+    return 1U;
 }
 
 void control_set_checkpoint_vision_localization_enabled(uint8 enabled)
@@ -4702,12 +4696,13 @@ uint8 control_get_last_pair_insurance_enabled(void)
 
 void control_set_identify_prerotate_enabled(uint8 enabled)
 {
-    g_control_identify_prerotate_enabled = (enabled != 0U) ? 1U : 0U;
+    /* Compatibility API: identify pre-rotation is always enabled. */
+    (void)enabled;
 }
 
 uint8 control_get_identify_prerotate_enabled(void)
 {
-    return g_control_identify_prerotate_enabled;
+    return 1U;
 }
 
 void control_set_identify_id_fallback_enabled(uint8 enabled)

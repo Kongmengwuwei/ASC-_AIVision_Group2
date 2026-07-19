@@ -10,8 +10,6 @@ typedef struct
 {
     uint8 start_dir;
     uint8 continuous_levels;
-    uint8 diagonal_path;
-    uint8 identify_prerotate;
     uint8 preset_input;
     uint8 preset_map_index;
     uint8 show_map;

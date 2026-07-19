@@ -136,20 +136,8 @@ uint8 control_get_return_pose_in_depot(void);
  */
 const Position *control_get_exec_path(size_t *steps);
 
-/**
- * @brief 设置是否允许执行路径使用斜线捷径。
- *
- * 该开关影响下一次执行路径构建；已经下发给 path_follow 的路径不会被立即改写。
- *
- * @param enabled 1：允许斜线；0：只允许水平/竖直执行段。
- */
+/* Compatibility APIs. Diagonal execution paths are always enabled. */
 void control_set_diagonal_path_enabled(uint8 enabled);
-
-/**
- * @brief 获取当前斜线执行路径开关状态。
- *
- * @return uint8 1：允许斜线；0：只允许水平/竖直执行段。
- */
 uint8 control_get_diagonal_path_enabled(void);
 
 /* 识别驻车点和每次推箱结束后是否执行一次视觉位置校正。 */
@@ -161,21 +149,8 @@ uint8 control_get_checkpoint_vision_localization_enabled(void);
 void control_set_last_pair_insurance_enabled(uint8 enabled);
 uint8 control_get_last_pair_insurance_enabled(void);
 
-/**
- * @brief 设置识别阶段是否启用段前提前转向。
- *
- * 开启后，每段识别短路程出发前会先转到识别朝向，到点后直接识别；
- * 关闭后，到达识别点后再原地转向识别。
- *
- * @param enabled 1：启用；0：关闭。
- */
+/* Compatibility APIs. Identify pre-rotation is always enabled. */
 void control_set_identify_prerotate_enabled(uint8 enabled);
-
-/**
- * @brief 获取识别阶段段前提前转向开关状态。
- *
- * @return uint8 1：启用；0：关闭。
- */
 uint8 control_get_identify_prerotate_enabled(void);
 
 /*

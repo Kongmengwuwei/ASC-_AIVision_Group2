@@ -55,8 +55,6 @@ static Position s_safe_relocation_raw_path[PATH_SAFE_RELOCATION_MAX_POINTS] = {{
 static path_map_snapshot_t s_stage_maps[PATH_STAGE_SNAPSHOT_CAPACITY];
 static uint8 s_raw_stage_index[MAX_CAR_PATH] = {0U};
 static uint8 s_stage_model_valid = 0U;
-/* 运行期开关：1 允许动态规划选择斜线捷径，0 时只保留水平/竖直执行段。 */
-static uint8 g_path_diagonal_enabled = 1U;
 /* 识别路径近距离替换后处理默认关闭；保留运行期开关便于对照测试。 */
 static uint8 g_path_identify_near_postprocess_enabled = 1U;
 
@@ -102,12 +100,13 @@ void path_inverse_remap_exec_point(Position *p)
 
 void path_set_diagonal_enabled(uint8 enabled)
 {
-    g_path_diagonal_enabled = (enabled != 0U) ? 1U : 0U;
+    /* Compatibility API: diagonal shortcuts are always enabled. */
+    (void)enabled;
 }
 
 uint8 path_get_diagonal_enabled(void)
 {
-    return g_path_diagonal_enabled;
+    return 1U;
 }
 
 void path_set_identify_near_postprocess_enabled(uint8 enabled)
@@ -1085,11 +1084,6 @@ static uint8 path_exec_segment_allowed(const Position *path,
     }
 
     is_slanted = path_is_slanted_segment(seg_start, seg_end);
-    if (is_slanted && !g_path_diagonal_enabled)
-    {
-        return 0U;
-    }
-
     crosses_push_span = path_segment_crosses_push_span(start_idx, end_idx);
     follows_raw_axis_run = path_raw_subpath_is_axis_run(path, start_idx, end_idx);
 

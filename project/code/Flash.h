@@ -15,7 +15,7 @@ typedef struct
     uint8 show_map;
     uint8 show_data;
     uint8 blue_serial;
-    uint8 checkpoint_vision;
+    uint8 checkpoint_vision_mode;
     uint8 identify_id_fallback;
     uint8 last_pair_insurance;
 } menu_flash_config_t;

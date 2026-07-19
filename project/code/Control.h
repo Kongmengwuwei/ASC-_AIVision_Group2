@@ -6,6 +6,10 @@
 
 #define CONTROL_PRESTART_DEPART_DIR_MIN 0U
 #define CONTROL_PRESTART_DEPART_DIR_MAX 4U
+#define CONTROL_CHECKPOINT_VISION_MODE_OFF 0U
+#define CONTROL_CHECKPOINT_VISION_MODE_STANDARD 1U
+#define CONTROL_CHECKPOINT_VISION_MODE_EVERY_POINT 2U
+#define CONTROL_CHECKPOINT_VISION_MODE_MAX CONTROL_CHECKPOINT_VISION_MODE_EVERY_POINT
 
 /**
  * @brief 控制流程阶段定义。
@@ -136,9 +140,9 @@ uint8 control_get_return_pose_in_depot(void);
  */
 const Position *control_get_exec_path(size_t *steps);
 
-/* 识别驻车点和每次推箱结束后是否执行一次视觉位置校正。 */
-void control_set_checkpoint_vision_localization_enabled(uint8 enabled);
-uint8 control_get_checkpoint_vision_localization_enabled(void);
+/* 0: off; 1: existing checkpoints; 2: every point through final PUSH_END. */
+void control_set_checkpoint_vision_localization_mode(uint8 mode);
+uint8 control_get_checkpoint_vision_localization_mode(void);
 
 /* After the final planned push, optionally retry one remaining box/target
  * pair with a one-shot Mode1 plan before returning to the depot. */

@@ -1,4 +1,5 @@
 #include "Flash.h"
+#include "Control.h"
 
 #define MENU_FLASH_MAGIC 0x4D454E55U
 #define MENU_FLASH_VERSION 1U
@@ -22,6 +23,7 @@
 #define MENU_FLAG_BLUE_SERIAL (1UL << 7)
 #define MENU_FLAG_CHECKPOINT_VISION (1UL << 8)
 #define MENU_FLAG_LAST_PAIR_INSURANCE (1UL << 9)
+#define MENU_FLAG_CHECKPOINT_VISION_EVERY_POINT (1UL << 10)
 
 static uint32 menu_flash_checksum(uint32 flags, uint32 start_dir, uint32 map_index)
 {
@@ -37,7 +39,16 @@ static uint32 menu_flash_build_flags(const menu_flash_config_t *config)
     if (config->show_map) flags |= MENU_FLAG_SHOW_MAP;
     if (config->show_data) flags |= MENU_FLAG_SHOW_DATA;
     if (config->blue_serial) flags |= MENU_FLAG_BLUE_SERIAL;
-    if (config->checkpoint_vision) flags |= MENU_FLAG_CHECKPOINT_VISION;
+    if (config->checkpoint_vision_mode == CONTROL_CHECKPOINT_VISION_MODE_STANDARD)
+    {
+        flags |= MENU_FLAG_CHECKPOINT_VISION;
+    }
+    else if (config->checkpoint_vision_mode >= CONTROL_CHECKPOINT_VISION_MODE_EVERY_POINT)
+    {
+        /* Keep the legacy enabled bit so an older firmware still sees ON. */
+        flags |= MENU_FLAG_CHECKPOINT_VISION |
+                 MENU_FLAG_CHECKPOINT_VISION_EVERY_POINT;
+    }
     if (config->identify_id_fallback) flags |= MENU_FLAG_IDENTIFY_ID_FALLBACK;
     if (config->last_pair_insurance) flags |= MENU_FLAG_LAST_PAIR_INSURANCE;
     return flags;
@@ -111,7 +122,19 @@ uint8 Data_load_from_flash(menu_flash_config_t *config)
     config->show_map = (flags & MENU_FLAG_SHOW_MAP) ? 1U : 0U;
     config->show_data = (flags & MENU_FLAG_SHOW_DATA) ? 1U : 0U;
     config->blue_serial = (flags & MENU_FLAG_BLUE_SERIAL) ? 1U : 0U;
-    config->checkpoint_vision = (flags & MENU_FLAG_CHECKPOINT_VISION) ? 1U : 0U;
+    if (flags & MENU_FLAG_CHECKPOINT_VISION_EVERY_POINT)
+    {
+        config->checkpoint_vision_mode = CONTROL_CHECKPOINT_VISION_MODE_EVERY_POINT;
+    }
+    else if (flags & MENU_FLAG_CHECKPOINT_VISION)
+    {
+        /* Backward compatible with the former boolean setting. */
+        config->checkpoint_vision_mode = CONTROL_CHECKPOINT_VISION_MODE_STANDARD;
+    }
+    else
+    {
+        config->checkpoint_vision_mode = CONTROL_CHECKPOINT_VISION_MODE_OFF;
+    }
     config->identify_id_fallback = (flags & MENU_FLAG_IDENTIFY_ID_FALLBACK) ? 1U : 0U;
     config->last_pair_insurance = (flags & MENU_FLAG_LAST_PAIR_INSURANCE) ? 1U : 0U;
     return 1U;

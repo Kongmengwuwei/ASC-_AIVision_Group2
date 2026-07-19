@@ -146,7 +146,7 @@ void motor_right_start_compensation_reset(void);
 void motor_speed_debug_reset(void);
 void motor_speed_debug_get_snapshot(motor_speed_debug_snapshot_t *snapshot);
 //void encoder_read_filtered(int *enc1, int *enc2, int *enc3, int *enc4);
-int16 Lowpass(int16 X_last,int16 X_new);
+float Lowpass(float X_last, float X_new);
 void Kinematics_Init(void);
 void Kinematics_Inverse(float* input, int* output);
 

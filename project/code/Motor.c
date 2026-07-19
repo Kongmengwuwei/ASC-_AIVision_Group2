@@ -5,6 +5,8 @@
 #include "PID_config.h"
 #include "PID.h"
 
+#include <math.h>
+
 
 float speed_three_array[3] = {0};
 int speed_encoder[4] = {0};
@@ -128,7 +130,7 @@ void encoder_get(void)
 	encoder_L_up[0]=encoder_data_quaddec1;   //输入第一刻数
 	speed_L_up[1]=speed_L_up[0];
 	speed_L_up[0]=(encoder_L_up[4]*0.5f+encoder_L_up[3]*0.5f+encoder_L_up[2]*2.0f+encoder_L_up[1]*3.0f+encoder_L_up[0]*4.0f)/10.0f;
-	up_L_all=Lowpass(speed_L_up[1],speed_L_up[0]);
+	up_L_all=(int16)lroundf(Lowpass(speed_L_up[1],speed_L_up[0]));
 	
 	encoder_R_up[4]=encoder_R_up[3];//右上编码器
 	encoder_R_up[3]=encoder_R_up[2];
@@ -137,7 +139,7 @@ void encoder_get(void)
 	encoder_R_up[0]=-encoder_data_quaddec2;
 	speed_R_up[1]=speed_R_up[0];
 	speed_R_up[0]=(encoder_R_up[4]*0.5f+encoder_R_up[3]*0.5f+encoder_R_up[2]*2+encoder_R_up[1]*3.0f+encoder_R_up[0]*4.0f)/10.0f;
-	up_R_all=Lowpass(speed_R_up[1],speed_R_up[0]);
+	up_R_all=(int16)lroundf(Lowpass(speed_R_up[1],speed_R_up[0]));
 	
 	encoder_L_down[4]=encoder_L_down[3];//左下编码器
 	encoder_L_down[3]=encoder_L_down[2];
@@ -146,7 +148,7 @@ void encoder_get(void)
 	encoder_L_down[0]=encoder_data_quaddec3;
 	speed_L_down[1]=speed_L_down[0];
 	speed_L_down[0]=(encoder_L_down[4]*0.5f+encoder_L_down[3]*0.5f+encoder_L_down[2]*2+encoder_L_down[1]*3.0f+encoder_L_down[0]*4.0f)/10.0f;
-	down_L_all=Lowpass(speed_L_down[1],speed_L_down[0]);
+	down_L_all=(int16)lroundf(Lowpass(speed_L_down[1],speed_L_down[0]));
 	
 	encoder_R_down[4]=encoder_R_down[3];//右下编码器
 	encoder_R_down[3]=encoder_R_down[2];
@@ -155,7 +157,7 @@ void encoder_get(void)
 	encoder_R_down[0]=-encoder_data_quaddec4;
 	speed_R_down[1]=speed_R_down[0];
 	speed_R_down[0]=(encoder_R_down[4]*0.5f+encoder_R_down[3]*0.5f+encoder_R_down[2]*2+encoder_R_down[1]*3.0f+encoder_R_down[0]*4.0f)/10.0f;
-	down_R_all=Lowpass(speed_R_down[1],speed_R_down[0]);
+	down_R_all=(int16)lroundf(Lowpass(speed_R_down[1],speed_R_down[0]));
 	
 	encoder_clear_count(ENCODER_1);                                       // 清空编码器计数
 	encoder_clear_count(ENCODER_2);                                       // 清空编码器计数
@@ -163,7 +165,9 @@ void encoder_get(void)
 	encoder_clear_count(ENCODER_4);
 
 	all = all + down_R_all+down_L_all+up_L_all+up_R_all;
-	encoders_average=(up_L_all+up_R_all+down_L_all+down_R_all)/4.0f;
+	encoders_average=(int16)lroundf(
+		((float)up_L_all + (float)up_R_all +
+		 (float)down_L_all + (float)down_R_all) * 0.25f);
 	
     // Position_yaw.add +=	(float)(-down_R_all+down_L_all+up_L_all-up_R_all);
 
@@ -174,15 +178,13 @@ void encoder_get(void)
 入口参数：旧X，新X
 返回  值：新值
 **************************************************************************/
-int16 Lowpass(int16 X_last,int16 X_new)
-{ 
-		int16 new_value,add,count;
-	
-    add = (X_new - X_last)*0.7f;
-    new_value = add + X_last;
-			 
-		return new_value;
-} 
+float Lowpass(float X_last, float X_new)
+{
+	/* Keep the fractional encoder estimate until the final count boundary.
+	 * The old int16 parameters and intermediates truncated twice and biased
+	 * both low forward and low reverse feedback toward zero. */
+	return X_last + (X_new - X_last) * 0.7f;
+}
 
 void motor_pwm(int up_left_speed,int up_right_speed,int down_left_speed,int down_right_speed)
 {
@@ -564,10 +566,13 @@ void Kinematics_Inverse(float* input, int* output)
 	v_w[3] = v_tx - v_ty + (r_x + r_y)*omega;
 
     //计算一个PID控制周期内，电机编码器计数值的变化
-	output[0] = (int)(v_w[0] * pulse_per_meter/PID_RATE);   //上左    *125
-	output[1] = (int)(v_w[1] * pulse_per_meter/PID_RATE);   //上右
-	output[2] = (int)(v_w[2] * pulse_per_meter/PID_RATE);   //下左
-	output[3] = (int)(v_w[3] * pulse_per_meter/PID_RATE);   //下右
+	/* Wheel targets cross the float-to-count boundary here.  Round to the
+	 * nearest count instead of truncating toward zero, which weakened every
+	 * low-speed command and was especially visible in the reverse tail. */
+	output[0] = (int)lroundf(v_w[0] * (float)pulse_per_meter / (float)PID_RATE);   //上左    *125
+	output[1] = (int)lroundf(v_w[1] * (float)pulse_per_meter / (float)PID_RATE);   //上右
+	output[2] = (int)lroundf(v_w[2] * (float)pulse_per_meter / (float)PID_RATE);   //下左
+	output[3] = (int)lroundf(v_w[3] * (float)pulse_per_meter / (float)PID_RATE);   //下右
 	
 	output[0] = Limit_int(LIMIT_ENCODER_MIN, output[0], LIMIT_ENCODER_MAX);
 	output[1] = Limit_int(LIMIT_ENCODER_MIN, output[1], LIMIT_ENCODER_MAX);

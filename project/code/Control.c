@@ -3922,6 +3922,11 @@ static void handle_identify_execute_path(void)
             (g_exec_path[endpoint_idx].id & BOMB_EXPLOSION) != 0U &&
             !g_identify_checkpoint_localized)
         {
+            /* st.active becomes false only after the configured explosion
+             * pause has completed.  Drop any pre-explosion pose data, then
+             * localize immediately without another fixed delay. */
+            uart_stop_car_stream();
+            uart_blob_clear_pending_data();
             begin_checkpoint_visual_localization(&g_exec_path[endpoint_idx], 0U);
             if (!process_checkpoint_visual_localization())
             {

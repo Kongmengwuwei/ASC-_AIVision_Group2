@@ -58,9 +58,9 @@ float g_control_prestart_depart_compensate_m = -0.0f;
 #define CONTROL_LOCALIZE_POST_STOP_DRAIN_TICKS 10U
 #define CONTROL_LOCALIZE_WHEEL_STOP_ENCODER_TOL 5
 #define CONTROL_LOCALIZE_MAX_SAMPLES 5U
-#define CONTROL_LOCALIZE_TWO_SAMPLE_MATCH_M 0.05f
+#define CONTROL_LOCALIZE_TWO_SAMPLE_MATCH_M 0.03f
 /* 检查点视觉位置偏离事件目标超过 3 cm 时，先回移到目标点再继续流程。 */
-#define CONTROL_CHECKPOINT_REPOSITION_THRESHOLD_M 0.03f
+#define CONTROL_CHECKPOINT_REPOSITION_THRESHOLD_M 0.05f
 /* A compressed straight/slanted segment of at least three grid cells ends at
  * a visual checkpoint when checkpoint localization is enabled. */
 #define CONTROL_LONG_SEGMENT_CHECKPOINT_MIN_CELLS 3U
@@ -75,8 +75,6 @@ float g_control_prestart_depart_compensate_m = -0.0f;
 /* 10 ms 控制节拍；检测到仍有未推进箱子时，下一关发车前额外等待 5 s。 */
 #define CONTROL_CONTINUOUS_EXTRA_DEPART_WAIT_TICKS 500U
 #define CONTROL_DEPOT_CELL_HALF_EXTENT_M (0.5f * GRID_SIZE_M)
-/* Return half a cell past the depot center, toward the outside of the map. */
-#define CONTROL_RETURN_DEPOT_INWARD_OFFSET_M (0.5f * GRID_SIZE_M)
 
 
 /**
@@ -247,7 +245,6 @@ static uint8 g_continuous_preset_base_index = 0U;
 static uint8 g_return_heading_rotate_started = 0U;
 static uint8 g_return_depot_check_done = 0U;
 static uint8 g_return_pose_in_depot = 0U;
-static uint8 g_return_inward_move_state = 0U;
 static uint8 g_pushbox_entry_heading_rotate_started = 0U;
 static uint8 g_wait_new_map_frame = 0U;
 static uint8 g_wait_map_frame_base = 0U;
@@ -998,7 +995,6 @@ static void reset_level_runtime_state_for_launch(void)
     g_return_heading_rotate_started = 0U;
     g_return_depot_check_done = 0U;
     g_return_pose_in_depot = 0U;
-    g_return_inward_move_state = 0U;
     g_pushbox_entry_heading_rotate_started = 0U;
     g_identify_safe_move_prepared = 0U;
     g_identify_safe_move_running = 0U;
@@ -4211,43 +4207,6 @@ static void handle_load_path_stage(void)
     set_control_phase_stage(CONTROL_PHASE_STEP_EXECUTE_PATH);
 }
 
-static uint8 get_return_inward_target(float *target_x_m, float *target_y_m)
-{
-    Position depot_exec;
-    Position depot_raw;
-    Position arena_neighbor_exec;
-    int inward_row_dir;
-    int inward_col_dir;
-
-    if (target_x_m == NULL || target_y_m == NULL || g_exec_steps == 0U)
-    {
-        return 0U;
-    }
-
-    depot_exec = g_exec_path[g_exec_steps - 1U];
-    depot_raw = depot_exec;
-    path_inverse_remap_exec_point(&depot_raw);
-    if (depot_raw.col != 0U ||
-        (depot_raw.row != 4U && depot_raw.row != 5U))
-    {
-        return 0U;
-    }
-
-    /* col=1 is the adjacent arena cell.  Move in the opposite direction
-     * from it so the target lies half a cell deeper inside the depot. */
-    arena_neighbor_exec = depot_raw;
-    arena_neighbor_exec.col = 1U;
-    path_remap_exec_point(&arena_neighbor_exec);
-    inward_row_dir = (int)depot_exec.row - (int)arena_neighbor_exec.row;
-    inward_col_dir = (int)depot_exec.col - (int)arena_neighbor_exec.col;
-
-    *target_x_m = (float)depot_exec.row * GRID_SIZE_M +
-                  (float)inward_row_dir * CONTROL_RETURN_DEPOT_INWARD_OFFSET_M;
-    *target_y_m = (float)depot_exec.col * GRID_SIZE_M +
-                  (float)inward_col_dir * CONTROL_RETURN_DEPOT_INWARD_OFFSET_M;
-    return 1U;
-}
-
 static uint8 process_final_push_map_refresh_without_vision(void)
 {
     if (!g_last_pair_map_only_refresh_active)
@@ -4266,43 +4225,6 @@ static uint8 process_final_push_map_refresh_without_vision(void)
 
     g_last_pair_map_only_refresh_active = 0U;
     return 1U;
-}
-
-static uint8 finish_return_inward_move_if_ready(void)
-{
-    path_follow_status_t st = {0};
-    float target_x_m = 0.0f;
-    float target_y_m = 0.0f;
-
-    if (g_return_inward_move_state == 2U)
-    {
-        return 1U;
-    }
-
-    if (g_return_inward_move_state == 1U)
-    {
-        path_follow_get_status(&st);
-        if (st.active)
-        {
-            return 0U;
-        }
-        g_return_inward_move_state = 2U;
-        control_hold_yaw_closed_loop();
-        return 1U;
-    }
-
-    if (!get_return_inward_target(&target_x_m, &target_y_m))
-    {
-        g_return_inward_move_state = 2U;
-        return 1U;
-    }
-
-    control_hold_yaw_closed_loop();
-    path_follow_start_pose_correction(target_x_m, target_y_m);
-    g_return_inward_move_state = 1U;
-    car_go_flag = 1U;
-    car_stop_flag = 0U;
-    return 0U;
 }
 
 static uint8 return_pose_is_in_depot(float x_m, float y_m)
@@ -4395,7 +4317,6 @@ static uint8 start_last_pair_insurance_replan(size_t endpoint_idx)
     g_return_heading_rotate_started = 0U;
     g_return_depot_check_done = 0U;
     g_return_pose_in_depot = 0U;
-    g_return_inward_move_state = 0U;
     g_continuous_extra_depart_wait_required = 0U;
     g_continuous_extra_depart_wait_started = 0U;
     g_continuous_extra_depart_wait_start_tick = 0U;
@@ -4487,11 +4408,6 @@ static void handle_pushbox_execute_path(void)
         {
             return;
         }
-    }
-
-    if (!finish_return_inward_move_if_ready())
-    {
-        return;
     }
 
     if (!g_return_depot_check_done)

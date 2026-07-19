@@ -43,6 +43,10 @@
 #define PF_YAW_KD                        10.5f
 #define PF_YAW_FILTER_ALPHA              0.9f
 #define PF_YAW_FEEDFORWARD_MIN_DEGPS     5.0f
+#define PF_ROTATE_YAW_KP                 6.0f
+#define PF_ROTATE_YAW_KI                 0.0f
+#define PF_ROTATE_YAW_KD                 8.5f
+#define PF_ROTATE_YAW_FEEDFORWARD_DEGPS  8.0f
 #define PF_POSITION_SPEED_FACTOR_MIN     0.10f
 #define PF_POSITION_SPEED_FACTOR_MAX     1.00f
 
@@ -167,6 +171,7 @@ tagPID_T pid_stay;
 tagPID_T pid_stay_y;
 tagPID_T pid_stay_backward;
 tagPID_T pid_yaw;
+static tagPID_T pid_yaw_rotate;
 tagPID_T pid_accel_yaw;
 
 uint8 car_direction = 0U;
@@ -186,6 +191,7 @@ float path_line_guide_kp = PF_LINE_GUIDE_KP;
 float path_line_guide_min_cmps = PF_LINE_GUIDE_MIN_CMPS;
 float path_yaw_feedforward_min_degps = PF_YAW_FEEDFORWARD_MIN_DEGPS;
 float path_yaw_feedforward_deadband_deg = PF_YAW_TOLERANCE_DEG;
+static float path_rotate_yaw_feedforward_degps = PF_ROTATE_YAW_FEEDFORWARD_DEGPS;
 
 /*
  * Kept as runtime variables for compatibility with the current BlueSerial
@@ -1139,27 +1145,30 @@ static void pf_limit_world_speed(float *vx_world_cmps, float *vy_world_cmps)
     *vy_world_cmps *= scale;
 }
 
-static float pf_yaw_command_radps(float yaw_deg)
+static float pf_yaw_command_radps(float yaw_deg,
+                                  tagPID_T *controller,
+                                  float feedforward_min_degps)
 {
     float error_deg = pf_yaw_error_deg(yaw_deg, g_pf.target_yaw_deg);
     float output_degps;
     float feedforward_deadband_deg;
 
-    if (fabsf(error_deg) <= g_pf.yaw_tolerance_deg)
+    if (controller == NULL || fabsf(error_deg) <= g_pf.yaw_tolerance_deg)
     {
         return 0.0f;
     }
 
-    output_degps = (float)PID_Location_Calculate(&pid_yaw, 0.0f, error_deg);
+    output_degps =
+        (float)PID_Location_Calculate(controller, 0.0f, error_deg);
     feedforward_deadband_deg = fmaxf(path_yaw_feedforward_deadband_deg,
                                     g_pf.yaw_tolerance_deg);
-    if (path_yaw_feedforward_min_degps > 0.0f &&
+    if (feedforward_min_degps > 0.0f &&
         fabsf(error_deg) > feedforward_deadband_deg &&
-        fabsf(output_degps) < path_yaw_feedforward_min_degps)
+        fabsf(output_degps) < feedforward_min_degps)
     {
         output_degps = (error_deg > 0.0f) ?
-                       path_yaw_feedforward_min_degps :
-                       -path_yaw_feedforward_min_degps;
+                       feedforward_min_degps :
+                       -feedforward_min_degps;
     }
     output_degps = pf_clamp(output_degps,
                             -g_pf.max_angular_speed_degps,
@@ -1261,6 +1270,7 @@ static void pf_finish_path(path_follow_output_t *out)
     g_pf.paused = 0U;
     pf_reset_motion_state();
     PID_Clear(&pid_yaw);
+    PID_Clear(&pid_yaw_rotate);
 
     if (out != NULL)
     {
@@ -1289,7 +1299,27 @@ static void pf_output_yaw_hold(float yaw_deg, path_follow_output_t *out)
         out->reached = 0U;
         out->vx_cmd = 0.0f;
         out->vy_cmd = 0.0f;
-        out->omega_cmd = pf_yaw_command_radps(yaw_deg);
+        out->omega_cmd = pf_yaw_command_radps(yaw_deg,
+                                              &pid_yaw,
+                                              path_yaw_feedforward_min_degps);
+        out->target_idx = g_pf.target_idx;
+    }
+}
+
+static void pf_output_rotate(float yaw_deg, path_follow_output_t *out)
+{
+    pf_clear_debug();
+    car_direction = 0U;
+
+    if (out != NULL)
+    {
+        out->active = 1U;
+        out->reached = 0U;
+        out->vx_cmd = 0.0f;
+        out->vy_cmd = 0.0f;
+        out->omega_cmd = pf_yaw_command_radps(yaw_deg,
+                                              &pid_yaw_rotate,
+                                              path_rotate_yaw_feedforward_degps);
         out->target_idx = g_pf.target_idx;
     }
 }
@@ -1443,6 +1473,7 @@ static void pf_apply_path(const Position *path,
     pf_reset_pause_runtime();
     pf_reset_motion_state();
     PID_Clear(&pid_yaw);
+    PID_Clear(&pid_yaw_rotate);
 
     /* A normal planned path usually includes the current cell as point zero. */
     if (g_pf.active && steps > 1U)
@@ -1556,6 +1587,12 @@ void path_follow_init(float grid_size_m, float pulses_per_meter)
                        PF_YAW_KD,
                        PF_MAX_ANGULAR_SPEED_DEGPS,
                        PF_YAW_FILTER_ALPHA);
+    pf_init_pid_object(&pid_yaw_rotate,
+                       PF_ROTATE_YAW_KP,
+                       PF_ROTATE_YAW_KI,
+                       PF_ROTATE_YAW_KD,
+                       PF_MAX_ANGULAR_SPEED_DEGPS,
+                       PF_YAW_FILTER_ALPHA);
 
     /* Near-target X/Y position loop restored from the original controller. */
     pf_init_pid_object(&pid_stay,
@@ -1634,37 +1671,36 @@ void path_follow_set_position_pid_gains_backward(float kp, float ki, float kd)
 
 void path_follow_set_rotate_yaw_pid_gains(float kp, float ki, float kd)
 {
-    /* The restored implementation uses one yaw PID for travel and rotation. */
-    pid_yaw.fKp = fmaxf(kp, 0.0f);
-    pid_yaw.fKi = fmaxf(ki, 0.0f);
-    pid_yaw.fKd = fmaxf(kd, 0.0f);
-    PID_Clear(&pid_yaw);
+    pid_yaw_rotate.fKp = fmaxf(kp, 0.0f);
+    pid_yaw_rotate.fKi = fmaxf(ki, 0.0f);
+    pid_yaw_rotate.fKd = fmaxf(kd, 0.0f);
+    PID_Clear(&pid_yaw_rotate);
 }
 
 void path_follow_get_rotate_yaw_pid_gains(float *kp, float *ki, float *kd)
 {
     if (kp != NULL)
     {
-        *kp = pid_yaw.fKp;
+        *kp = pid_yaw_rotate.fKp;
     }
     if (ki != NULL)
     {
-        *ki = pid_yaw.fKi;
+        *ki = pid_yaw_rotate.fKi;
     }
     if (kd != NULL)
     {
-        *kd = pid_yaw.fKd;
+        *kd = pid_yaw_rotate.fKd;
     }
 }
 
 void path_follow_set_rotate_yaw_feedforward(float feedforward_degps)
 {
-    path_yaw_feedforward_min_degps = fmaxf(feedforward_degps, 0.0f);
+    path_rotate_yaw_feedforward_degps = fmaxf(feedforward_degps, 0.0f);
 }
 
 float path_follow_get_rotate_yaw_feedforward(void)
 {
-    return path_yaw_feedforward_min_degps;
+    return path_rotate_yaw_feedforward_degps;
 }
 
 void path_follow_set_position_speed_factor(float factor)
@@ -1717,6 +1753,7 @@ void path_follow_reset_pose(float x_m, float y_m, float yaw_deg)
     g_pf.pose.yaw_deg = pf_wrap_deg(yaw_deg);
     pf_reset_motion_state();
     PID_Clear(&pid_yaw);
+    PID_Clear(&pid_yaw_rotate);
 }
 
 void path_follow_set_external_position(float x_m, float y_m, uint8 valid)
@@ -1814,7 +1851,7 @@ void path_follow_start_rotate_to_yaw(float target_yaw_deg)
 {
     pf_apply_path(NULL, 0U, g_pf.default_grid_m, 0U);
     path_follow_set_target_yaw(target_yaw_deg);
-    PID_Clear(&pid_yaw);
+    PID_Clear(&pid_yaw_rotate);
     g_pf.rotate_only_active = 1U;
 }
 
@@ -1852,7 +1889,7 @@ void path_follow_update(float yaw_deg, path_follow_output_t *out)
         if (fabsf(yaw_error_deg) <= g_pf.yaw_tolerance_deg)
         {
             g_pf.rotate_only_active = 0U;
-            PID_Clear(&pid_yaw);
+            PID_Clear(&pid_yaw_rotate);
             if (out != NULL)
             {
                 out->reached = 1U;
@@ -1860,7 +1897,7 @@ void path_follow_update(float yaw_deg, path_follow_output_t *out)
             return;
         }
 
-        pf_output_yaw_hold(yaw_deg, out);
+        pf_output_rotate(yaw_deg, out);
         return;
     }
 
@@ -1922,7 +1959,9 @@ void path_follow_update(float yaw_deg, path_follow_output_t *out)
                          &out->vx_cmd,
                          &out->vy_cmd);
         out->vx_cmd += pf_y_crosstalk_x_comp(out->vy_cmd);
-        out->omega_cmd = pf_yaw_command_radps(yaw_deg);
+        out->omega_cmd = pf_yaw_command_radps(yaw_deg,
+                                              &pid_yaw,
+                                              path_yaw_feedforward_min_degps);
         out->active = 1U;
         out->reached = 0U;
         out->target_idx = g_pf.target_idx;

@@ -109,6 +109,8 @@ float g_control_prestart_depart_compensate_m = -0.025f;
 #define CONTROL_IDENTIFY_RECOG_TIMEOUT_TICKS 80U
 #define CONTROL_IDENTIFY_RECOG_ACCEPT_SCORE 85
 #define CONTROL_IDENTIFY_RECOG_CONFIRM_SCORE 70
+#define CONTROL_IDENTIFY_NEAR_DISTANCE_CELLS 1U
+#define CONTROL_IDENTIFY_FAR_DISTANCE_CELLS  3U
 /* 连续超时多少次之后才真正重发识别命令（避免在摄像头处理过程中频繁清 FIFO 重发）。 */
 #define CONTROL_IDENTIFY_RECOG_MAX_RETRIES 1U
 #define CONTROL_IDENTIFY_ID_UNASSIGNED 0xFFU
@@ -2051,7 +2053,7 @@ static uint8 identify_action_stub(const control_identify_target_t *target)
     {
         return 1U;
     }
-    if (target->recog_distance == VISION_RECOGNITION_DISTANCE_TWO_GRID ||
+    if (target->recog_distance == VISION_RECOGNITION_DISTANCE_THREE_GRID ||
         target->recog_distance == VISION_RECOGNITION_DISTANCE_ONE_GRID)
     {
         distance = target->recog_distance;
@@ -2223,7 +2225,11 @@ static void add_identify_target_if_nearest(Position stand_pos,
 
     if (slot < g_identify_target_count)
     {
-        uint8 old_dist = (g_identify_targets[slot].recog_distance == VISION_RECOGNITION_DISTANCE_TWO_GRID) ? 2U : 1U;
+        uint8 old_dist =
+            (g_identify_targets[slot].recog_distance ==
+             VISION_RECOGNITION_DISTANCE_THREE_GRID) ?
+                CONTROL_IDENTIFY_FAR_DISTANCE_CELLS :
+                CONTROL_IDENTIFY_NEAR_DISTANCE_CELLS;
         if ((uint8)manhattan >= old_dist)
         {
             return;
@@ -2242,8 +2248,10 @@ static void add_identify_target_if_nearest(Position stand_pos,
     candidate.stand_pos_map = stand_pos;
     candidate.face_dir = face_dir;
     candidate.obj_type = obj_type;
-    candidate.recog_distance = (manhattan == 2) ? VISION_RECOGNITION_DISTANCE_TWO_GRID :
-                                                 VISION_RECOGNITION_DISTANCE_ONE_GRID;
+    candidate.recog_distance =
+        (manhattan == (int32)CONTROL_IDENTIFY_FAR_DISTANCE_CELLS) ?
+            VISION_RECOGNITION_DISTANCE_THREE_GRID :
+            VISION_RECOGNITION_DISTANCE_ONE_GRID;
     candidate.obj_index = obj_index;
     g_identify_targets[slot] = candidate;
 }
@@ -2284,6 +2292,9 @@ static uint8 identify_target_has_clear_view(const Position *map_point,
     int32 abs_col = 0;
     int32 manhattan = 0;
     Position mid = {0};
+    int32 row_step = 0;
+    int32 col_step = 0;
+    int32 step = 0;
 
     if (map_point == NULL || object_pos == NULL)
         return 0U;
@@ -2294,18 +2305,25 @@ static uint8 identify_target_has_clear_view(const Position *map_point,
     abs_col = (d_col >= 0) ? d_col : -d_col;
     manhattan = abs_row + abs_col;
 
-    if ((manhattan != 1 && manhattan != 2) ||
+    if ((manhattan != (int32)CONTROL_IDENTIFY_NEAR_DISTANCE_CELLS &&
+         manhattan != (int32)CONTROL_IDENTIFY_FAR_DISTANCE_CELLS) ||
         (d_row != 0 && d_col != 0))
     {
         return 0U;
     }
-    if (manhattan == 1)
+    if (manhattan == (int32)CONTROL_IDENTIFY_NEAR_DISTANCE_CELLS)
         return 1U;
 
-    mid.row = (uint8)((int32)map_point->row + ((d_row > 0) ? 1 : ((d_row < 0) ? -1 : 0)));
-    mid.col = (uint8)((int32)map_point->col + ((d_col > 0) ? 1 : ((d_col < 0) ? -1 : 0)));
-
-    return identify_cell_has_blocker(mid.row, mid.col) ? 0U : 1U;
+    row_step = (d_row > 0) ? 1 : ((d_row < 0) ? -1 : 0);
+    col_step = (d_col > 0) ? 1 : ((d_col < 0) ? -1 : 0);
+    for (step = 1; step < manhattan; step++)
+    {
+        mid.row = (uint8)((int32)map_point->row + row_step * step);
+        mid.col = (uint8)((int32)map_point->col + col_step * step);
+        if (identify_cell_has_blocker(mid.row, mid.col))
+            return 0U;
+    }
+    return 1U;
 }
 
 static uint8 collect_identify_targets_on_exec_point(const Position *exec_point)
@@ -2339,7 +2357,8 @@ static uint8 collect_identify_targets_on_exec_point(const Position *exec_point)
         d_row = (int32)boxes[i].row - (int32)map_point.row;
         d_col = (int32)boxes[i].col - (int32)map_point.col;
         manhattan = ((d_row >= 0) ? d_row : -d_row) + ((d_col >= 0) ? d_col : -d_col);
-        if ((manhattan != 1 && manhattan != 2) ||
+        if ((manhattan != (int32)CONTROL_IDENTIFY_NEAR_DISTANCE_CELLS &&
+             manhattan != (int32)CONTROL_IDENTIFY_FAR_DISTANCE_CELLS) ||
             (d_row != 0 && d_col != 0))
         {
             continue;
@@ -2370,7 +2389,8 @@ static uint8 collect_identify_targets_on_exec_point(const Position *exec_point)
         d_row = (int32)targets[i].row - (int32)map_point.row;
         d_col = (int32)targets[i].col - (int32)map_point.col;
         manhattan = ((d_row >= 0) ? d_row : -d_row) + ((d_col >= 0) ? d_col : -d_col);
-        if ((manhattan != 1 && manhattan != 2) ||
+        if ((manhattan != (int32)CONTROL_IDENTIFY_NEAR_DISTANCE_CELLS &&
+             manhattan != (int32)CONTROL_IDENTIFY_FAR_DISTANCE_CELLS) ||
             (d_row != 0 && d_col != 0))
         {
             continue;

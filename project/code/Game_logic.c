@@ -32,6 +32,8 @@
 #define PAIR_REACH_CACHE_SIZE 96
 #define INFER_WALL_CACHE_SIZE 192
 #define IDENTIFY_NEED_CACHE_SIZE 96
+#define IDENTIFY_NEAR_DISTANCE_CELLS 1
+#define IDENTIFY_FAR_DISTANCE_CELLS  3
 /* 每项包含完整 path_plan_result（约 3.4 KB）。96 项会占用约 321 KB DTCM，
  * 挤压规划调用栈；循环缓存缩到 16 项只降低命中率，不改变搜索结果。 */
 #define IDENTIFY_BOMB_CACHE_SIZE 16
@@ -3375,6 +3377,9 @@ static int identify_stand_has_clear_view(const planning_state_t *state,
     int abs_dc = dc;
     int dist;
     Position mid;
+    int row_step;
+    int col_step;
+    int step;
 
     if (!state || !is_valid_cell(object_pos) || !is_valid_cell(stand))
         return 0;
@@ -3383,27 +3388,34 @@ static int identify_stand_has_clear_view(const planning_state_t *state,
     if (abs_dc < 0)
         abs_dc = -abs_dc;
     dist = abs_dr + abs_dc;
-    if ((dist != 1 && dist != 2) || (abs_dr != 0 && abs_dc != 0))
+    if ((dist != IDENTIFY_NEAR_DISTANCE_CELLS &&
+         dist != IDENTIFY_FAR_DISTANCE_CELLS) ||
+        (abs_dr != 0 && abs_dc != 0))
         return 0;
-    if (dist == 1)
+    if (dist == IDENTIFY_NEAR_DISTANCE_CELLS)
         return 1;
 
-    mid.row = (uint8)((int)object_pos.row + ((dr > 0) ? 1 : ((dr < 0) ? -1 : 0)));
-    mid.col = (uint8)((int)object_pos.col + ((dc > 0) ? 1 : ((dc < 0) ? -1 : 0)));
-    mid.id = 0;
+    row_step = (dr > 0) ? 1 : ((dr < 0) ? -1 : 0);
+    col_step = (dc > 0) ? 1 : ((dc < 0) ? -1 : 0);
+    for (step = 1; step < dist; step++)
+    {
+        mid.row = (uint8)((int)object_pos.row + row_step * step);
+        mid.col = (uint8)((int)object_pos.col + col_step * step);
+        mid.id = 0;
 
-    if (find_position_index(state->obstacles_state, state->obstacles_cnt, mid) >= 0)
-        return 0;
-    if (find_position_index(state->bombs_state, state->bombs_cnt, mid) >= 0)
-        return 0;
-    if (find_position_index(state->boxes_state, state->boxes_cnt, mid) >= 0)
-        return 0;
-    if (find_position_index(state->targets_state, state->targets_cnt, mid) >= 0)
-        return 0;
+        if (find_position_index(state->obstacles_state, state->obstacles_cnt, mid) >= 0)
+            return 0;
+        if (find_position_index(state->bombs_state, state->bombs_cnt, mid) >= 0)
+            return 0;
+        if (find_position_index(state->boxes_state, state->boxes_cnt, mid) >= 0)
+            return 0;
+        if (find_position_index(state->targets_state, state->targets_cnt, mid) >= 0)
+            return 0;
+    }
     return 1;
 }
 
-/* 在 dist 图上选择“对象四方向 1/2 格中最近站位”，避免重复求最短路。 */
+/* 在 dist 图上选择“对象四方向 1/3 格中最近站位”，避免重复求最短路。 */
 static int pick_best_adjacent_stand_by_dist(const planning_state_t *state,
                                             Position object_pos,
                                             const int *dist,
@@ -3412,7 +3424,12 @@ static int pick_best_adjacent_stand_by_dist(const planning_state_t *state,
 {
     const int dr[4] = {-1, 1, 0, 0};
     const int dc[4] = {0, 0, -1, 1};
+    const int identify_distances[2] = {
+        IDENTIFY_NEAR_DISTANCE_CELLS,
+        IDENTIFY_FAR_DISTANCE_CELLS
+    };
     int k;
+    int distance_index;
     int distance;
     int best_steps = INT_MAX;
     int best_distance = INT_MAX;
@@ -3421,8 +3438,9 @@ static int pick_best_adjacent_stand_by_dist(const planning_state_t *state,
     if (!state || !dist || !is_valid_cell(object_pos))
         return 0;
 
-    for (distance = 1; distance <= 2; distance++)  /* 识别允许1/2格（直线、中间无遮挡），与 plus 的 REACH_DIST_BOTH 对齐 */
+    for (distance_index = 0; distance_index < 2; distance_index++)
     {
+        distance = identify_distances[distance_index];
         for (k = 0; k < 4; k++)
         {
             Position stand = {(uint8)((int)object_pos.row + dr[k] * distance),
@@ -3490,7 +3508,7 @@ static int estimate_bomb_action_lb_by_dist(const planning_state_t *state, const 
     return best;
 }
 
-/* 识别点统一标记，具体一格/两格距离交给控制流程实时判断。 */
+/* 识别点统一标记，具体一格/三格距离交给控制流程实时判断。 */
 static uint8 identify_marker_by_relative(Position stand, Position object_pos)
 {
     (void)stand;
@@ -3611,7 +3629,7 @@ static int identify_need_proactive_unlock(const planning_state_t *state,
     return 0;
 }
 
-/* 规划小车到“目标点四方向 1/2 格任一可达格”的最短路径。 */
+/* 规划小车到“目标点四方向 1/3 格任一可达格”的最短路径。 */
 static int build_best_adjacent_identify_path(const planning_state_t *state,
                                              Position object_pos,
                                              Position *out_path,
@@ -3620,7 +3638,12 @@ static int build_best_adjacent_identify_path(const planning_state_t *state,
 {
     const int dr[4] = {-1, 1, 0, 0};
     const int dc[4] = {0, 0, -1, 1};
+    const int identify_distances[2] = {
+        IDENTIFY_NEAR_DISTANCE_CELLS,
+        IDENTIFY_FAR_DISTANCE_CELLS
+    };
     int k;
+    int distance_index;
     int distance;
     int best_len = 0;
     int best_distance = INT_MAX;
@@ -3632,8 +3655,9 @@ static int build_best_adjacent_identify_path(const planning_state_t *state,
     if (!is_valid_cell(state->car_state) || !is_valid_cell(object_pos))
         return 0;
 
-    for (distance = 1; distance <= 2; distance++)  /* 识别允许1/2格（直线、中间无遮挡），与 plus 的 REACH_DIST_BOTH 对齐 */
+    for (distance_index = 0; distance_index < 2; distance_index++)
     {
+        distance = identify_distances[distance_index];
         for (k = 0; k < 4; k++)
         {
             Position tmp_path[MAP_ROWS * MAP_COLS];
@@ -3701,7 +3725,8 @@ static int collect_identify_wall_candidates(const planning_state_t *state,
     for (i = 0; i < state->boxes_cnt; i++)
     {
         Position obj = state->boxes_state[i];
-        for (distance = 1; distance <= 2; distance++)
+        /* 1格站位、3格站位及中间的2格视线阻挡都可能需要炸开。 */
+        for (distance = 1; distance <= IDENTIFY_FAR_DISTANCE_CELLS; distance++)
         {
             for (k = 0; k < 4; k++)
             {
@@ -3722,7 +3747,7 @@ static int collect_identify_wall_candidates(const planning_state_t *state,
     for (i = 0; i < state->targets_cnt; i++)
     {
         Position obj = state->targets_state[i];
-        for (distance = 1; distance <= 2; distance++)
+        for (distance = 1; distance <= IDENTIFY_FAR_DISTANCE_CELLS; distance++)
         {
             for (k = 0; k < 4; k++)
             {

@@ -56,8 +56,8 @@
  */
 #define VISION_SNAP_MODE_IMG_ONE_GRID 0U
 #define VISION_SNAP_MODE_NUM_ONE_GRID 1U
-#define VISION_SNAP_MODE_IMG_TWO_GRID 2U
-#define VISION_SNAP_MODE_NUM_TWO_GRID 3U
+#define VISION_SNAP_MODE_IMG_FAR 2U
+#define VISION_SNAP_MODE_NUM_FAR 3U
 
 /* 地图字符语义（供上层业务使用） */
 #define MAP_SYMBOL_OBSTACLE '#'
@@ -75,7 +75,8 @@ typedef enum {
 
 typedef enum {
     VISION_RECOGNITION_DISTANCE_NONE = 0U,
-    VISION_RECOGNITION_DISTANCE_TWO_GRID = 1U,
+    /* 三格识别沿用原远距离摄像头模式及协议数值。 */
+    VISION_RECOGNITION_DISTANCE_THREE_GRID = 1U,
     VISION_RECOGNITION_DISTANCE_ONE_GRID = 2U
 } VisionRecognitionDistance;
 
@@ -118,9 +119,9 @@ bool uart_send_vision_request(VisionRecognitionType type, VisionRecognitionDista
 bool uart_send_vision_request_with_sequence(VisionRecognitionType type,
                                             VisionRecognitionDistance distance,
                                             uint16 *out_sequence);
-/* 向视觉摄像头发送数字识别请求：distance=1 两格，distance=2 一格。 */
+/* 向视觉摄像头发送数字识别请求：distance=1 三格（远），distance=2 一格（近）。 */
 bool uart_send_vision_num_request_by_distance(VisionRecognitionDistance distance);
-/* 向视觉摄像头发送图像识别请求：distance=1 两格，distance=2 一格。 */
+/* 向视觉摄像头发送图像识别请求：distance=1 三格（远），distance=2 一格（近）。 */
 bool uart_send_vision_img_request_by_distance(VisionRecognitionDistance distance);
 /* 兼容调用：默认使用近距离数字识别。 */
 void uart_send_vision_num_request(void);

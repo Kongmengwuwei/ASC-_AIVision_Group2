@@ -55,8 +55,6 @@ static Position s_safe_relocation_raw_path[PATH_SAFE_RELOCATION_MAX_POINTS] = {{
 static path_map_snapshot_t s_stage_maps[PATH_STAGE_SNAPSHOT_CAPACITY];
 static uint8 s_raw_stage_index[MAX_CAR_PATH] = {0U};
 static uint8 s_stage_model_valid = 0U;
-/* 识别路径近距离替换后处理默认关闭；保留运行期开关便于对照测试。 */
-static uint8 g_path_identify_near_postprocess_enabled = 1U;
 
 void path_remap_exec_point(Position *p)
 {
@@ -96,27 +94,6 @@ void path_inverse_remap_exec_point(Position *p)
     p->row = p->col;
     p->col = temp;
 #endif
-}
-
-void path_set_diagonal_enabled(uint8 enabled)
-{
-    /* Compatibility API: diagonal shortcuts are always enabled. */
-    (void)enabled;
-}
-
-uint8 path_get_diagonal_enabled(void)
-{
-    return 1U;
-}
-
-void path_set_identify_near_postprocess_enabled(uint8 enabled)
-{
-    g_path_identify_near_postprocess_enabled = (enabled != 0U) ? 1U : 0U;
-}
-
-uint8 path_get_identify_near_postprocess_enabled(void)
-{
-    return g_path_identify_near_postprocess_enabled;
 }
 
 static uint8 path_is_same_grid_cell(const Position *a, const Position *b)
@@ -1606,7 +1583,7 @@ static void path_optimize_identification_markers(size_t raw_steps,
     uint16 current_yaw_turn_cost;
     size_t pass;
 
-    if (!g_path_identify_near_postprocess_enabled || !s_stage_model_valid ||
+    if (!s_stage_model_valid ||
         raw_steps > PATH_IDENTIFY_POSTPROCESS_MAX_RAW_STEPS ||
         pre_map == NULL || exec_path == NULL || exec_steps == NULL ||
         pre_map->boxes_count > PATH_IDENTIFY_OBJECT_MASK_CAPACITY ||

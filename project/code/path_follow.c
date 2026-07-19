@@ -4,7 +4,7 @@
 #include "Motor.h"
 #include "pid.h"
 #include "Attitude.h"
-#include "zf_device_ips200.h"
+#include "zf_common_interrupt.h"
 
 #include <math.h>
 #include <string.h>
@@ -165,32 +165,15 @@ typedef struct
 } pf_context_t;
 
 static pf_context_t g_pf;
-static Position g_single_target_path[2];
-static Position g_offset_path[3];
 static Position g_pose_move_path[3];
-static uint8 g_stationary_yaw_hold_enabled;
-static volatile uint8 g_bluetooth_report_pending;
+static volatile uint8 g_stationary_yaw_hold_enabled;
 
-/* Public compatibility objects declared by path_follow.h. */
-tagPID_T pid_world_x;
-tagPID_T pid_world_y;
 tagPID_T pid_stay;
 tagPID_T pid_stay_y;
 tagPID_T pid_stay_backward;
 tagPID_T pid_yaw;
 static tagPID_T pid_yaw_rotate;
-tagPID_T pid_accel_yaw;
-
 uint8 car_direction = 0U;
-uint8 wait_stop = 0U;
-
-float prestart_move_left_m = 0.12f;
-float prestart_move_right_m = 0.00f;
-float prestart_move_forward_m = 0.35f;
-float prestart_move_backward_m = 0.00f;
-
-/* Position-loop tuning entry retained from the original module. */
-float path_corner_commit_lateral_gate_min_m = PF_POSITION_TOLERANCE_M;
 float path_hold_trim_release_distance = PF_POSITION_LOOP_RELEASE_M;
 
 /* Runtime-tunable line guidance and yaw low-speed feedforward. */
@@ -203,12 +186,6 @@ static float path_rotate_yaw_feedforward_degps = PF_ROTATE_YAW_FEEDFORWARD_DEGPS
 /* Runtime copies of the boot defaults; BlueSerial sliders tune these. */
 float path_y_crosstalk_left_x_comp_k = PF_Y_CROSSTALK_LEFT_X_COMP_K;
 float path_y_crosstalk_right_x_comp_k = PF_Y_CROSSTALK_RIGHT_X_COMP_K;
-
-/* Other legacy compensation variables remain link-compatible but unused. */
-float path_yaw_target_base_comp_deg = 0.0f;
-float path_yaw_target_error_comp_k = 0.0f;
-float path_rotate_center_offset_x_cm = 0.0f;
-float path_rotate_center_offset_y_cm = 0.0f;
 
 /*
  * Compatibility state for the newer main program.  The restored controller
@@ -250,7 +227,6 @@ static float pf_clamp(float value, float min_value, float max_value)
     }
     return value;
 }
-
 static float pf_y_crosstalk_x_comp(float vy)
 {
     if (vy > 0.0f)
@@ -339,8 +315,6 @@ static void pf_reset_motion_state(void)
 {
     pf_reset_speed();
     pf_clear_debug();
-    PID_Clear(&pid_world_x);
-    PID_Clear(&pid_world_y);
     PID_Clear(&pid_stay);
     PID_Clear(&pid_stay_y);
     PID_Clear(&pid_stay_backward);
@@ -1463,6 +1437,8 @@ static void pf_apply_path(const Position *path,
                           float grid_m,
                           uint8 pause_events_enabled)
 {
+    uint32 primask = interrupt_global_disable();
+
     g_pf.path = path;
     g_pf.steps = steps;
     g_pf.target_idx = 0U;
@@ -1483,6 +1459,7 @@ static void pf_apply_path(const Position *path,
     {
         g_pf.target_idx = 1U;
     }
+    interrupt_global_enable(primask);
 }
 
 static void pf_start_axis_move(float target_x_m,
@@ -1493,6 +1470,7 @@ static void pf_start_axis_move(float target_x_m,
     const float epsilon_m = 0.001f;
     const float local_center = 127.0f;
     const float local_half_span = 120.0f;
+    uint32 primask = interrupt_global_disable();
     float dx_m = target_x_m - g_pf.pose.x_m;
     float dy_m = target_y_m - g_pf.pose.y_m;
     float max_delta_m = fmaxf(fabsf(dx_m), fabsf(dy_m));
@@ -1505,12 +1483,14 @@ static void pf_start_axis_move(float target_x_m,
 
     if (buffer == NULL || capacity < 3U)
     {
+        interrupt_global_enable(primask);
         return;
     }
 
     if (fabsf(dx_m) <= epsilon_m && fabsf(dy_m) <= epsilon_m)
     {
         pf_apply_path(NULL, 0U, PF_TEMP_PATH_GRID_M, 0U);
+        interrupt_global_enable(primask);
         return;
     }
 
@@ -1558,6 +1538,7 @@ static void pf_start_axis_move(float target_x_m,
     pf_apply_path(buffer, count, local_grid_m, 0U);
     g_pf.path_origin_x_m = g_pf.pose.x_m - local_center * local_grid_m;
     g_pf.path_origin_y_m = g_pf.pose.y_m - local_center * local_grid_m;
+    interrupt_global_enable(primask);
 }
 
 void path_follow_init(float grid_size_m, float pulses_per_meter)
@@ -1574,7 +1555,6 @@ void path_follow_init(float grid_size_m, float pulses_per_meter)
     g_pf.target_yaw_deg = 0.0f;
 
     g_stationary_yaw_hold_enabled = 0U;
-    g_bluetooth_report_pending = 0U;
     g_speed_test_enabled = 0U;
     g_speed_test_yaw_enabled = 0U;
     g_position_speed_factor_x = 1.0f;
@@ -1620,10 +1600,6 @@ void path_follow_init(float grid_size_m, float pulses_per_meter)
                        PF_POSITION_FILTER_ALPHA);
     pid_stay_backward.fMax_Iout = PF_POSITION_MAX_IOUT_CMPS;
 
-    /* Historical world PID objects remain link-compatible but inactive. */
-    pf_init_pid_object(&pid_world_x, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f);
-    pf_init_pid_object(&pid_world_y, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f);
-    pf_init_pid_object(&pid_accel_yaw, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f);
 }
 
 static void pf_set_legacy_position_pid_gains(float kp, float ki, float kd)
@@ -1645,11 +1621,6 @@ static void pf_set_legacy_position_pid_gains(float kp, float ki, float kd)
     PID_Clear(&pid_stay);
     PID_Clear(&pid_stay_y);
     PID_Clear(&pid_stay_backward);
-}
-
-void path_follow_set_position_pid_gains(float kp, float ki, float kd)
-{
-    pf_set_legacy_position_pid_gains(kp, ki, kd);
 }
 
 void path_follow_set_position_pid_gains_x(float kp, float ki, float kd)
@@ -1749,6 +1720,8 @@ void path_follow_set_speed_test_mode(uint8 enabled, uint8 yaw_enabled)
 
 void path_follow_reset_pose(float x_m, float y_m, float yaw_deg)
 {
+    uint32 primask = interrupt_global_disable();
+
     g_pf.pose.x_m = x_m;
     g_pf.pose.y_m = y_m;
     /* yaw_deg is a measurement used only to reset the pose.  The commanded
@@ -1757,14 +1730,7 @@ void path_follow_reset_pose(float x_m, float y_m, float yaw_deg)
     pf_reset_motion_state();
     PID_Clear(&pid_yaw);
     PID_Clear(&pid_yaw_rotate);
-}
-
-void path_follow_set_external_position(float x_m, float y_m, uint8 valid)
-{
-    /* Compatibility stub. Automatic external-position correction is removed. */
-    (void)x_m;
-    (void)y_m;
-    (void)valid;
+    interrupt_global_enable(primask);
 }
 
 void path_follow_set_path(const Position *path, size_t steps)
@@ -1804,10 +1770,12 @@ void path_follow_set_pause_indices(const size_t *pause_indices,
                                    uint32 pause_ms)
 {
     size_t i;
+    uint32 primask = interrupt_global_disable();
 
     pf_clear_pause_config();
     if (pause_indices == NULL || pause_count == 0U || pause_ms == 0U)
     {
+        interrupt_global_enable(primask);
         return;
     }
 
@@ -1818,31 +1786,29 @@ void path_follow_set_pause_indices(const size_t *pause_indices,
         g_pf.pause_indices[i] = pause_indices[i];
     }
     g_pf.pause_cycles_cfg = pf_ms_to_cycles(pause_ms);
-}
-
-void path_follow_set_target(int target_row, int target_col)
-{
-    g_single_target_path[0].row = (int)lroundf(g_pf.pose.x_m / g_pf.default_grid_m);
-    g_single_target_path[0].col = (int)lroundf(g_pf.pose.y_m / g_pf.default_grid_m);
-    g_single_target_path[1].row = target_row;
-    g_single_target_path[1].col = target_col;
-    pf_apply_path(g_single_target_path, 2U, g_pf.default_grid_m, 0U);
+    interrupt_global_enable(primask);
 }
 
 void path_follow_set_target_yaw(float target_yaw_deg)
 {
+    uint32 primask = interrupt_global_disable();
+
     /* Global invariant: commanded headings are absolute map axes.  Measured
        yaw must never become the following segment's heading reference. */
     g_pf.target_yaw_deg = pf_cardinal_target_deg(target_yaw_deg);
+    interrupt_global_enable(primask);
 }
 
 void path_follow_set_stationary_yaw_hold_enabled(uint8 enabled)
 {
+    uint32 primask = interrupt_global_disable();
+
     g_stationary_yaw_hold_enabled = enabled ? 1U : 0U;
     if (!g_stationary_yaw_hold_enabled)
     {
         PID_Clear(&pid_yaw);
     }
+    interrupt_global_enable(primask);
 }
 
 uint8 path_follow_get_stationary_yaw_hold_enabled(void)
@@ -1852,18 +1818,13 @@ uint8 path_follow_get_stationary_yaw_hold_enabled(void)
 
 void path_follow_start_rotate_to_yaw(float target_yaw_deg)
 {
+    uint32 primask = interrupt_global_disable();
+
     pf_apply_path(NULL, 0U, g_pf.default_grid_m, 0U);
     path_follow_set_target_yaw(target_yaw_deg);
     PID_Clear(&pid_yaw_rotate);
     g_pf.rotate_only_active = 1U;
-}
-
-void path_follow_start_offset_move(float delta_x_m, float delta_y_m)
-{
-    pf_start_axis_move(g_pf.pose.x_m + delta_x_m,
-                       g_pf.pose.y_m + delta_y_m,
-                       g_offset_path,
-                       sizeof(g_offset_path) / sizeof(g_offset_path[0]));
+    interrupt_global_enable(primask);
 }
 
 void path_follow_start_pose_correction(float target_x_m, float target_y_m)
@@ -1978,12 +1939,6 @@ void path_follow_update_yaw_hold(float yaw_deg, path_follow_output_t *out)
     pf_output_yaw_hold(yaw_deg, out);
 }
 
-/* Historical test entry kept for source-level compatibility. */
-void path_follow_update_test(float yaw_deg, path_follow_output_t *out)
-{
-    path_follow_update(yaw_deg, out);
-}
-
 void distance_speed_strategy(void)
 {
     path_follow_output_t output = {0};
@@ -2007,10 +1962,14 @@ void distance_speed_strategy(void)
 
 void path_follow_get_status(path_follow_status_t *status)
 {
+    uint32 primask;
+
     if (status == NULL)
     {
         return;
     }
+
+    primask = interrupt_global_disable();
 
     memset(status, 0, sizeof(*status));
     status->x_m = g_pf.pose.x_m;
@@ -2056,94 +2015,5 @@ void path_follow_get_status(path_follow_status_t *status)
                           &status->target_x_m,
                           &status->target_y_m);
     }
-}
-
-void path_follow_draw_status(void)
-{
-    path_follow_status_t status = {0};
-
-    path_follow_get_status(&status);
-    ips200_show_string(0, 112, "st_x_m");
-    ips200_show_float(70, 112, status.x_m, 2, 4);
-    ips200_show_string(0, 128, "st_y_m");
-    ips200_show_float(70, 128, status.y_m, 2, 4);
-    ips200_show_string(0, 144, "st_yaw");
-    ips200_show_float(70, 144, status.yaw_deg, 3, 2);
-    ips200_show_string(0, 160, "target_idx");
-    ips200_show_uint(90, 160, status.target_idx, 3);
-    ips200_show_string(0, 176, "target_x_m");
-    ips200_show_float(90, 176, status.target_x_m, 2, 3);
-    ips200_show_string(0, 192, "target_y_m");
-    ips200_show_float(90, 192, status.target_y_m, 2, 3);
-    ips200_show_string(0, 208, "speed_ref");
-    ips200_show_float(90, 208, status.speed_ref_cmps, 3, 1);
-    ips200_show_string(0, 224, "seg_axis");
-    ips200_show_uint(90, 224, status.segment_axis, 1);
-}
-
-void path_follow_request_bluetooth_report(void)
-{
-    g_bluetooth_report_pending = 1U;
-}
-
-void path_follow_service_bluetooth_report(void)
-{
-    /* Kept as a link-compatible hook; reporting belongs in BlueSerial.c. */
-    g_bluetooth_report_pending = 0U;
-}
-
-float path_follow_heading_deg(Position from, Position to)
-{
-    float dx = (float)(to.row - from.row);
-    float dy = (float)(to.col - from.col);
-
-    if (dx == 0.0f && dy == 0.0f)
-    {
-        return 0.0f;
-    }
-    return atan2f(dy, dx) * (180.0f / (float)M_PI);
-}
-
-size_t path_follow_extract_corners(const Position *path,
-                                   size_t path_steps,
-                                   Position *corner_buffer,
-                                   size_t corner_capacity)
-{
-    size_t i;
-    size_t corner_count = 0U;
-
-    if (path == NULL || path_steps == 0U ||
-        corner_buffer == NULL || corner_capacity == 0U)
-    {
-        return 0U;
-    }
-
-    corner_buffer[corner_count++] = path[0];
-    if (path_steps == 1U)
-    {
-        return corner_count;
-    }
-
-    for (i = 1U; i + 1U < path_steps; ++i)
-    {
-        int dx_before = path[i].row - path[i - 1U].row;
-        int dy_before = path[i].col - path[i - 1U].col;
-        int dx_after = path[i + 1U].row - path[i].row;
-        int dy_after = path[i + 1U].col - path[i].col;
-
-        if (dx_before != dx_after || dy_before != dy_after)
-        {
-            if (corner_count >= corner_capacity)
-            {
-                return corner_count;
-            }
-            corner_buffer[corner_count++] = path[i];
-        }
-    }
-
-    if (corner_count < corner_capacity)
-    {
-        corner_buffer[corner_count++] = path[path_steps - 1U];
-    }
-    return corner_count;
+    interrupt_global_enable(primask);
 }

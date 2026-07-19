@@ -58,7 +58,6 @@
 /* Map/position camera line commands (CRLF terminated). */
 #define UART_CMD_MAP "START\r\n"
 #define UART_CMD_CAR "CARPOS\r\n"
-#define UART_CMD_CAR_STREAM_START "CARINIT\r\n"
 #define UART_CMD_CAR_STREAM_STOP "CARSTOP\r\n"
 
 /*
@@ -113,8 +112,6 @@ void process_blob_data(void);
 void uart_blob_clear_pending_data(void);
 /* 主循环调用：读取视觉识别 UART FIFO，并按行解析 B=/T= 序号、标签、置信度结果。 */
 void process_vision_data(void);
-/* 直接从多行字符串解析地图（不经过串口帧） */
-bool parse_map_from_string(const char *map_text);
 
 /* 串口接收中断回调（由 LPUART1_IRQHandler 调用） */
 void uart_blob_rx_interrupt_handler(void);
@@ -124,8 +121,7 @@ void vision_uart_rx_interrupt_handler(void);
 void uart_send_map_request(void);
 /* Request one C<x100>,<y100> position line with CARPOS. */
 void uart_send_car_request(void);
-/* Optional continuous position reporting controls. */
-void uart_start_car_stream(void);
+/* Stop any legacy continuous position reporting before a localization sample. */
 void uart_stop_car_stream(void);
 /* 按“识别类型 + 识别距离”发送 SNAP=<mode>,<seq> 命令。 */
 bool uart_send_vision_request(VisionRecognitionType type, VisionRecognitionDistance distance);
@@ -133,21 +129,10 @@ bool uart_send_vision_request(VisionRecognitionType type, VisionRecognitionDista
 bool uart_send_vision_request_with_sequence(VisionRecognitionType type,
                                             VisionRecognitionDistance distance,
                                             uint16 *out_sequence);
-/* 向视觉摄像头发送数字识别请求：distance=1 三格（远），distance=2 一格（近）。 */
-bool uart_send_vision_num_request_by_distance(VisionRecognitionDistance distance);
-/* 向视觉摄像头发送图像识别请求：distance=1 三格（远），distance=2 一格（近）。 */
-bool uart_send_vision_img_request_by_distance(VisionRecognitionDistance distance);
-/* 兼容调用：默认使用近距离数字识别。 */
-void uart_send_vision_num_request(void);
-/* 兼容调用：默认使用近距离图像识别。 */
-void uart_send_vision_img_request(void);
 /* 读取并清除“最新数字识别结果已更新”标志。 */
 bool vision_take_num_result(VisionRecognitionResult *out_result);
 /* 读取并清除“最新图案识别结果已更新”标志。 */
 bool vision_take_img_result(VisionRecognitionResult *out_result);
-/* 仅读取最近一次数字/图案识别结果，不清除 updated 标志。 */
-bool vision_get_latest_num_result(VisionRecognitionResult *out_result);
-bool vision_get_latest_img_result(VisionRecognitionResult *out_result);
 /* 清空视觉识别 FIFO、半包行缓冲和 updated 标志，常用于开始一次新识别前。 */
 void vision_clear_pending_data(void);
 
@@ -167,7 +152,7 @@ extern bool car_pose_updated;
 /* 解析计数与串口溢出标志 */
 extern uint8_t map_frame_count;
 extern uint8_t car_frame_count;
-extern bool uart_rx_overflow_flag;
+extern volatile bool uart_rx_overflow_flag;
 
 /* 视觉识别串口总开关：false 时 process_vision_data 直接返回。 */
 extern bool vision_data_processing_enabled;
@@ -186,7 +171,7 @@ extern bool vision_img_result_updated;
 extern uint8_t vision_num_frame_count;
 extern uint8_t vision_img_frame_count;
 extern uint8_t vision_bad_line_count;
-extern bool vision_uart_rx_overflow_flag;
+extern volatile bool vision_uart_rx_overflow_flag;
 extern bool vision_line_overflow_flag;
 extern bool vision_parse_error_flag;
 

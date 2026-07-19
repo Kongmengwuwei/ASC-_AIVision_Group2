@@ -66,7 +66,7 @@ float g_control_prestart_depart_compensate_m = -0.0f;
 #define CONTROL_CONTINUOUS_LEVEL_COUNT 3U
 #define CONTROL_CONTINUOUS_STOP_ENCODER_TOL 5
 #define CONTROL_CONTINUOUS_STOP_STABLE_LOOPS 3U
-/* 10 ms 控制节拍；检测到仍有未推进箱子时，下一关发车前额外等待 5 s。 */
+/* 10 ms 控制节拍；检测到仍有未推进箱子时，下一关发车前额外等待 3 s。 */
 #define CONTROL_CONTINUOUS_EXTRA_DEPART_WAIT_TICKS 300U
 #define CONTROL_DEPOT_CELL_HALF_EXTENT_M (0.5f * GRID_SIZE_M)
 
@@ -223,8 +223,7 @@ static uint8 g_plan_ready = 0U;
  * 推箱阶段使用的规划模式：
  * - 连续发车关卡一不识别，直接使用 Mode1；
  * - 连续发车关卡二/三识别后使用 Mode2；
- * - 单次发车识别后使用 Mode2；
- * - 仍保留 control_set_plan_mode() 作为外部手动覆盖入口。
+ * - 单次发车识别后使用 Mode2。
  */
 static control_plan_mode_t g_control_plan_mode = CONTROL_PLAN_MODE_1;
 static control_flow_phase_t g_control_flow_phase = CONTROL_FLOW_IDENTIFY;
@@ -4663,17 +4662,6 @@ const Position *control_get_exec_path(size_t *steps)
     return g_exec_path;
 }
 
-void control_set_diagonal_path_enabled(uint8 enabled)
-{
-    /* Compatibility API: diagonal execution paths are always enabled. */
-    (void)enabled;
-}
-
-uint8 control_get_diagonal_path_enabled(void)
-{
-    return 1U;
-}
-
 void control_set_checkpoint_vision_localization_enabled(uint8 enabled)
 {
     g_control_checkpoint_vision_localization_enabled = (enabled != 0U) ? 1U : 0U;
@@ -4692,17 +4680,6 @@ void control_set_last_pair_insurance_enabled(uint8 enabled)
 uint8 control_get_last_pair_insurance_enabled(void)
 {
     return g_control_last_pair_insurance_enabled;
-}
-
-void control_set_identify_prerotate_enabled(uint8 enabled)
-{
-    /* Compatibility API: identify pre-rotation is always enabled. */
-    (void)enabled;
-}
-
-uint8 control_get_identify_prerotate_enabled(void)
-{
-    return 1U;
 }
 
 void control_set_identify_id_fallback_enabled(uint8 enabled)
@@ -4727,25 +4704,6 @@ void control_set_continuous_levels_enabled(uint8 enabled)
 uint8 control_get_continuous_levels_enabled(void)
 {
     return g_control_continuous_levels_enabled;
-}
-
-/**
- * @brief 手动设置推箱阶段规划模式。
- *
- * 为了避免非法输入破坏流程，除 CONTROL_PLAN_MODE_1 外都按
- * CONTROL_PLAN_MODE_2 处理；识别阶段不再自动覆盖该值。
- */
-void control_set_plan_mode(control_plan_mode_t mode)
-{
-    if (mode == CONTROL_PLAN_MODE_1)
-    {
-        g_control_plan_mode = CONTROL_PLAN_MODE_1;
-    }
-    else
-    {
-        /* ʶ�����̶̹��������Զ�ִ�У��˴�����������׶�?Mode1/Mode2�� */
-        g_control_plan_mode = CONTROL_PLAN_MODE_2;
-    }
 }
 
 /**

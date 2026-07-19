@@ -86,7 +86,13 @@ void PIT_IRQHandler(void)
 
 void LPUART1_IRQHandler(void)
 {
-    if(kLPUART_RxDataRegFullFlag & LPUART_GetStatusFlags(LPUART1))
+    uint32 status = LPUART_GetStatusFlags(LPUART1);
+
+    if (status & kLPUART_RxOverrunFlag)
+    {
+        uart_rx_overflow_flag = true;
+    }
+    while(kLPUART_RxDataRegFullFlag & LPUART_GetStatusFlags(LPUART1))
     {
         extern void uart_blob_rx_interrupt_handler();
         uart_blob_rx_interrupt_handler();
@@ -123,7 +129,13 @@ void LPUART3_IRQHandler(void)
 void LPUART4_IRQHandler(void)
 {
 #if MOTOR_BOARD_USE_NEW
-    if(kLPUART_RxDataRegFullFlag & LPUART_GetStatusFlags(LPUART4))
+    uint32 status = LPUART_GetStatusFlags(LPUART4);
+
+    if (status & kLPUART_RxOverrunFlag)
+    {
+        vision_uart_rx_overflow_flag = true;
+    }
+    while(kLPUART_RxDataRegFullFlag & LPUART_GetStatusFlags(LPUART4))
     {
         extern void vision_uart_rx_interrupt_handler(void);
         vision_uart_rx_interrupt_handler();
@@ -158,7 +170,13 @@ void LPUART6_IRQHandler(void)
 
 void LPUART8_IRQHandler(void)
 {
-    if(kLPUART_RxDataRegFullFlag & LPUART_GetStatusFlags(LPUART8))
+#if !MOTOR_BOARD_USE_NEW && !MOTOR_OLD_BOARD_UART8_USE_BLUETOOTH
+    if (LPUART_GetStatusFlags(LPUART8) & kLPUART_RxOverrunFlag)
+    {
+        vision_uart_rx_overflow_flag = true;
+    }
+#endif
+    while(kLPUART_RxDataRegFullFlag & LPUART_GetStatusFlags(LPUART8))
     {
 #if MOTOR_BOARD_USE_NEW
         /* New board: UART8 is the Bluetooth tuning port. */

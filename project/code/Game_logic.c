@@ -22,7 +22,6 @@
 #define PAIR_STATUS_LATE     1
 #define PAIR_STATUS_OBSTACLE 2
 #define MAX_UNLOCK_WALL_CANDIDATES 8
-#define MAX_BOMB_ACTION_CANDIDATES 8
 #define FAST_BOX_DIRECT_PICK_STEPS 22
 #define FAST_UNLOCK_BOMB_TOPK_PASS1 4
 #define FAST_UNLOCK_WALL_TOPK_PASS1 4
@@ -89,6 +88,15 @@ typedef struct
     uint8 has_primary_bomb_pos;
     Position primary_bomb_pos;
 } round_action_t;
+
+/*
+ * Candidate actions contain a full path_plan_result (about 3.4 KB each).
+ * Keeping both ten-entry tables on the call stack made the bounded-lookahead
+ * path exceed 115 KB of stack.  The two functions can nest, so use separate
+ * OCRAM workspaces; planning runs only in the main loop and is not re-entrant.
+ */
+static AT_OCRAM_SECTION(round_action_t s_immediate_box_actions[MAX_TARGETS]);
+static AT_OCRAM_SECTION(round_action_t s_future_box_actions[MAX_TARGETS]);
 
 typedef struct
 {
@@ -2106,8 +2114,7 @@ static int pick_best_unlock_bomb_action_for_obstacles(const planning_state_t *st
     for (p = 0; p < pairs->count; p++)
     {
         const pair_task_t *pair = &pairs->item[p];
-        round_action_t actions[MAX_BOMB_ACTION_CANDIDATES];
-        round_action_t local_best;
+        round_action_t action;
         int action_cnt;
         int improve = 0;
         uint8 pair_id = pair->box_id_ref;
@@ -2120,30 +2127,28 @@ static int pick_best_unlock_bomb_action_for_obstacles(const planning_state_t *st
                                                    pairs,
                                                    p,
                                                    critical_owner_ptr,
-                                                   actions,
-                                                   MAX_BOMB_ACTION_CANDIDATES);
+                                                   &action,
+                                                   1);
         if (action_cnt <= 0)
             continue;
 
-        local_best = actions[0];
-
         {
             planning_state_t shadow_state = *state;
-            apply_bomb_action_result(&shadow_state, &local_best, 0, 0);
+            apply_bomb_action_result(&shadow_state, &action, 0, 0);
             if (pair_has_box_action_now(&shadow_state, pair, require_same_id))
                 improve = 1;
         }
 
         if (!has_best ||
             improve > best_improve ||
-            (improve == best_improve && local_best.steps < best_steps) ||
-            (improve == best_improve && local_best.steps == best_steps && pair_id < best_pair_id))
+            (improve == best_improve && action.steps < best_steps) ||
+            (improve == best_improve && action.steps == best_steps && pair_id < best_pair_id))
         {
             has_best = 1;
             best_improve = improve;
-            best_steps = local_best.steps;
+            best_steps = action.steps;
             best_pair_id = pair_id;
-            best_action = local_best;
+            best_action = action;
         }
     }
 
@@ -2344,7 +2349,7 @@ static int pick_best_box_action_immediate(const planning_state_t *state,
                                           int skip_late_pairs,
                                           round_action_t *out_action)
 {
-    round_action_t actions[MAX_TARGETS];
+    round_action_t *actions = s_immediate_box_actions;
     int action_cnt;
     int i;
     int best_idx;
@@ -2533,7 +2538,7 @@ static int pick_best_box_action_with_future(const planning_state_t *state,
                                             int skip_late_pairs,
                                             round_action_t *out_action)
 {
-    round_action_t actions[MAX_TARGETS];
+    round_action_t *actions = s_future_box_actions;
     int order[MAX_TARGETS];
     int critical_owner[MAX_BOMBS];
     int action_cnt;

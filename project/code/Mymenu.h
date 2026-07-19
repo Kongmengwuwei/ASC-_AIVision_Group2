@@ -22,11 +22,8 @@
 #define SETUP_LEN (5)            //步进参数数量
 #define SETUP_NUMBER_LEN (6)     //步进参数显示长度限制（数值长度+小数点）
 // 调参步进值
-static float SetupNumber[SETUP_LEN] = {0.01, 0.1, 1, 10, 100};
-static uint8_t SetupIndex = 2;
-
-extern uint8 car_go_flag;
-extern uint8 car_stop_flag;
+extern volatile uint8 car_go_flag;
+extern volatile uint8 car_stop_flag;
 
 //菜单初始化
 void Menu_Init(void);

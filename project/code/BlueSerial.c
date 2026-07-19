@@ -108,7 +108,7 @@ typedef struct
 } blueserial_speed_sample_t;
 
 static volatile uint8 g_rx_collecting = 0U;
-static volatile uint8 g_enabled = 1U;
+static volatile uint8 g_enabled = 0U;
 static uint8 g_initialized = 0U;
 static volatile uint8 g_rx_work_len = 0U;
 static char g_rx_work[BLUESERIAL_RX_FRAME_LEN];
@@ -1296,16 +1296,6 @@ void BlueSerial_SendByte(uint8 Byte)
     uart_write_byte(BLUESERIAL_UART, Byte);
 }
 
-void BlueSerial_SendArray(uint8 *Array, uint16 Length)
-{
-    uint16 i;
-
-    for (i = 0U; i < Length; ++i)
-    {
-        BlueSerial_SendByte(Array[i]);
-    }
-}
-
 void BlueSerial_SendString(char *String)
 {
     uint16 i;
@@ -1313,27 +1303,6 @@ void BlueSerial_SendString(char *String)
     for (i = 0U; String[i] != '\0'; ++i)
     {
         BlueSerial_SendByte((uint8)String[i]);
-    }
-}
-
-uint32 BlueSerial_Pow(uint32 X, uint32 Y)
-{
-    uint32 Result = 1U;
-
-    while (Y--)
-    {
-        Result *= X;
-    }
-    return Result;
-}
-
-void BlueSerial_SendNumber(uint32 Number, uint8 Length)
-{
-    uint8 i;
-
-    for (i = 0U; i < Length; ++i)
-    {
-        BlueSerial_SendByte((uint8)(Number / BlueSerial_Pow(10U, Length - i - 1U) % 10U + '0'));
     }
 }
 

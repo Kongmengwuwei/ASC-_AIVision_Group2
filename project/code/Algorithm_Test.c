@@ -176,11 +176,6 @@ uint8 Algorithm_Test_PresetInput_IsEnabled(void)
     return s_preset_input_enabled;
 }
 
-const MapPresetConfig *Algorithm_Test_PresetInput_GetActive(void)
-{
-    return get_active_preset();
-}
-
 map_preset_plan_mode_t Algorithm_Test_PresetInput_GetPlanMode(void)
 {
     const MapPresetConfig *preset = get_active_preset();

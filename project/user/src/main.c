@@ -43,7 +43,6 @@
 int main(void)
 {
   clock_init(SYSTEM_CLOCK_600M); // 不可删除
-  debug_init();                  // 调试端口初始化
   // 模块初始化
   system_delay_ms(300);                          // 等待主板其他外设上电完成
   flash_init();
@@ -130,23 +129,7 @@ void pit_1_handler(void)
   // 电机输出控制：按运行/停车标志选择控制分支
   if (car_go_flag == 1 && car_stop_flag == 0)
   {
-    if (wait_stop == 1) // 兼容历史“等待完全停稳”模式。
-    {
-      motor_control(car_stop_array);
-      // 四轮都接近静止后清空 PID 累积并断 PWM
-      if (abs(up_L_all) < 5 && abs(up_R_all) < 5 && abs(down_L_all) < 5 && abs(down_R_all) < 5)
-      {
-        PID_Clear(&ULpid);
-        PID_Clear(&URpid);
-        PID_Clear(&DLpid);
-        PID_Clear(&DRpid);
-        motor_pwm(0, 0, 0, 0);
-      }
-    }
-    else
-    {
-      motor_control(speed_encoder);
-    }
+    motor_control(speed_encoder);
   }
   else if (car_go_flag == 1 && car_stop_flag == 1)
   {

@@ -21,6 +21,12 @@
 #define CAR_LINE_COUNT             3U
 #define CAMERA_GRID_COORD_SCALE    100.0f
 #define CAMERA_MAP_BORDER_CELLS    1.0f
+#define CAMERA_RAW_COORD_MIN       0L
+#define CAMERA_RAW_X_MAX           ((long)(MAP_COLS + 1) * 100L)
+#define CAMERA_RAW_Y_MAX           ((long)(MAP_ROWS + 1) * 100L)
+#define CAMERA_LEGACY_RAW_X_MAX    ((int32)MAP_COLS * 100)
+#define CAMERA_LEGACY_RAW_Y_MAX    ((int32)MAP_ROWS * 100)
+#define CAMERA_LEGACY_YAW_ABS_MAX  36000
 
 typedef enum {
     FRAME_TYPE_NONE = 0,
@@ -51,7 +57,7 @@ bool car_pose_updated = false;
 /* 统计计数与异常标志 */
 uint8_t map_frame_count = 0U;
 uint8_t car_frame_count = 0U;
-bool uart_rx_overflow_flag = false;
+volatile bool uart_rx_overflow_flag = false;
 
 /*
  * ===================== 图案/数字识别摄像头串口模块 =====================
@@ -86,7 +92,7 @@ bool vision_img_result_updated = false;
 uint8_t vision_num_frame_count = 0U;
 uint8_t vision_img_frame_count = 0U;
 uint8_t vision_bad_line_count = 0U;
-bool vision_uart_rx_overflow_flag = false;
+volatile bool vision_uart_rx_overflow_flag = false;
 bool vision_line_overflow_flag = false;
 bool vision_parse_error_flag = false;
 static uint16 vision_next_request_sequence = 0U;
@@ -417,34 +423,6 @@ static bool parse_map_payload(const uint8_t *payload, uint16_t payload_len)
     return true;
 }
 
-bool parse_map_from_string(const char *map_text)
-{
-    size_t payload_len = 0U;
-    uint8_t temp_payload[FRAME_BUF_SIZE] = {0};
-
-    if (map_text == NULL) {
-        return false;
-    }
-
-    payload_len = strlen(map_text);
-    if (0U == payload_len || payload_len > 0xFFFFU) {
-        return false;
-    }
-
-    /* 兼容直接输入字符串最后一行没有换行符的情况 */
-    if ('\n' != map_text[payload_len - 1U] && '\r' != map_text[payload_len - 1U]) {
-        if ((payload_len + 1U) > FRAME_BUF_SIZE) {
-            return false;
-        }
-
-        memcpy(temp_payload, map_text, payload_len);
-        temp_payload[payload_len] = '\n';
-        return parse_map_payload(temp_payload, (uint16_t)(payload_len + 1U));
-    }
-
-    return parse_map_payload((const uint8_t *)map_text, (uint16_t)payload_len);
-}
-
 /* 解析 payload 中的一行 int32（十进制字符串） */
 static bool parse_int32_line(const uint8_t *payload, uint16_t payload_len, uint16_t *idx, int32 *value)
 {
@@ -514,6 +492,13 @@ static bool parse_car_payload(const uint8_t *payload, uint16_t payload_len)
 
     idx = skip_line_break_prefix(payload, payload_len, idx);
     if (idx != payload_len) {
+        return false;
+    }
+
+    if (raw_value[0] < 0 || raw_value[0] > CAMERA_LEGACY_RAW_X_MAX ||
+        raw_value[1] < 0 || raw_value[1] > CAMERA_LEGACY_RAW_Y_MAX ||
+        raw_value[2] < -CAMERA_LEGACY_YAW_ABS_MAX ||
+        raw_value[2] > CAMERA_LEGACY_YAW_ABS_MAX) {
         return false;
     }
 
@@ -595,6 +580,12 @@ static bool parse_car_coordinate_line(const uint8_t *line, uint16_t line_len)
     }
 
     if (-1L == x_raw && -1L == y_raw) {
+        return false;
+    }
+
+    /* Reject malformed coordinates before they can trigger a long correction move. */
+    if (x_raw < CAMERA_RAW_COORD_MIN || x_raw > CAMERA_RAW_X_MAX ||
+        y_raw < CAMERA_RAW_COORD_MIN || y_raw > CAMERA_RAW_Y_MAX) {
         return false;
     }
 
@@ -1261,11 +1252,6 @@ void uart_send_car_request(void)
     uart_write_string(UART_INDEX, UART_CMD_CAR);
 }
 
-void uart_start_car_stream(void)
-{
-    uart_write_string(UART_INDEX, UART_CMD_CAR_STREAM_START);
-}
-
 void uart_stop_car_stream(void)
 {
     uart_write_string(UART_INDEX, UART_CMD_CAR_STREAM_STOP);
@@ -1321,29 +1307,6 @@ bool uart_send_vision_request(VisionRecognitionType type, VisionRecognitionDista
     return uart_send_vision_request_with_sequence(type, distance, NULL);
 }
 
-bool uart_send_vision_num_request_by_distance(VisionRecognitionDistance distance)
-{
-    return uart_send_vision_request(VISION_RECOGNITION_NUM, distance);
-}
-
-bool uart_send_vision_img_request_by_distance(VisionRecognitionDistance distance)
-{
-    return uart_send_vision_request(VISION_RECOGNITION_IMG, distance);
-}
-
-/* 兼容旧调用：默认使用近距离数字识别，即发送 "SNAP=1\n"。 */
-void uart_send_vision_num_request(void)
-{
-    (void)uart_send_vision_num_request_by_distance(VISION_RECOGNITION_DISTANCE_ONE_GRID);
-}
-
-/* 向视觉识别端请求一次图案识别。发送前清掉半包数据，避免旧残留误触发本次结果。 */
-/* 兼容旧调用：默认使用近距离图像识别，即发送 "SNAP=0\n"。 */
-void uart_send_vision_img_request(void)
-{
-    (void)uart_send_vision_img_request_by_distance(VISION_RECOGNITION_DISTANCE_ONE_GRID);
-}
-
 /* 清空视觉识别接收缓存和“有新结果”标志，但保留最近一次结果内容供调试查看。 */
 void vision_clear_pending_data(void)
 {
@@ -1354,28 +1317,6 @@ void vision_clear_pending_data(void)
     vision_drop_until_line_end = false;
     vision_num_result_updated = false;
     vision_img_result_updated = false;
-}
-
-/* 仅读取最近一次数字识别响应；没有收到过响应时返回 false。 */
-bool vision_get_latest_num_result(VisionRecognitionResult *out_result)
-{
-    if (out_result == NULL || !vision_num_result_ready) {
-        return false;
-    }
-
-    *out_result = vision_num_result;
-    return true;
-}
-
-/* 仅读取最近一次图案识别响应；没有收到过响应时返回 false。 */
-bool vision_get_latest_img_result(VisionRecognitionResult *out_result)
-{
-    if (out_result == NULL || !vision_img_result_ready) {
-        return false;
-    }
-
-    *out_result = vision_img_result;
-    return true;
 }
 
 /* 读取最新数字识别响应，并清除 updated，适合“一次请求等待一次结果”的流程。 */

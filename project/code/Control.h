@@ -136,10 +136,6 @@ uint8 control_get_return_pose_in_depot(void);
  */
 const Position *control_get_exec_path(size_t *steps);
 
-/* Compatibility APIs. Diagonal execution paths are always enabled. */
-void control_set_diagonal_path_enabled(uint8 enabled);
-uint8 control_get_diagonal_path_enabled(void);
-
 /* 识别驻车点和每次推箱结束后是否执行一次视觉位置校正。 */
 void control_set_checkpoint_vision_localization_enabled(uint8 enabled);
 uint8 control_get_checkpoint_vision_localization_enabled(void);
@@ -148,10 +144,6 @@ uint8 control_get_checkpoint_vision_localization_enabled(void);
  * pair with a one-shot Mode1 plan before returning to the depot. */
 void control_set_last_pair_insurance_enabled(uint8 enabled);
 uint8 control_get_last_pair_insurance_enabled(void);
-
-/* Compatibility APIs. Identify pre-rotation is always enabled. */
-void control_set_identify_prerotate_enabled(uint8 enabled);
-uint8 control_get_identify_prerotate_enabled(void);
 
 /*
  * Optional recognition-ID insurance. When enabled, the identify-to-pushbox
@@ -163,15 +155,6 @@ uint8 control_get_identify_id_fallback_enabled(void);
 
 void control_set_continuous_levels_enabled(uint8 enabled);
 uint8 control_get_continuous_levels_enabled(void);
-
-/**
- * @brief 设置控制流程使用的路径规划模式。
- *
- * @param mode 规划模式标志位：
- * - CONTROL_PLAN_MODE_1：使用 Plan_path_Mode1()
- * - CONTROL_PLAN_MODE_2：使用 Plan_path_Mode2()
- */
-void control_set_plan_mode(control_plan_mode_t mode);
 
 /**
  * @brief 获取当前路径规划模式标志位。

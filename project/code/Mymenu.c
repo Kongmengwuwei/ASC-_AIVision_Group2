@@ -8,14 +8,18 @@
 Menu_Item Root;     // 根目�?
 Menu_Item *pointer; // 指针
 
-uint8 car_go_flag = 0;   // 运行标志
-uint8 car_stop_flag = 0; // 停车标志
+volatile uint8 car_go_flag = 0;   // 运行标志
+volatile uint8 car_stop_flag = 0; // 停车标志
+
+/* Menu-only adjustment state belongs in this translation unit, not the header. */
+static float SetupNumber[SETUP_LEN] = {0.01f, 0.1f, 1.0f, 10.0f, 100.0f};
+static uint8_t SetupIndex = 2U;
 
 static bool startup_start_switch = false;
 static bool startup_reset_switch = false;
 static uint8 startup_depart_dir_value = 0U;
 static bool continuous_levels_switch = false;
-static bool blue_serial_switch = true;
+static bool blue_serial_switch = false;
 static bool checkpoint_vision_switch = false;
 static bool identify_id_fallback_switch = false;
 static bool last_pair_insurance_switch = false;
@@ -124,11 +128,12 @@ static void Menu_Fill_Flash_Config(menu_flash_config_t *config)
 
     config->start_dir = startup_depart_dir_value;
     config->continuous_levels = continuous_levels_switch ? 1U : 0U;
-    config->preset_input = preset_input_switch ? 1U : 0U;
+    /* Diagnostic-only modes must never survive a power cycle into a race. */
+    config->preset_input = 0U;
     config->preset_map_index = Menu_Get_Preset_Map_Index();
     config->show_map = show_map_switch ? 1U : 0U;
     config->show_data = show_data_switch ? 1U : 0U;
-    config->blue_serial = blue_serial_switch ? 1U : 0U;
+    config->blue_serial = 0U;
     config->checkpoint_vision = checkpoint_vision_switch ? 1U : 0U;
     config->identify_id_fallback = identify_id_fallback_switch ? 1U : 0U;
     config->last_pair_insurance = last_pair_insurance_switch ? 1U : 0U;
@@ -149,11 +154,12 @@ static void Menu_Load_Flash_Config(void)
         startup_depart_dir_value = CONTROL_PRESTART_DEPART_DIR_MAX;
     }
     continuous_levels_switch = (config.continuous_levels != 0U);
-    preset_input_switch = (config.preset_input != 0U);
+    /* Preset input and Bluetooth are deliberately session-only diagnostics. */
+    preset_input_switch = false;
     preset_map_index = clamp_preset_map_index(config.preset_map_index);
     show_map_switch = (config.show_map != 0U);
     show_data_switch = (config.show_data != 0U);
-    blue_serial_switch = (config.blue_serial != 0U);
+    blue_serial_switch = false;
     checkpoint_vision_switch = (config.checkpoint_vision != 0U);
     identify_id_fallback_switch = (config.identify_id_fallback != 0U);
     last_pair_insurance_switch = (config.last_pair_insurance != 0U);
@@ -1161,11 +1167,6 @@ void Key_Deselect(void) // 取消选中
     if (pointer->kind != MENU_Folder)
         pointer->selected = 0;
     Menu_Save_Flash_Config_If_Ready();
-}
-void Key_SetupCtrl_Plus(void) // 步进值增�?
-{
-    Menu_Request_Redraw();
-    SetupIndex = (SetupIndex + 1) % SETUP_LEN;
 }
 void Key_SetupCtrl_Sub(void) // 步进值减�?可返回最大�?
 {

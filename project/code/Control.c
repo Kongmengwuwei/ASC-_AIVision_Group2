@@ -57,6 +57,8 @@ float g_control_prestart_depart_compensate_m = -0.025f;
 #define CONTROL_LOCALIZE_WHEEL_STOP_ENCODER_TOL 5
 #define CONTROL_LOCALIZE_MAX_SAMPLES 5U
 #define CONTROL_LOCALIZE_TWO_SAMPLE_MATCH_M 0.03f
+/* 检查点视觉位置偏离事件目标超过 5 cm 时，先回移到目标点再继续流程。 */
+#define CONTROL_CHECKPOINT_REPOSITION_THRESHOLD_M 0.05f
 #define CONTROL_PRESET_RECOGNITION_DELAY_MS 500U
 /* 推炸弹到爆炸点后停留 0.5s，等待爆炸效果生效 */
 #define CONTROL_BOMB_EXPLOSION_PAUSE_MS 500U
@@ -66,7 +68,7 @@ float g_control_prestart_depart_compensate_m = -0.025f;
 #define CONTROL_CONTINUOUS_STOP_ENCODER_TOL 5
 #define CONTROL_CONTINUOUS_STOP_STABLE_LOOPS 3U
 /* 10 ms 控制节拍；检测到仍有未推进箱子时，下一关发车前额外等待 5 s。 */
-#define CONTROL_CONTINUOUS_EXTRA_DEPART_WAIT_TICKS 400U
+#define CONTROL_CONTINUOUS_EXTRA_DEPART_WAIT_TICKS 500U
 #define CONTROL_DEPOT_CELL_HALF_EXTENT_M (0.5f * GRID_SIZE_M)
 
 
@@ -269,7 +271,7 @@ static uint8 g_identify_checkpoint_localized = 0U;
 static uint8 g_identify_targets_collected_at_endpoint = 0U;
 static control_identify_exec_state_t g_identify_exec_state = CONTROL_IDENTIFY_EXEC_IDLE;
 
-/* 推箱阶段按 PUSH_END_POINT 分段，段间可插入视觉定位。 */
+/* 推箱阶段按 PUSH_START_POINT/PUSH_END_POINT 分段，推前推后都可视觉定位。 */
 static Position g_pushbox_segment_path[MAX_CAR_PATH] = {{0}};
 static size_t g_pushbox_segment_end_idx = 0U;
 static uint8 g_pushbox_segment_running = 0U;
@@ -279,6 +281,11 @@ static uint8 g_pushbox_checkpoint_localized = 0U;
 static uint8 g_checkpoint_visual_localization_active = 0U;
 static uint8 g_checkpoint_visual_pose_completed = 0U;
 static uint8 g_checkpoint_map_refresh_required = 0U;
+static uint8 g_checkpoint_target_valid = 0U;
+static uint8 g_checkpoint_target_reposition_running = 0U;
+static uint8 g_checkpoint_target_reposition_completed = 0U;
+static float g_checkpoint_target_x_m = 0.0f;
+static float g_checkpoint_target_y_m = 0.0f;
 
 static uint8 g_identified_box_flags[MAX_BOXES] = {0U};
 static uint8 g_identified_target_flags[MAX_TARGETS] = {0U};
@@ -1019,6 +1026,11 @@ static void reset_level_runtime_state_for_launch(void)
     g_checkpoint_visual_localization_active = 0U;
     g_checkpoint_visual_pose_completed = 0U;
     g_checkpoint_map_refresh_required = 0U;
+    g_checkpoint_target_valid = 0U;
+    g_checkpoint_target_reposition_running = 0U;
+    g_checkpoint_target_reposition_completed = 0U;
+    g_checkpoint_target_x_m = 0.0f;
+    g_checkpoint_target_y_m = 0.0f;
 
     reset_localization_accumulator();
     g_prestart_move_started = 0U;
@@ -2710,7 +2722,8 @@ static uint8 get_camera_position_meter(float *x_m, float *y_m)
 static void start_localization_map_prefetch_once(void);
 static uint8 localization_prefetched_map_ready(void);
 
-static void begin_checkpoint_visual_localization(uint8 request_map_refresh)
+static void begin_checkpoint_visual_localization(const Position *target,
+                                                 uint8 request_map_refresh)
 {
     if (g_checkpoint_visual_localization_active)
     {
@@ -2724,6 +2737,19 @@ static void begin_checkpoint_visual_localization(uint8 request_map_refresh)
     g_checkpoint_visual_localization_active = 1U;
     g_checkpoint_visual_pose_completed = 0U;
     g_checkpoint_map_refresh_required = request_map_refresh ? 1U : 0U;
+    g_checkpoint_target_valid = (target != NULL) ? 1U : 0U;
+    g_checkpoint_target_reposition_running = 0U;
+    g_checkpoint_target_reposition_completed = 0U;
+    if (target != NULL)
+    {
+        g_checkpoint_target_x_m = (float)target->row * GRID_SIZE_M;
+        g_checkpoint_target_y_m = (float)target->col * GRID_SIZE_M;
+    }
+    else
+    {
+        g_checkpoint_target_x_m = 0.0f;
+        g_checkpoint_target_y_m = 0.0f;
+    }
     car_go_flag = 1U;
     car_stop_flag = 1U;
 }
@@ -2789,6 +2815,50 @@ static uint8 settle_camera_before_checkpoint_localization(void)
 }
 
 /* 返回 1 表示本次检查点定位完成，返回 0 表示仍在停车/等待/采样。 */
+static uint8 finish_checkpoint_target_reposition_if_ready(void)
+{
+    path_follow_status_t st = {0};
+    float dx_m;
+    float dy_m;
+    float threshold_sq = CONTROL_CHECKPOINT_REPOSITION_THRESHOLD_M *
+                         CONTROL_CHECKPOINT_REPOSITION_THRESHOLD_M;
+
+    if (!g_checkpoint_target_valid ||
+        g_checkpoint_target_reposition_completed)
+    {
+        return 1U;
+    }
+
+    if (g_checkpoint_target_reposition_running)
+    {
+        path_follow_get_status(&st);
+        if (st.active)
+        {
+            return 0U;
+        }
+        g_checkpoint_target_reposition_running = 0U;
+        g_checkpoint_target_reposition_completed = 1U;
+        control_hold_yaw_closed_loop();
+        return 1U;
+    }
+
+    path_follow_get_status(&st);
+    dx_m = g_checkpoint_target_x_m - st.x_m;
+    dy_m = g_checkpoint_target_y_m - st.y_m;
+    if ((dx_m * dx_m + dy_m * dy_m) > threshold_sq)
+    {
+        path_follow_start_pose_correction(g_checkpoint_target_x_m,
+                                          g_checkpoint_target_y_m);
+        g_checkpoint_target_reposition_running = 1U;
+        car_go_flag = 1U;
+        car_stop_flag = 0U;
+        return 0U;
+    }
+
+    g_checkpoint_target_reposition_completed = 1U;
+    return 1U;
+}
+
 static uint8 finish_checkpoint_map_refresh_if_ready(void)
 {
     if (!g_checkpoint_map_refresh_required)
@@ -2830,6 +2900,15 @@ static uint8 process_checkpoint_visual_localization(void)
     }
     if (g_checkpoint_visual_pose_completed)
     {
+        if (!finish_checkpoint_target_reposition_if_ready())
+        {
+            if (g_checkpoint_map_refresh_required &&
+                !localization_prefetched_map_ready())
+            {
+                service_map_request_wait();
+            }
+            return 0U;
+        }
         if (!finish_checkpoint_map_refresh_if_ready())
         {
             return 0U;
@@ -2904,6 +2983,15 @@ static uint8 process_checkpoint_visual_localization(void)
     BlueSerial_ReportPosition();
     control_hold_yaw_closed_loop();
     g_checkpoint_visual_pose_completed = 1U;
+    if (!finish_checkpoint_target_reposition_if_ready())
+    {
+        if (g_checkpoint_map_refresh_required &&
+            !localization_prefetched_map_ready())
+        {
+            service_map_request_wait();
+        }
+        return 0U;
+    }
     if (!finish_checkpoint_map_refresh_if_ready())
     {
         return 0U;
@@ -3679,7 +3767,7 @@ static void handle_identify_execute_path(void)
             (g_exec_path[endpoint_idx].id & BOMB_EXPLOSION) != 0U &&
             !g_identify_checkpoint_localized)
         {
-            begin_checkpoint_visual_localization(0U);
+            begin_checkpoint_visual_localization(&g_exec_path[endpoint_idx], 0U);
             if (!process_checkpoint_visual_localization())
             {
                 return;
@@ -3701,7 +3789,7 @@ static void handle_identify_execute_path(void)
                 if (g_control_checkpoint_vision_localization_enabled &&
                     !g_identify_checkpoint_localized)
                 {
-                    begin_checkpoint_visual_localization(0U);
+                    begin_checkpoint_visual_localization(&g_exec_path[endpoint_idx], 0U);
                     if (!process_checkpoint_visual_localization())
                     {
                         return;
@@ -3834,7 +3922,8 @@ static uint8 start_pushbox_segment(size_t start_idx)
     scan_idx = (start_idx == 0U) ? 0U : (start_idx + 1U);
     for (; scan_idx < g_exec_steps; scan_idx++)
     {
-        if ((g_exec_path[scan_idx].id & PUSH_END_POINT) != 0U)
+        if ((g_exec_path[scan_idx].id &
+             (PUSH_START_POINT | PUSH_END_POINT)) != 0U)
         {
             end_idx = scan_idx;
             break;
@@ -3993,10 +4082,12 @@ static void handle_pushbox_execute_path(void)
             return;
         }
 
-        if ((g_exec_path[g_pushbox_segment_end_idx].id & PUSH_END_POINT) != 0U &&
+        if ((g_exec_path[g_pushbox_segment_end_idx].id &
+             (PUSH_START_POINT | PUSH_END_POINT)) != 0U &&
             !g_pushbox_checkpoint_localized)
         {
             begin_checkpoint_visual_localization(
+                &g_exec_path[g_pushbox_segment_end_idx],
                 pushbox_endpoint_is_final_push(g_pushbox_segment_end_idx));
             if (!process_checkpoint_visual_localization())
             {

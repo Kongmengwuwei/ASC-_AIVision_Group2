@@ -958,6 +958,9 @@ static void pf_apply_position_loop(const pf_geometry_t *geometry,
                                    float *vy_world_cmps)
 {
     float blend;
+    float speed_weight;
+    float position_vx_world_cmps;
+    float position_vy_world_cmps;
 
     if (geometry == NULL || vx_world_cmps == NULL || vy_world_cmps == NULL)
     {
@@ -970,14 +973,25 @@ static void pf_apply_position_loop(const pf_geometry_t *geometry,
         return;
     }
 
-    *vx_world_cmps += blend *
+    position_vx_world_cmps =
         (float)PID_Location_Calculate(&pid_stay,
                                       g_pf.pose.x_m * 100.0f,
                                       geometry->target_x_m * 100.0f);
-    *vy_world_cmps += blend *
+    position_vy_world_cmps =
         (float)PID_Location_Calculate(&pid_stay_y,
                                       g_pf.pose.y_m * 100.0f,
                                       geometry->target_y_m * 100.0f);
+
+    blend = pf_clamp(blend, 0.0f, 1.0f);
+    speed_weight = 1.0f - blend;
+
+    /* Cross-fade between the S-curve velocity and the position-loop velocity.
+       This prevents the position PID from adding a second forward command
+       while it progressively takes ownership near the target. */
+    *vx_world_cmps = speed_weight * *vx_world_cmps +
+                     blend * position_vx_world_cmps;
+    *vy_world_cmps = speed_weight * *vy_world_cmps +
+                     blend * position_vy_world_cmps;
 }
 
 static uint8 pf_apply_line_guidance(const pf_geometry_t *geometry,

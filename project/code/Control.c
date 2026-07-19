@@ -57,6 +57,8 @@ float g_control_prestart_depart_compensate_m = -0.0f;
 #define CONTROL_LOCALIZE_WHEEL_STOP_ENCODER_TOL 5
 #define CONTROL_LOCALIZE_MAX_SAMPLES 5U
 #define CONTROL_LOCALIZE_TWO_SAMPLE_MATCH_M 0.03f
+/* 检查点视觉位置偏离事件目标超过 5 cm 时，先回移到目标点再继续流程。 */
+#define CONTROL_CHECKPOINT_REPOSITION_THRESHOLD_M 0.05f
 #define CONTROL_PRESET_RECOGNITION_DELAY_MS 500U
 /* 推炸弹到爆炸点后停留 0.5s，等待爆炸效果生效 */
 #define CONTROL_BOMB_EXPLOSION_PAUSE_MS 500U
@@ -66,7 +68,7 @@ float g_control_prestart_depart_compensate_m = -0.0f;
 #define CONTROL_CONTINUOUS_STOP_ENCODER_TOL 5
 #define CONTROL_CONTINUOUS_STOP_STABLE_LOOPS 3U
 /* 10 ms 控制节拍；检测到仍有未推进箱子时，下一关发车前额外等待 5 s。 */
-#define CONTROL_CONTINUOUS_EXTRA_DEPART_WAIT_TICKS 400U
+#define CONTROL_CONTINUOUS_EXTRA_DEPART_WAIT_TICKS 500U
 #define CONTROL_DEPOT_CELL_HALF_EXTENT_M (0.5f * GRID_SIZE_M)
 
 
@@ -266,7 +268,7 @@ static uint8 g_identify_checkpoint_localized = 0U;
 static uint8 g_identify_targets_collected_at_endpoint = 0U;
 static control_identify_exec_state_t g_identify_exec_state = CONTROL_IDENTIFY_EXEC_IDLE;
 
-/* 推箱阶段按 PUSH_END_POINT 分段，段间可插入视觉定位。 */
+/* 推箱阶段按 PUSH_START_POINT/PUSH_END_POINT 分段，推前推后都可视觉定位。 */
 static Position g_pushbox_segment_path[MAX_CAR_PATH] = {{0}};
 static size_t g_pushbox_segment_end_idx = 0U;
 static uint8 g_pushbox_segment_running = 0U;
@@ -276,6 +278,11 @@ static uint8 g_pushbox_checkpoint_localized = 0U;
 static uint8 g_checkpoint_visual_localization_active = 0U;
 static uint8 g_checkpoint_visual_pose_completed = 0U;
 static uint8 g_checkpoint_map_refresh_required = 0U;
+static uint8 g_checkpoint_target_valid = 0U;
+static uint8 g_checkpoint_target_reposition_running = 0U;
+static uint8 g_checkpoint_target_reposition_completed = 0U;
+static float g_checkpoint_target_x_m = 0.0f;
+static float g_checkpoint_target_y_m = 0.0f;
 
 static uint8 g_identified_box_flags[MAX_BOXES] = {0U};
 static uint8 g_identified_target_flags[MAX_TARGETS] = {0U};
@@ -977,6 +984,11 @@ static void reset_level_runtime_state_for_launch(void)
     g_checkpoint_visual_localization_active = 0U;
     g_checkpoint_visual_pose_completed = 0U;
     g_checkpoint_map_refresh_required = 0U;
+    g_checkpoint_target_valid = 0U;
+    g_checkpoint_target_reposition_running = 0U;
+    g_checkpoint_target_reposition_completed = 0U;
+    g_checkpoint_target_x_m = 0.0f;
+    g_checkpoint_target_y_m = 0.0f;
 
     reset_localization_accumulator();
     g_prestart_move_started = 0U;
@@ -1369,11 +1381,132 @@ static uint8 lookup_saved_id_by_cell(const control_identify_id_record_t *records
     return 0U;
 }
 
+/*
+ * Rebind IDs for boxes which changed cells between the recognition map and the
+ * fresh map fetched after recognition.  Unchanged cells are handled first by
+ * apply_saved_identify_ids_to_current_map().  The remaining old/new cells are
+ * paired with a minimum-total-Manhattan-distance assignment so that two moved
+ * boxes are not matched greedily in the wrong order.
+ */
+static void apply_moved_box_ids(const size_t saved_indices[MAX_BOXES],
+                                const size_t current_indices[MAX_BOXES],
+                                size_t moved_count)
+{
+    int row_potential[MAX_BOXES + 1] = {0};
+    int col_potential[MAX_BOXES + 1] = {0};
+    int matched_row[MAX_BOXES + 1] = {0};
+    int previous_col[MAX_BOXES + 1] = {0};
+    int min_cost[MAX_BOXES + 1] = {0};
+    uint8 col_used[MAX_BOXES + 1] = {0U};
+    size_t row = 0U;
+    size_t col = 0U;
+
+    if (moved_count == 0U || moved_count > MAX_BOXES)
+    {
+        return;
+    }
+
+    for (row = 1U; row <= moved_count; row++)
+    {
+        int col0 = 0;
+
+        matched_row[0] = (int)row;
+        for (col = 0U; col <= moved_count; col++)
+        {
+            min_cost[col] = 0x3FFF;
+            col_used[col] = 0U;
+            previous_col[col] = 0;
+        }
+
+        do
+        {
+            int row0 = 0;
+            int delta = 0x3FFF;
+            int next_col = 0;
+
+            col_used[col0] = 1U;
+            row0 = matched_row[col0];
+
+            for (col = 1U; col <= moved_count; col++)
+            {
+                int old_row = (int)g_saved_box_id_records[saved_indices[row0 - 1]].row;
+                int old_col = (int)g_saved_box_id_records[saved_indices[row0 - 1]].col;
+                int new_row = (int)boxes[current_indices[col - 1U]].row;
+                int new_col = (int)boxes[current_indices[col - 1U]].col;
+                int row_delta = old_row - new_row;
+                int col_delta = old_col - new_col;
+                int cost = 0;
+                int reduced_cost = 0;
+
+                if (col_used[col])
+                {
+                    continue;
+                }
+                if (row_delta < 0)
+                {
+                    row_delta = -row_delta;
+                }
+                if (col_delta < 0)
+                {
+                    col_delta = -col_delta;
+                }
+                cost = row_delta + col_delta;
+                reduced_cost = cost - row_potential[row0] - col_potential[col];
+                if (reduced_cost < min_cost[col])
+                {
+                    min_cost[col] = reduced_cost;
+                    previous_col[col] = col0;
+                }
+                if (min_cost[col] < delta)
+                {
+                    delta = min_cost[col];
+                    next_col = (int)col;
+                }
+            }
+
+            for (col = 0U; col <= moved_count; col++)
+            {
+                if (col_used[col])
+                {
+                    row_potential[matched_row[col]] += delta;
+                    col_potential[col] -= delta;
+                }
+                else
+                {
+                    min_cost[col] -= delta;
+                }
+            }
+            col0 = next_col;
+        } while (matched_row[col0] != 0);
+
+        do
+        {
+            int prior_col = previous_col[col0];
+            matched_row[col0] = matched_row[prior_col];
+            col0 = prior_col;
+        } while (col0 != 0);
+    }
+
+    for (col = 1U; col <= moved_count; col++)
+    {
+        size_t saved_index = saved_indices[matched_row[col] - 1];
+        size_t current_index = current_indices[col - 1U];
+        boxes[current_index].id = g_saved_box_id_records[saved_index].id;
+    }
+}
+
 static void apply_saved_identify_ids_to_current_map(void)
 {
     size_t i = 0U;
+    size_t j = 0U;
     size_t box_cnt = Boxes_count;
     size_t target_cnt = Targets_count;
+    size_t unmatched_saved_indices[MAX_BOXES] = {0U};
+    size_t unmatched_current_indices[MAX_BOXES] = {0U};
+    size_t unmatched_saved_count = 0U;
+    size_t unmatched_current_count = 0U;
+    uint8 saved_box_matched[MAX_BOXES] = {0U};
+    uint8 current_box_matched[MAX_BOXES] = {0U};
     uint8 id = 0U;
 
     if (!g_saved_identify_ids_ready)
@@ -1392,10 +1525,44 @@ static void apply_saved_identify_ids_to_current_map(void)
 
     for (i = 0U; i < box_cnt; i++)
     {
-        if (lookup_saved_id_by_cell(g_saved_box_id_records, MAX_BOXES, boxes[i].row, boxes[i].col, &id))
+        for (j = 0U; j < MAX_BOXES; j++)
         {
-            boxes[i].id = id;
+            if (!g_saved_box_id_records[j].valid || saved_box_matched[j])
+            {
+                continue;
+            }
+            if (g_saved_box_id_records[j].row == boxes[i].row &&
+                g_saved_box_id_records[j].col == boxes[i].col)
+            {
+                boxes[i].id = g_saved_box_id_records[j].id;
+                saved_box_matched[j] = 1U;
+                current_box_matched[i] = 1U;
+                break;
+            }
         }
+    }
+
+    for (i = 0U; i < MAX_BOXES; i++)
+    {
+        if (g_saved_box_id_records[i].valid && !saved_box_matched[i])
+        {
+            unmatched_saved_indices[unmatched_saved_count++] = i;
+        }
+    }
+    for (i = 0U; i < box_cnt; i++)
+    {
+        if (!current_box_matched[i])
+        {
+            unmatched_current_indices[unmatched_current_count++] = i;
+        }
+    }
+
+    /* A count mismatch is more likely to be a map miss/false detection. */
+    if (unmatched_saved_count == unmatched_current_count)
+    {
+        apply_moved_box_ids(unmatched_saved_indices,
+                            unmatched_current_indices,
+                            unmatched_saved_count);
     }
 
     for (i = 0U; i < target_cnt; i++)
@@ -2669,7 +2836,8 @@ static uint8 get_camera_position_meter(float *x_m, float *y_m)
 static void start_localization_map_prefetch_once(void);
 static uint8 localization_prefetched_map_ready(void);
 
-static void begin_checkpoint_visual_localization(uint8 request_map_refresh)
+static void begin_checkpoint_visual_localization(const Position *target,
+                                                 uint8 request_map_refresh)
 {
     if (g_checkpoint_visual_localization_active)
     {
@@ -2683,6 +2851,19 @@ static void begin_checkpoint_visual_localization(uint8 request_map_refresh)
     g_checkpoint_visual_localization_active = 1U;
     g_checkpoint_visual_pose_completed = 0U;
     g_checkpoint_map_refresh_required = request_map_refresh ? 1U : 0U;
+    g_checkpoint_target_valid = (target != NULL) ? 1U : 0U;
+    g_checkpoint_target_reposition_running = 0U;
+    g_checkpoint_target_reposition_completed = 0U;
+    if (target != NULL)
+    {
+        g_checkpoint_target_x_m = (float)target->row * GRID_SIZE_M;
+        g_checkpoint_target_y_m = (float)target->col * GRID_SIZE_M;
+    }
+    else
+    {
+        g_checkpoint_target_x_m = 0.0f;
+        g_checkpoint_target_y_m = 0.0f;
+    }
     car_go_flag = 1U;
     car_stop_flag = 1U;
 }
@@ -2748,6 +2929,50 @@ static uint8 settle_camera_before_checkpoint_localization(void)
 }
 
 /* 返回 1 表示本次检查点定位完成，返回 0 表示仍在停车/等待/采样。 */
+static uint8 finish_checkpoint_target_reposition_if_ready(void)
+{
+    path_follow_status_t st = {0};
+    float dx_m;
+    float dy_m;
+    float threshold_sq = CONTROL_CHECKPOINT_REPOSITION_THRESHOLD_M *
+                         CONTROL_CHECKPOINT_REPOSITION_THRESHOLD_M;
+
+    if (!g_checkpoint_target_valid ||
+        g_checkpoint_target_reposition_completed)
+    {
+        return 1U;
+    }
+
+    if (g_checkpoint_target_reposition_running)
+    {
+        path_follow_get_status(&st);
+        if (st.active)
+        {
+            return 0U;
+        }
+        g_checkpoint_target_reposition_running = 0U;
+        g_checkpoint_target_reposition_completed = 1U;
+        control_hold_yaw_closed_loop();
+        return 1U;
+    }
+
+    path_follow_get_status(&st);
+    dx_m = g_checkpoint_target_x_m - st.x_m;
+    dy_m = g_checkpoint_target_y_m - st.y_m;
+    if ((dx_m * dx_m + dy_m * dy_m) > threshold_sq)
+    {
+        path_follow_start_pose_correction(g_checkpoint_target_x_m,
+                                          g_checkpoint_target_y_m);
+        g_checkpoint_target_reposition_running = 1U;
+        car_go_flag = 1U;
+        car_stop_flag = 0U;
+        return 0U;
+    }
+
+    g_checkpoint_target_reposition_completed = 1U;
+    return 1U;
+}
+
 static uint8 finish_checkpoint_map_refresh_if_ready(void)
 {
     if (!g_checkpoint_map_refresh_required)
@@ -2789,6 +3014,15 @@ static uint8 process_checkpoint_visual_localization(void)
     }
     if (g_checkpoint_visual_pose_completed)
     {
+        if (!finish_checkpoint_target_reposition_if_ready())
+        {
+            if (g_checkpoint_map_refresh_required &&
+                !localization_prefetched_map_ready())
+            {
+                service_map_request_wait();
+            }
+            return 0U;
+        }
         if (!finish_checkpoint_map_refresh_if_ready())
         {
             return 0U;
@@ -2863,6 +3097,15 @@ static uint8 process_checkpoint_visual_localization(void)
     BlueSerial_ReportPosition();
     control_hold_yaw_closed_loop();
     g_checkpoint_visual_pose_completed = 1U;
+    if (!finish_checkpoint_target_reposition_if_ready())
+    {
+        if (g_checkpoint_map_refresh_required &&
+            !localization_prefetched_map_ready())
+        {
+            service_map_request_wait();
+        }
+        return 0U;
+    }
     if (!finish_checkpoint_map_refresh_if_ready())
     {
         return 0U;
@@ -3637,7 +3880,12 @@ static void handle_identify_execute_path(void)
             (g_exec_path[endpoint_idx].id & BOMB_EXPLOSION) != 0U &&
             !g_identify_checkpoint_localized)
         {
-            begin_checkpoint_visual_localization(0U);
+            /* st.active becomes false only after the configured explosion
+             * pause has completed.  Drop any pre-explosion pose data, then
+             * localize immediately without another fixed delay. */
+            uart_stop_car_stream();
+            uart_blob_clear_pending_data();
+            begin_checkpoint_visual_localization(&g_exec_path[endpoint_idx], 0U);
             if (!process_checkpoint_visual_localization())
             {
                 return;
@@ -3659,7 +3907,7 @@ static void handle_identify_execute_path(void)
                 if (g_control_checkpoint_vision_localization_enabled &&
                     !g_identify_checkpoint_localized)
                 {
-                    begin_checkpoint_visual_localization(0U);
+                    begin_checkpoint_visual_localization(&g_exec_path[endpoint_idx], 0U);
                     if (!process_checkpoint_visual_localization())
                     {
                         return;
@@ -3792,7 +4040,8 @@ static uint8 start_pushbox_segment(size_t start_idx)
     scan_idx = (start_idx == 0U) ? 0U : (start_idx + 1U);
     for (; scan_idx < g_exec_steps; scan_idx++)
     {
-        if ((g_exec_path[scan_idx].id & PUSH_END_POINT) != 0U)
+        if ((g_exec_path[scan_idx].id &
+             (PUSH_START_POINT | PUSH_END_POINT)) != 0U)
         {
             end_idx = scan_idx;
             break;
@@ -3951,10 +4200,12 @@ static void handle_pushbox_execute_path(void)
             return;
         }
 
-        if ((g_exec_path[g_pushbox_segment_end_idx].id & PUSH_END_POINT) != 0U &&
+        if ((g_exec_path[g_pushbox_segment_end_idx].id &
+             (PUSH_START_POINT | PUSH_END_POINT)) != 0U &&
             !g_pushbox_checkpoint_localized)
         {
             begin_checkpoint_visual_localization(
+                &g_exec_path[g_pushbox_segment_end_idx],
                 pushbox_endpoint_is_final_push(g_pushbox_segment_end_idx));
             if (!process_checkpoint_visual_localization())
             {

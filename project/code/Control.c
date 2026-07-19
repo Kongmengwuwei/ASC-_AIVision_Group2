@@ -237,9 +237,6 @@ static uint8 g_return_heading_rotate_started = 0U;
 static uint8 g_return_depot_check_done = 0U;
 static uint8 g_return_pose_in_depot = 0U;
 static uint8 g_pushbox_entry_heading_rotate_started = 0U;
-static float g_start_yaw_deg = 0.0f;
-static uint8 g_start_yaw_ready = 0U;
-
 static uint8 g_wait_new_map_frame = 0U;
 static uint8 g_wait_map_frame_base = 0U;
 static volatile uint32 g_control_tick_10ms = 0U;
@@ -387,7 +384,9 @@ static void control_disable_yaw_closed_loop(void)
 
 static void control_hold_yaw_closed_loop(void)
 {
-    path_follow_hold_current_yaw();
+    /* Keep the already selected cardinal target.  Never turn the measured
+     * yaw back into a new target, otherwise a residual error is inherited by
+     * the following path segment. */
     control_enable_yaw_closed_loop();
     car_go_flag = 1U;
     car_stop_flag = 0U;
@@ -805,62 +804,21 @@ static uint8 resolve_map_dir_from_delta(int32 d_row, int32 d_col, control_map_di
     return 0U;
 }
 
-static void capture_start_yaw_if_needed(void)
-{
-    if (!g_start_yaw_ready)
-    {
-        g_start_yaw_deg = wrap_yaw_deg_local(eulerAngle.yaw);
-        g_start_yaw_ready = 1U;
-    }
-}
-
-static float get_start_yaw_base_deg(void)
-{
-    if (g_start_yaw_ready)
-    {
-        return g_start_yaw_deg;
-    }
-
-    /*
-     * 正常流程会在发车动作首次下发前记录基准。
-     * 这里保留兜底，避免异常调试入口提前调用方向转换时得到未初始化角度。
-     */
-    return eulerAngle.yaw;
-}
-
 static float map_dir_to_yaw_deg(control_map_dir_t dir)
 {
-    float base_yaw_deg = get_start_yaw_base_deg();
-    float delta_yaw_deg = 0.0f;
-
-    /*
-     * 所有地图方向都以发车时记录的车头方向为基准：
-     * - 右：发车 yaw
-     * - 上：发车 yaw + 90 deg
-     * - 左：发车 yaw + 180 deg
-     * - 下：发车 yaw - 90 deg
-     *
-     * 这里不读取视觉传来的 yaw。相机只负责给出位置，方向闭环完全由 IMU 当前 yaw
-     * 向“发车 yaw + 偏移”收敛，避免视觉方向抖动或坐标定义不一致污染整车转向。
-     */
+    /* Formal-run yaw is absolute and may only be one of the four map axes. */
     switch (dir)
     {
     case CONTROL_MAP_DIR_UP:
-        delta_yaw_deg = 90.0f;
-        break;
+        return 90.0f;
     case CONTROL_MAP_DIR_LEFT:
-        delta_yaw_deg = 180.0f;
-        break;
+        return 180.0f;
     case CONTROL_MAP_DIR_DOWN:
-        delta_yaw_deg = -90.0f;
-        break;
+        return 270.0f;
     case CONTROL_MAP_DIR_RIGHT:
     default:
-        delta_yaw_deg = 0.0f;
-        break;
+        return 0.0f;
     }
-
-    return wrap_yaw_deg_local(base_yaw_deg + delta_yaw_deg);
 }
 
 static control_map_dir_t get_prestart_depart_map_dir(void)
@@ -1059,6 +1017,7 @@ static void configure_flow_for_level(uint8 level_index)
 static void start_current_level_launch(void)
 {
     reset_level_runtime_state_for_launch();
+    path_follow_set_target_yaw(0.0f);
     configure_flow_for_level(g_continuous_level_index);
     g_level_start_localization_required = 1U;
 
@@ -1073,6 +1032,7 @@ static void start_current_level_launch(void)
 static void start_single_launch(void)
 {
     reset_level_runtime_state_for_launch();
+    path_follow_set_target_yaw(0.0f);
     g_continuous_run_active = 0U;
     g_continuous_level_index = 0U;
     g_control_flow_phase = CONTROL_FLOW_IDENTIFY;
@@ -1100,8 +1060,7 @@ static void reset_control_runtime_state(void)
     g_continuous_level_index = 0U;
     g_level_start_localization_required = 0U;
     g_continuous_preset_base_index = 0U;
-    g_start_yaw_deg = 0.0f;
-    g_start_yaw_ready = 0U;
+    path_follow_set_target_yaw(0.0f);
     reset_level_runtime_state_for_launch();
     control_disable_yaw_closed_loop();
     g_control_stage = CONTROL_STAGE_IDLE;
@@ -3230,7 +3189,6 @@ static void handle_prestart_move(void)
         car_stop_flag = 0U;
 
         path_follow_get_status(&st);
-        capture_start_yaw_if_needed();
         hold_yaw_deg = map_dir_to_yaw_deg(CONTROL_MAP_DIR_RIGHT);
         prestart_dir = get_prestart_depart_map_dir();
         move_yaw_deg = map_dir_to_yaw_deg(prestart_dir);

@@ -70,14 +70,14 @@
 
 /* Closed-loop tuned dead-zone feedforward for the final motor driver board. */
 #define MOTOR_DEADZONE_TARGET_MIN_COUNTS  2
-#define MOTOR_UL_DEADZONE_FWD             280
-#define MOTOR_UL_DEADZONE_REV             210
-#define MOTOR_UR_DEADZONE_FWD             325
-#define MOTOR_UR_DEADZONE_REV             245
-#define MOTOR_DL_DEADZONE_FWD             290
-#define MOTOR_DL_DEADZONE_REV             230
-#define MOTOR_DR_DEADZONE_FWD             380
-#define MOTOR_DR_DEADZONE_REV             360
+#define MOTOR_UL_DEADZONE_FWD             420
+#define MOTOR_UL_DEADZONE_REV             390
+#define MOTOR_UR_DEADZONE_FWD             495
+#define MOTOR_UR_DEADZONE_REV             429
+#define MOTOR_DL_DEADZONE_FWD             435
+#define MOTOR_DL_DEADZONE_REV             390
+#define MOTOR_DR_DEADZONE_FWD             550
+#define MOTOR_DR_DEADZONE_REV             637
 
 #define MOTOR_WHEEL_COUNT                  4
 #define MOTOR_WHEEL_UL                     0

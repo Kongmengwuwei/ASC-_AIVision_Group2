@@ -102,6 +102,9 @@ void pit_1_handler(void)
   // Sample encoders before either autonomous or Bluetooth motor control.
   encoder_get();
   control_tick_10ms();
+  // Schedule one compact car-state frame every 100 ms.  Formatting and UART
+  // transmission stay in BlueSerial_Task(), outside the control interrupt.
+  BlueSerial_TelemetryTick10ms();
   // Bluetooth takeover: when active, let BlueSerial own this 10ms motor-control tick.
   if (BlueSerial_IsControlActive())
   {

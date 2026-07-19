@@ -154,7 +154,7 @@ void Algorithm_Test_PresetInput_Init(size_t preset_index)
     path_follow_reset_pose((float)exec_start.row * GRID_SIZE_M,
                            (float)exec_start.col * GRID_SIZE_M,
                            preset->car_yaw_deg);
-    path_follow_hold_current_yaw();
+    path_follow_set_target_yaw(0.0f);
     (void)Algorithm_Test_PresetInput_ProvideCarPoseFrame();
 }
 

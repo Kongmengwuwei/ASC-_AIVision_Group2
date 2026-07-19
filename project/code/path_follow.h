@@ -80,6 +80,10 @@ void path_follow_init(float grid_size_m, float pulses_per_meter);
 void path_follow_set_position_pid_gains(float kp, float ki, float kd);
 void path_follow_set_position_pid_gains_x(float kp, float ki, float kd);
 void path_follow_set_position_pid_gains_y(float kp, float ki, float kd);
+void path_follow_set_rotate_yaw_pid_gains(float kp, float ki, float kd);
+void path_follow_get_rotate_yaw_pid_gains(float *kp, float *ki, float *kd);
+void path_follow_set_rotate_yaw_feedforward(float feedforward_degps);
+float path_follow_get_rotate_yaw_feedforward(void);
 void path_follow_set_position_speed_factor(float factor);
 void path_follow_set_position_speed_factor_x(float factor);
 void path_follow_set_position_speed_factor_y(float factor);
@@ -94,7 +98,6 @@ void path_follow_set_path_with_grid_axis(const Position *path, size_t steps, flo
                                          uint8 pause_events_enabled, uint8 segment_axis);
 void path_follow_set_target(int target_row, int target_col);
 void path_follow_set_target_yaw(float target_yaw_deg);
-void path_follow_hold_current_yaw(void);
 void path_follow_set_stationary_yaw_hold_enabled(uint8 enabled);
 uint8 path_follow_get_stationary_yaw_hold_enabled(void);
 void path_follow_start_rotate_to_yaw(float target_yaw_deg);

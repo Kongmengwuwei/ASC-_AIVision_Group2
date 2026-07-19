@@ -435,14 +435,14 @@
               <FilePath>..\code\kalman_filter.h</FilePath>
             </File>
             <File>
-              <FileName>matrix.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>..\code\matrix.c</FilePath>
-            </File>
-            <File>
               <FileName>matrix.h</FileName>
               <FileType>5</FileType>
               <FilePath>..\code\matrix.h</FilePath>
+            </File>
+            <File>
+              <FileName>matrix.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\code\matrix.c</FilePath>
             </File>
             <File>
               <FileName>menu.c</FileName>

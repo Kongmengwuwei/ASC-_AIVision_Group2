@@ -22,16 +22,16 @@
 #define PF_INVALID_BAND                  0xFFU   /* 无效 S 曲线速度档位。 */
 #define PF_DT_S                          (1.0f / (float)PID_RATE) /* 单次控制周期，单位 s。 */
 #define PF_SEGMENT_END_SPEED_CMPS        0.0f    /* 目标中心处的规划终速度，单位 cm/s。 */
-#define PF_POSITION_LOOP_RELEASE_M       0.55f   /* 近点接管距离上限；高速档按理论制动距离动态接管，单位 m。 */
-#define PF_ARRIVAL_MAX_SPEED_CMPS        5.0f    /* 完成目标允许的最大实测平移速度，单位 cm/s。 */
+#define PF_POSITION_LOOP_RELEASE_M       0.75f   /* 近点接管距离上限；高速档按理论制动距离动态接管，单位 m。 */
+#define PF_ARRIVAL_MAX_SPEED_CMPS        3.0f    /* 完成目标允许的最大实测平移速度，单位 cm/s。 */
 #define PF_CROSSED_TARGET_MAX_SPEED_CMPS 3.0f    /* 越过目标平面后的切段沿程速度上限，单位 cm/s。 */
 #define PF_YAW_FEEDFORWARD_DEADBAND_DEG  0.25f   /* 克服 0.25~0.5 deg 残差死区，极小误差再由浮点 PID 细调。 */
-#define PF_APPROACH_DECEL_CMPS2          130.0f  /* S 曲线参数无效时的接近减速度，单位 cm/s^2。 */
+#define PF_APPROACH_DECEL_CMPS2          120.0f  /* S 曲线参数无效时的接近减速度，单位 cm/s^2。 */
 #define PF_POSITION_SPEED_FACTOR_MIN     0.10f   /* 手动制动速度包络系数下限。 */
 #define PF_POSITION_SPEED_FACTOR_MAX     1.00f   /* 制动速度包络系数上限。 */
-#define PF_POSITION_X_SPEED_FACTOR_DEFAULT 0.70f /* X轴实时剩余距离速度上限系数。 */
-#define PF_POSITION_Y_SPEED_FACTOR_DEFAULT 0.70f /* Y轴实时剩余距离速度上限系数。 */
-#define PF_POSITION_RELEASE_MARGIN_M     0.10f   /* 扩大的滑移、执行及位置环接管余量，单位 m。 */
+#define PF_POSITION_X_SPEED_FACTOR_DEFAULT 0.95f /* X轴实时剩余距离速度上限系数。 */
+#define PF_POSITION_Y_SPEED_FACTOR_DEFAULT 0.90f /* Y轴实时剩余距离速度上限系数。 */
+#define PF_POSITION_RELEASE_MARGIN_M     0.05f   /* 扩大的滑移、执行及位置环接管余量，单位 m。 */
 #define PF_SPEED_TEST_SETTLE_COUNTS      2       /* 纯S曲线结束后每轮允许的静止计数，count/10ms。 */
 #define PF_SPEED_TEST_SETTLE_TICKS       5U      /* 四轮连续静止50ms后结束测试。 */
 #define PF_SPEED_TEST_SETTLE_TIMEOUT     500U    /* 最长保留5s零速闭环尾段。 */
@@ -43,12 +43,12 @@
 #define PF_Y_CROSSTALK_RIGHT_X_COMP_K     -0.016f /* 多组右移原始串轴均值接近 0，先不补偿。 */
 #define PF_LATERAL_LEFT_ODOMETRY_SCALE    1.0090f /* 三地图区域五组往返均值：左移里程约多 0.9%。 */
 
-#define PF_POSITION_X_KP                 4.95f   /* X轴近目标位置速度系数。 */
+#define PF_POSITION_X_KP                 3.7f   /* X轴近目标位置速度系数。 */
 #define PF_POSITION_X_KI                 0.0f    /* X轴近目标位置积分系数。 */
-#define PF_POSITION_X_KD                 8.0f    /* X轴近目标位置微分系数。 */
-#define PF_POSITION_Y_KP                 6.5f   /* Y轴独立近目标位置速度系数。 */
+#define PF_POSITION_X_KD                 5.9f    /* X轴近目标位置微分系数。 */
+#define PF_POSITION_Y_KP                 5.4f   /* Y轴独立近目标位置速度系数。 */
 #define PF_POSITION_Y_KI                 0.0f    /* Y轴独立近目标位置积分系数。 */
-#define PF_POSITION_Y_KD                 8.0f    /* Y轴独立近目标位置微分系数。 */
+#define PF_POSITION_Y_KD                 7.7f    /* Y轴独立近目标位置微分系数。 */
 #define PF_POSITION_X_MAX_IOUT_CMPS      200.0f  /* X轴位置环积分输出上限，单位 cm/s。 */
 #define PF_POSITION_X_MAX_OUT_CMPS       200.0f  /* X轴位置环总输出上限，单位 cm/s。 */
 #define PF_POSITION_Y_MAX_IOUT_CMPS      200.0f  /* Y轴位置环积分输出上限，单位 cm/s。 */
@@ -68,6 +68,9 @@
 #define PF_ROTATE_YAW_KI                 0.0f    /* 原地旋转专用积分系数。 */
 #define PF_ROTATE_YAW_KD                 8.5f    /* 原地旋转专用微分系数。 */
 #define PF_ROTATE_YAW_FEEDFORWARD_DEGPS  8.0f    /* 原地旋转低速前馈，单位 deg/s。 */
+#define PF_ROTATE_POSITION_HOLD_KP_CMPS_PER_CM 1.5f /* 每偏移 1 cm 产生的反向平移速度，单位 cm/s。 */
+#define PF_ROTATE_POSITION_HOLD_MAX_CMPS 12.0f  /* 旋转位置保持最大平移纠偏速度，单位 cm/s。 */
+#define PF_ROTATE_POSITION_HOLD_DEADBAND_CM 0.3f /* 旋转位置保持死区，避免编码器噪声引起抖动。 */
 
 typedef struct
 {
@@ -189,6 +192,8 @@ typedef struct
     uint8 paused;
     uint8 pause_events_enabled;
     uint8 rotate_only_active;
+    float rotate_hold_x_m;
+    float rotate_hold_y_m;
     uint8 profile_active;
     uint8 segment_axis_override;
 } pf_context_t;
@@ -236,6 +241,7 @@ static float path_position_speed_limit_factor_x = PF_POSITION_X_SPEED_FACTOR_DEF
 static float path_position_speed_limit_factor_y = PF_POSITION_Y_SPEED_FACTOR_DEFAULT;
 float path_yaw_feedforward_min_degps = PF_YAW_FEEDFORWARD_MIN_DEGPS;
 float path_yaw_feedforward_deadband_deg = PF_YAW_FEEDFORWARD_DEADBAND_DEG;
+static float path_rotate_yaw_feedforward_degps = PF_ROTATE_YAW_FEEDFORWARD_DEGPS;
 
 /* Runtime copies of the boot defaults; BlueSerial sliders tune these. */
 float path_y_crosstalk_left_x_comp_k = PF_Y_CROSSTALK_LEFT_X_COMP_K;
@@ -249,20 +255,19 @@ float path_rotate_center_offset_y_cm = 0.0f;
 
 static const path_follow_scurve_band_cfg_t g_default_speed_bands[PATH_FOLLOW_SCURVE_BAND_COUNT] =
 {
-    {0.30f,   0.60f, 1.30f, 8.00f},
-    {0.50f,   0.80f, 1.30f, 8.00f},
-    {0.70f,   1.05f, 1.30f, 8.00f},
-    {0.90f,   1.25f, 1.30f, 8.00f},
-    {1000.0f, 1.80f, 1.30f, 8.00f}
+    {0.30f,   0.40f, 1.20f, 5.00f},
+    {0.50f,   0.60f, 1.20f, 5.00f},
+    {0.70f,   0.80f, 1.20f, 5.00f},
+    {0.90f,   0.95f, 1.20f, 5.00f},
+    {130.0f, 1.30f, 1.20f, 5.00f}
 };
 
 path_follow_scurve_band_cfg_t g_path_follow_scurve_band_cfg[PATH_FOLLOW_SCURVE_BAND_COUNT] =
-{
-     {0.30f,   0.60f, 1.30f, 8.00f},
-    {0.50f,   0.80f, 1.30f, 8.00f},
-    {0.70f,   1.05f, 1.30f, 8.00f},
-    {0.90f,   1.25f, 1.30f, 8.00f},
-    {1000.0f, 1.80f, 1.30f, 8.00f}
+{ {0.30f,   0.40f, 1.20f, 5.00f},
+    {0.50f,   0.60f, 1.20f, 5.00f},
+    {0.70f,   0.80f, 1.20f, 5.00f},
+    {0.90f,   0.95f, 1.20f, 5.00f},
+    {130.0f, 1.30f, 1.20f, 5.00f}
 };
 
 static float pf_clamp(float value, float min_value, float max_value)
@@ -302,6 +307,23 @@ static float pf_wrap_deg(float angle_deg)
         angle_deg += 360.0f;
     }
     return angle_deg;
+}
+
+static float pf_cardinal_target_deg(float angle_deg)
+{
+    uint8 quarter;
+
+    angle_deg = fmodf(angle_deg, 360.0f);
+    if (angle_deg < 0.0f)
+    {
+        angle_deg += 360.0f;
+    }
+    quarter = (uint8)floorf((angle_deg + 45.0f) / 90.0f);
+    if (quarter >= 4U)
+    {
+        quarter = 0U;
+    }
+    return (float)quarter * 90.0f;
 }
 
 static float pf_yaw_error_deg(float current_deg, float target_deg)
@@ -802,6 +824,9 @@ static float pf_profile_fault_speed(float current_speed_cmps,
 }
 
 static uint8 pf_target_needs_pause(void);
+static void pf_apply_rotate_position_hold(float yaw_deg,
+                                          float *vx_body_cmps,
+                                          float *vy_body_cmps);
 
 static float pf_segment_end_speed_cmps(void)
 {
@@ -1487,9 +1512,12 @@ static void pf_output_rotate(float yaw_deg, path_follow_output_t *out)
         out->reached = 0U;
         out->vx_cmd = 0.0f;
         out->vy_cmd = 0.0f;
+        pf_apply_rotate_position_hold(yaw_deg,
+                                      &out->vx_cmd,
+                                      &out->vy_cmd);
         out->omega_cmd = pf_yaw_command_radps(yaw_deg,
                                               &pid_yaw_rotate,
-                                              PF_ROTATE_YAW_FEEDFORWARD_DEGPS);
+                                              path_rotate_yaw_feedforward_degps);
         out->target_idx = g_pf.target_idx;
     }
 }
@@ -1906,6 +1934,101 @@ void path_follow_set_position_pid_gains_y(float kp, float ki, float kd)
     PID_Clear(&pid_stay_y);
 }
 
+void path_follow_set_rotate_yaw_pid_gains(float kp, float ki, float kd)
+{
+    pid_yaw_rotate.fKp = fmaxf(kp, 0.0f);
+    pid_yaw_rotate.fKi = fmaxf(ki, 0.0f);
+    pid_yaw_rotate.fKd = fmaxf(kd, 0.0f);
+    PID_Clear(&pid_yaw_rotate);
+}
+
+void path_follow_get_rotate_yaw_pid_gains(float *kp, float *ki, float *kd)
+{
+    if (kp != NULL)
+    {
+        *kp = pid_yaw_rotate.fKp;
+    }
+    if (ki != NULL)
+    {
+        *ki = pid_yaw_rotate.fKi;
+    }
+    if (kd != NULL)
+    {
+        *kd = pid_yaw_rotate.fKd;
+    }
+}
+
+static void pf_apply_rotate_position_hold(float yaw_deg,
+                                          float *vx_body_cmps,
+                                          float *vy_body_cmps)
+{
+    float error_x_cm;
+    float error_y_cm;
+    float error_norm_cm;
+    float vx_world_cmps;
+    float vy_world_cmps;
+    float speed_norm_cmps;
+    float scale;
+    float vx_correction_body_cmps;
+    float vy_correction_body_cmps;
+
+    if (vx_body_cmps == NULL || vy_body_cmps == NULL)
+    {
+        return;
+    }
+
+    error_x_cm = (g_pf.rotate_hold_x_m - g_pf.pose.x_m) * 100.0f;
+    error_y_cm = (g_pf.rotate_hold_y_m - g_pf.pose.y_m) * 100.0f;
+    if (fabsf(error_x_cm) <= PF_ROTATE_POSITION_HOLD_DEADBAND_CM)
+    {
+        error_x_cm = 0.0f;
+    }
+    if (fabsf(error_y_cm) <= PF_ROTATE_POSITION_HOLD_DEADBAND_CM)
+    {
+        error_y_cm = 0.0f;
+    }
+
+    vx_world_cmps = error_x_cm * PF_ROTATE_POSITION_HOLD_KP_CMPS_PER_CM;
+    vy_world_cmps = error_y_cm * PF_ROTATE_POSITION_HOLD_KP_CMPS_PER_CM;
+    speed_norm_cmps = sqrtf(vx_world_cmps * vx_world_cmps +
+                            vy_world_cmps * vy_world_cmps);
+    if (speed_norm_cmps > PF_ROTATE_POSITION_HOLD_MAX_CMPS &&
+        speed_norm_cmps > 0.0f)
+    {
+        scale = PF_ROTATE_POSITION_HOLD_MAX_CMPS / speed_norm_cmps;
+        vx_world_cmps *= scale;
+        vy_world_cmps *= scale;
+    }
+
+    pf_world_to_body(vx_world_cmps,
+                     vy_world_cmps,
+                     yaw_deg,
+                     &vx_correction_body_cmps,
+                     &vy_correction_body_cmps);
+    *vx_body_cmps += vx_correction_body_cmps;
+    *vy_body_cmps += vy_correction_body_cmps;
+
+    error_norm_cm = sqrtf(error_x_cm * error_x_cm + error_y_cm * error_y_cm);
+    g_pf.debug.distance_m = error_norm_cm * 0.01f;
+    g_pf.debug.target_x_m = g_pf.rotate_hold_x_m;
+    g_pf.debug.target_y_m = g_pf.rotate_hold_y_m;
+    if (error_norm_cm > 0.0f)
+    {
+        g_pf.debug.dir_x = error_x_cm / error_norm_cm;
+        g_pf.debug.dir_y = error_y_cm / error_norm_cm;
+    }
+}
+
+void path_follow_set_rotate_yaw_feedforward(float feedforward_degps)
+{
+    path_rotate_yaw_feedforward_degps = fmaxf(feedforward_degps, 0.0f);
+}
+
+float path_follow_get_rotate_yaw_feedforward(void)
+{
+    return path_rotate_yaw_feedforward_degps;
+}
+
 void path_follow_set_position_speed_factor(float factor)
 {
     path_follow_set_position_speed_factor_x(factor);
@@ -2046,12 +2169,9 @@ void path_follow_set_target(int target_row, int target_col)
 
 void path_follow_set_target_yaw(float target_yaw_deg)
 {
-    g_pf.target_yaw_deg = pf_wrap_deg(target_yaw_deg);
-}
-
-void path_follow_hold_current_yaw(void)
-{
-    path_follow_set_target_yaw(g_pf.pose.yaw_deg);
+    /* Global invariant: a commanded heading is always a map-cardinal angle.
+     * Measured yaw is never allowed to become the next target. */
+    g_pf.target_yaw_deg = pf_cardinal_target_deg(target_yaw_deg);
 }
 
 void path_follow_set_stationary_yaw_hold_enabled(uint8 enabled)
@@ -2071,6 +2191,8 @@ uint8 path_follow_get_stationary_yaw_hold_enabled(void)
 void path_follow_start_rotate_to_yaw(float target_yaw_deg)
 {
     pf_apply_path(NULL, 0U, g_pf.default_grid_m, 0U, PATH_FOLLOW_AXIS_AUTO);
+    g_pf.rotate_hold_x_m = g_pf.pose.x_m;
+    g_pf.rotate_hold_y_m = g_pf.pose.y_m;
     path_follow_set_target_yaw(target_yaw_deg);
     PID_Clear(&pid_yaw_rotate);
     g_pf.rotate_only_active = 1U;

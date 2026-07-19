@@ -4,6 +4,7 @@
  * 兼容的蓝牙帧格式：
  *   [slider,name,value]  滑条调参，例如 [slider,speed,40]
  *   [slider,line.kp,value] / [slider,line.min,value] 调节运行段法向纠偏。
+ *   [slider,posf.kp,value] / [slider,posb.kp,value] 分别调前进/后退位置环。
  *   [button_name]        按钮命令，例如 [forward]、[start]、[stop]
  *   [button,name]        兼容部分小程序发送的 button 前缀格式
  *
@@ -2422,6 +2423,8 @@ static uint8 BlueSerial_SetSlider(const char *name, float value)
         primask = interrupt_global_disable();
         path_follow_set_position_pid_gains_x(applied_value, pid_stay.fKi, pid_stay.fKd);
         path_follow_set_position_pid_gains_y(applied_value, pid_stay_y.fKi, pid_stay_y.fKd);
+        path_follow_set_position_pid_gains_backward(
+            applied_value, pid_stay_backward.fKi, pid_stay_backward.fKd);
         interrupt_global_enable(primask);
         BlueSerial_Printf("OK pos.kp=%.4f\r\n", applied_value);
         return 1U;
@@ -2432,6 +2435,8 @@ static uint8 BlueSerial_SetSlider(const char *name, float value)
         primask = interrupt_global_disable();
         path_follow_set_position_pid_gains_x(pid_stay.fKp, applied_value, pid_stay.fKd);
         path_follow_set_position_pid_gains_y(pid_stay_y.fKp, applied_value, pid_stay_y.fKd);
+        path_follow_set_position_pid_gains_backward(
+            pid_stay_backward.fKp, applied_value, pid_stay_backward.fKd);
         interrupt_global_enable(primask);
         BlueSerial_Printf("OK pos.ki=%.4f\r\n", applied_value);
         return 1U;
@@ -2442,8 +2447,76 @@ static uint8 BlueSerial_SetSlider(const char *name, float value)
         primask = interrupt_global_disable();
         path_follow_set_position_pid_gains_x(pid_stay.fKp, pid_stay.fKi, applied_value);
         path_follow_set_position_pid_gains_y(pid_stay_y.fKp, pid_stay_y.fKi, applied_value);
+        path_follow_set_position_pid_gains_backward(
+            pid_stay_backward.fKp, pid_stay_backward.fKi, applied_value);
         interrupt_global_enable(primask);
         BlueSerial_Printf("OK pos.kd=%.4f\r\n", applied_value);
+        return 1U;
+    }
+    if (strcmp(name, "posf.kp") == 0 ||
+        strcmp(name, "position.forward.kp") == 0)
+    {
+        applied_value = BlueSerial_ClampFloat(value, 0.0f, BLUESERIAL_MAX_POSITION_KP);
+        primask = interrupt_global_disable();
+        path_follow_set_position_pid_gains_forward(
+            applied_value, pid_stay.fKi, pid_stay.fKd);
+        interrupt_global_enable(primask);
+        BlueSerial_Printf("OK posf.kp=%.4f\r\n", applied_value);
+        return 1U;
+    }
+    if (strcmp(name, "posf.ki") == 0 ||
+        strcmp(name, "position.forward.ki") == 0)
+    {
+        applied_value = BlueSerial_ClampFloat(value, 0.0f, BLUESERIAL_MAX_POSITION_KI);
+        primask = interrupt_global_disable();
+        path_follow_set_position_pid_gains_forward(
+            pid_stay.fKp, applied_value, pid_stay.fKd);
+        interrupt_global_enable(primask);
+        BlueSerial_Printf("OK posf.ki=%.4f\r\n", applied_value);
+        return 1U;
+    }
+    if (strcmp(name, "posf.kd") == 0 ||
+        strcmp(name, "position.forward.kd") == 0)
+    {
+        applied_value = BlueSerial_ClampFloat(value, 0.0f, BLUESERIAL_MAX_POSITION_KD);
+        primask = interrupt_global_disable();
+        path_follow_set_position_pid_gains_forward(
+            pid_stay.fKp, pid_stay.fKi, applied_value);
+        interrupt_global_enable(primask);
+        BlueSerial_Printf("OK posf.kd=%.4f\r\n", applied_value);
+        return 1U;
+    }
+    if (strcmp(name, "posb.kp") == 0 ||
+        strcmp(name, "position.backward.kp") == 0)
+    {
+        applied_value = BlueSerial_ClampFloat(value, 0.0f, BLUESERIAL_MAX_POSITION_KP);
+        primask = interrupt_global_disable();
+        path_follow_set_position_pid_gains_backward(
+            applied_value, pid_stay_backward.fKi, pid_stay_backward.fKd);
+        interrupt_global_enable(primask);
+        BlueSerial_Printf("OK posb.kp=%.4f\r\n", applied_value);
+        return 1U;
+    }
+    if (strcmp(name, "posb.ki") == 0 ||
+        strcmp(name, "position.backward.ki") == 0)
+    {
+        applied_value = BlueSerial_ClampFloat(value, 0.0f, BLUESERIAL_MAX_POSITION_KI);
+        primask = interrupt_global_disable();
+        path_follow_set_position_pid_gains_backward(
+            pid_stay_backward.fKp, applied_value, pid_stay_backward.fKd);
+        interrupt_global_enable(primask);
+        BlueSerial_Printf("OK posb.ki=%.4f\r\n", applied_value);
+        return 1U;
+    }
+    if (strcmp(name, "posb.kd") == 0 ||
+        strcmp(name, "position.backward.kd") == 0)
+    {
+        applied_value = BlueSerial_ClampFloat(value, 0.0f, BLUESERIAL_MAX_POSITION_KD);
+        primask = interrupt_global_disable();
+        path_follow_set_position_pid_gains_backward(
+            pid_stay_backward.fKp, pid_stay_backward.fKi, applied_value);
+        interrupt_global_enable(primask);
+        BlueSerial_Printf("OK posb.kd=%.4f\r\n", applied_value);
         return 1U;
     }
     if (strcmp(name, "pos.envelope") == 0 ||
@@ -2656,6 +2729,9 @@ static void BlueSerial_PrintStatus(void)
     float position_y_kp;
     float position_y_ki;
     float position_y_kd;
+    float position_backward_x_kp;
+    float position_backward_x_ki;
+    float position_backward_x_kd;
     float position_x_envelope;
     float position_y_envelope;
     uint8 point_target_valid;
@@ -2688,6 +2764,9 @@ static void BlueSerial_PrintStatus(void)
     position_y_kp = pid_stay_y.fKp;
     position_y_ki = pid_stay_y.fKi;
     position_y_kd = pid_stay_y.fKd;
+    position_backward_x_kp = pid_stay_backward.fKp;
+    position_backward_x_ki = pid_stay_backward.fKi;
+    position_backward_x_kd = pid_stay_backward.fKd;
     position_x_envelope = path_follow_get_position_speed_factor_x();
     position_y_envelope = path_follow_get_position_speed_factor_y();
     point_target_valid = g_point_target_valid;
@@ -2726,6 +2805,10 @@ static void BlueSerial_PrintStatus(void)
     BlueSerial_Printf("TUNE line.kp=%.4f line.min=%.3fcmps\r\n",
                       line_guide_kp,
                       line_guide_min_cmps);
+    BlueSerial_Printf("TUNE posback=%.4f,%.4f,%.4f\r\n",
+                      position_backward_x_kp,
+                      position_backward_x_ki,
+                      position_backward_x_kd);
     if (point_target_valid)
     {
         BlueSerial_Printf("TARGET pending=1 target_m=%.3f,%.3f\r\n",

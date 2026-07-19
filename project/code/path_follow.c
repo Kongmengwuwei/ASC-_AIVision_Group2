@@ -43,12 +43,15 @@
 #define PF_Y_CROSSTALK_RIGHT_X_COMP_K     -0.016f /* 多组右移原始串轴均值接近 0，先不补偿。 */
 #define PF_LATERAL_LEFT_ODOMETRY_SCALE    1.0090f /* 三地图区域五组往返均值：左移里程约多 0.9%。 */
 
-#define PF_POSITION_X_KP                 3.7f   /* X轴近目标位置速度系数。 */
-#define PF_POSITION_X_KI                 0.0f    /* X轴近目标位置积分系数。 */
-#define PF_POSITION_X_KD                 5.9f    /* X轴近目标位置微分系数。 */
-#define PF_POSITION_Y_KP                 5.4f   /* Y轴独立近目标位置速度系数。 */
-#define PF_POSITION_Y_KI                 0.0f    /* Y轴独立近目标位置积分系数。 */
-#define PF_POSITION_Y_KD                 7.7f    /* Y轴独立近目标位置微分系数。 */
+#define PF_POSITION_X_KP                 3.7f    /* 车体 X 前进直走位置环。 */
+#define PF_POSITION_X_KI                 0.0f
+#define PF_POSITION_X_KD                 5.9f
+#define PF_POSITION_Y_KP                 5.4f    /* 车体 Y 左右侧移位置环。 */
+#define PF_POSITION_Y_KI                 0.0f
+#define PF_POSITION_Y_KD                 7.7f
+#define PF_POSITION_BACKWARD_X_KP        PF_POSITION_X_KP /* 后退 X 位置环独立默认值。 */
+#define PF_POSITION_BACKWARD_X_KI        PF_POSITION_X_KI
+#define PF_POSITION_BACKWARD_X_KD        PF_POSITION_X_KD
 #define PF_POSITION_X_MAX_IOUT_CMPS      200.0f  /* X轴位置环积分输出上限，单位 cm/s。 */
 #define PF_POSITION_X_MAX_OUT_CMPS       200.0f  /* X轴位置环总输出上限，单位 cm/s。 */
 #define PF_POSITION_Y_MAX_IOUT_CMPS      200.0f  /* Y轴位置环积分输出上限，单位 cm/s。 */
@@ -220,6 +223,7 @@ tagPID_T pid_world_x;
 tagPID_T pid_world_y;
 tagPID_T pid_stay;
 tagPID_T pid_stay_y;
+tagPID_T pid_stay_backward;
 tagPID_T pid_yaw;
 static tagPID_T pid_yaw_rotate;
 tagPID_T pid_accel_yaw;
@@ -387,6 +391,7 @@ static void pf_reset_motion_state(void)
     PID_Clear(&pid_world_y);
     PID_Clear(&pid_stay);
     PID_Clear(&pid_stay_y);
+    PID_Clear(&pid_stay_backward);
     car_direction = 0U;
 }
 
@@ -402,21 +407,27 @@ static void pf_point_to_world(Position point, float grid_m, float *x_m, float *y
     }
 }
 
-static uint8 pf_segment_axis(float dx_m, float dy_m)
+static uint8 pf_segment_axis(float dx_world_m, float dy_world_m)
 {
     const float axis_epsilon_m = 0.001f;
+    float yaw_rad = g_pf.target_yaw_deg * ((float)M_PI / 180.0f);
+    float dx_body_m = dx_world_m * cosf(yaw_rad) +
+                      dy_world_m * sinf(yaw_rad);
+    float dy_body_m = -dx_world_m * sinf(yaw_rad) +
+                       dy_world_m * cosf(yaw_rad);
 
-    if (fabsf(dx_m) <= axis_epsilon_m && fabsf(dy_m) <= axis_epsilon_m)
+    if (fabsf(dx_body_m) <= axis_epsilon_m &&
+        fabsf(dy_body_m) <= axis_epsilon_m)
     {
         return 0U;
     }
-    if (fabsf(dy_m) <= axis_epsilon_m)
+    if (fabsf(dy_body_m) <= axis_epsilon_m)
     {
-        return 1U;
+        return PATH_FOLLOW_AXIS_X;
     }
-    if (fabsf(dx_m) <= axis_epsilon_m)
+    if (fabsf(dx_body_m) <= axis_epsilon_m)
     {
-        return 2U;
+        return PATH_FOLLOW_AXIS_Y;
     }
     return 3U;
 }
@@ -1120,9 +1131,22 @@ static void pf_apply_position_loop(const pf_geometry_t *geometry,
                                    float *vy_world_cmps,
                                    float blend)
 {
+    tagPID_T *position_pid_x;
+    float error_x_world_cm;
+    float error_y_world_cm;
+    float error_x_body_cm;
+    float error_y_body_cm;
+    float position_vx_body_cmps;
+    float position_vy_body_cmps;
     float position_vx_cmps;
     float position_vy_cmps;
     float speed_weight;
+    float target_yaw_rad;
+    float pose_yaw_rad;
+    float cos_pose_yaw;
+    float sin_pose_yaw;
+    float forward_projection;
+    uint8 backward_segment;
 
     if (geometry == NULL || vx_world_cmps == NULL || vy_world_cmps == NULL)
     {
@@ -1134,20 +1158,44 @@ static void pf_apply_position_loop(const pf_geometry_t *geometry,
         return;
     }
 
+    target_yaw_rad = g_pf.target_yaw_deg * ((float)M_PI / 180.0f);
+    forward_projection = geometry->dir_x * cosf(target_yaw_rad) +
+                         geometry->dir_y * sinf(target_yaw_rad);
+    backward_segment = (forward_projection < -0.5f) ? 1U : 0U;
+    position_pid_x = backward_segment ? &pid_stay_backward : &pid_stay;
+
+    /* Position is stored in the world frame, but X/Y tuning represents the
+     * mecanum body axes: X is straight motion and Y is lateral motion. */
+    pose_yaw_rad = g_pf.pose.yaw_deg * ((float)M_PI / 180.0f);
+    cos_pose_yaw = cosf(pose_yaw_rad);
+    sin_pose_yaw = sinf(pose_yaw_rad);
+    error_x_world_cm = geometry->dx_m * 100.0f;
+    error_y_world_cm = geometry->dy_m * 100.0f;
+    error_x_body_cm = error_x_world_cm * cos_pose_yaw +
+                      error_y_world_cm * sin_pose_yaw;
+    error_y_body_cm = -error_x_world_cm * sin_pose_yaw +
+                       error_y_world_cm * cos_pose_yaw;
+
     /* PID_Location_Calculate() keeps its historical int return type for
      * compatibility with the rest of the project.  Its internal controller
      * output is float, however, and the near-target position loop needs that
      * resolution: truncating here used to discard every correction below
      * 1 cm/s and produced a measurable final-position quantisation. */
-    (void)PID_Location_Calculate(&pid_stay,
-                                 g_pf.pose.x_m * 100.0f,
-                                 geometry->target_x_m * 100.0f);
-    position_vx_cmps = pid_stay.fCtrl_Out;
+    (void)PID_Location_Calculate(position_pid_x,
+                                 0.0f,
+                                 error_x_body_cm);
+    position_vx_body_cmps = position_pid_x->fCtrl_Out;
 
     (void)PID_Location_Calculate(&pid_stay_y,
-                                 g_pf.pose.y_m * 100.0f,
-                                 geometry->target_y_m * 100.0f);
-    position_vy_cmps = pid_stay_y.fCtrl_Out;
+                                 0.0f,
+                                 error_y_body_cm);
+    position_vy_body_cmps = pid_stay_y.fCtrl_Out;
+
+    /* The downstream blend and one-way limiter operate in the world frame. */
+    position_vx_cmps = position_vx_body_cmps * cos_pose_yaw -
+                       position_vy_body_cmps * sin_pose_yaw;
+    position_vy_cmps = position_vx_body_cmps * sin_pose_yaw +
+                       position_vy_body_cmps * cos_pose_yaw;
 
     blend = pf_clamp(blend, 0.0f, 1.0f);
     speed_weight = 1.0f - blend;
@@ -1909,7 +1957,8 @@ void path_follow_init(float grid_size_m, float pulses_per_meter)
                        PF_MAX_ANGULAR_SPEED_DEGPS,
                        PF_YAW_FILTER_ALPHA);
 
-    /* X/Y keep independent gains and controller histories. */
+    /* Body X forward/backward and body Y lateral motion keep independent
+     * gains and controller histories. */
     pf_init_pid_object(&pid_stay,
                        PF_POSITION_X_KP,
                        PF_POSITION_X_KI,
@@ -1924,6 +1973,13 @@ void path_follow_init(float grid_size_m, float pulses_per_meter)
                        PF_POSITION_Y_MAX_OUT_CMPS,
                        PF_POSITION_FILTER_ALPHA);
     pid_stay_y.fMax_Iout = PF_POSITION_Y_MAX_IOUT_CMPS;
+    pf_init_pid_object(&pid_stay_backward,
+                       PF_POSITION_BACKWARD_X_KP,
+                       PF_POSITION_BACKWARD_X_KI,
+                       PF_POSITION_BACKWARD_X_KD,
+                       PF_POSITION_X_MAX_OUT_CMPS,
+                       PF_POSITION_FILTER_ALPHA);
+    pid_stay_backward.fMax_Iout = PF_POSITION_X_MAX_IOUT_CMPS;
 
     /* Historical world PID objects remain link-compatible but inactive. */
     pf_init_pid_object(&pid_world_x, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f);
@@ -1935,6 +1991,7 @@ void path_follow_set_position_pid_gains(float kp, float ki, float kd)
 {
     path_follow_set_position_pid_gains_x(kp, ki, kd);
     path_follow_set_position_pid_gains_y(kp, ki, kd);
+    path_follow_set_position_pid_gains_backward(kp, ki, kd);
 }
 
 void path_follow_set_position_pid_gains_x(float kp, float ki, float kd)
@@ -1951,6 +2008,19 @@ void path_follow_set_position_pid_gains_y(float kp, float ki, float kd)
     pid_stay_y.fKi = fmaxf(ki, 0.0f);
     pid_stay_y.fKd = fmaxf(kd, 0.0f);
     PID_Clear(&pid_stay_y);
+}
+
+void path_follow_set_position_pid_gains_forward(float kp, float ki, float kd)
+{
+    path_follow_set_position_pid_gains_x(kp, ki, kd);
+}
+
+void path_follow_set_position_pid_gains_backward(float kp, float ki, float kd)
+{
+    pid_stay_backward.fKp = fmaxf(kp, 0.0f);
+    pid_stay_backward.fKi = fmaxf(ki, 0.0f);
+    pid_stay_backward.fKd = fmaxf(kd, 0.0f);
+    PID_Clear(&pid_stay_backward);
 }
 
 void path_follow_set_rotate_yaw_pid_gains(float kp, float ki, float kd)

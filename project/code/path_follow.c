@@ -77,6 +77,11 @@
 #define PF_ROTATE_POSITION_HOLD_MAX_CMPS 12.0f  /* 旋转位置保持最大平移纠偏速度，单位 cm/s。 */
 #define PF_ROTATE_POSITION_HOLD_DEADBAND_CM 0.3f /* 旋转位置保持死区，避免编码器噪声引起抖动。 */
 
+/* Y-to-X crosstalk feedforward boot defaults, copied from the tuned branch.
+ * +Y selects LEFT and -Y selects RIGHT.  X-only motion is unaffected. */
+#define PF_Y_CROSSTALK_LEFT_X_COMP_K      0.010f
+#define PF_Y_CROSSTALK_RIGHT_X_COMP_K    -0.017f
+
 typedef struct
 {
     float x_m;

@@ -761,7 +761,7 @@ static const char *BlueSerial_VisionTypeName(VisionRecognitionType type)
 
 static uint8 BlueSerial_VisionDistanceGridCount(VisionRecognitionDistance distance)
 {
-    return (distance == VISION_RECOGNITION_DISTANCE_TWO_GRID) ? 2U : 1U;
+    return (distance == VISION_RECOGNITION_DISTANCE_THREE_GRID) ? 3U : 1U;
 }
 
 static void BlueSerial_PrintVisionResult(VisionRecognitionType type,
@@ -3033,10 +3033,10 @@ static uint8 BlueSerial_RunButton(const char *command)
                                       VISION_RECOGNITION_DISTANCE_ONE_GRID);
         return 1U;
     }
-    if (strcmp(command, "IMG2") == 0 || strcmp(command, "img2") == 0)
+    if (strcmp(command, "IMG3") == 0 || strcmp(command, "img3") == 0)
     {
         BlueSerial_StartVisionRequest(VISION_RECOGNITION_IMG,
-                                      VISION_RECOGNITION_DISTANCE_TWO_GRID);
+                                      VISION_RECOGNITION_DISTANCE_THREE_GRID);
         return 1U;
     }
     if (strcmp(command, "NUM1") == 0 || strcmp(command, "num1") == 0)
@@ -3045,10 +3045,10 @@ static uint8 BlueSerial_RunButton(const char *command)
                                       VISION_RECOGNITION_DISTANCE_ONE_GRID);
         return 1U;
     }
-    if (strcmp(command, "NUM2") == 0 || strcmp(command, "num2") == 0)
+    if (strcmp(command, "NUM3") == 0 || strcmp(command, "num3") == 0)
     {
         BlueSerial_StartVisionRequest(VISION_RECOGNITION_NUM,
-                                      VISION_RECOGNITION_DISTANCE_TWO_GRID);
+                                      VISION_RECOGNITION_DISTANCE_THREE_GRID);
         return 1U;
     }
 

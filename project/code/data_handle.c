@@ -1223,8 +1223,8 @@ static bool vision_get_request_mode(VisionRecognitionType type,
     }
 
     if (VISION_RECOGNITION_IMG == type) {
-        if (VISION_RECOGNITION_DISTANCE_TWO_GRID == distance) {
-            *mode = VISION_SNAP_MODE_IMG_TWO_GRID;
+        if (VISION_RECOGNITION_DISTANCE_THREE_GRID == distance) {
+            *mode = VISION_SNAP_MODE_IMG_FAR;
             return true;
         }
         if (VISION_RECOGNITION_DISTANCE_ONE_GRID == distance) {
@@ -1232,8 +1232,8 @@ static bool vision_get_request_mode(VisionRecognitionType type,
             return true;
         }
     } else if (VISION_RECOGNITION_NUM == type) {
-        if (VISION_RECOGNITION_DISTANCE_TWO_GRID == distance) {
-            *mode = VISION_SNAP_MODE_NUM_TWO_GRID;
+        if (VISION_RECOGNITION_DISTANCE_THREE_GRID == distance) {
+            *mode = VISION_SNAP_MODE_NUM_FAR;
             return true;
         }
         if (VISION_RECOGNITION_DISTANCE_ONE_GRID == distance) {

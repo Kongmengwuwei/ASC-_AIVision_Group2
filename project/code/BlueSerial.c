@@ -51,6 +51,9 @@
 #define BLUESERIAL_MAX_YAW_KD                   50.0f
 #define BLUESERIAL_MAX_YAW_FF_DEGPS             120.0f
 #define BLUESERIAL_MAX_Y_CROSSTALK_ABS          0.100f
+#define BLUESERIAL_MAX_POSITION_KP               20.0f
+#define BLUESERIAL_MAX_POSITION_KI               10.0f
+#define BLUESERIAL_MAX_POSITION_KD               50.0f
 #define BLUESERIAL_RELATIVE_GRID_M              0.01f
 #define BLUESERIAL_RELATIVE_CENTER_CELL         127
 #define BLUESERIAL_RELATIVE_MAX_OFFSET_CELL     120
@@ -1335,6 +1338,55 @@ static uint8 BlueSerial_SetSlider(const char *name, float value)
         BlueSerial_Printf("OK next_position=%.1fcm\r\n", applied_value);
         return 1U;
     }
+    if (strcmp(name, "cross.left") == 0 || strcmp(name, "ycross.left") == 0)
+    {
+        applied_value = BlueSerial_ClampFloat(value,
+                                              -BLUESERIAL_MAX_Y_CROSSTALK_ABS,
+                                              BLUESERIAL_MAX_Y_CROSSTALK_ABS);
+        primask = interrupt_global_disable();
+        path_y_crosstalk_left_x_comp_k = applied_value;
+        interrupt_global_enable(primask);
+        BlueSerial_Printf("OK cross.left=%.4f\r\n", applied_value);
+        return 1U;
+    }
+    if (strcmp(name, "cross.right") == 0 || strcmp(name, "ycross.right") == 0)
+    {
+        applied_value = BlueSerial_ClampFloat(value,
+                                              -BLUESERIAL_MAX_Y_CROSSTALK_ABS,
+                                              BLUESERIAL_MAX_Y_CROSSTALK_ABS);
+        primask = interrupt_global_disable();
+        path_y_crosstalk_right_x_comp_k = applied_value;
+        interrupt_global_enable(primask);
+        BlueSerial_Printf("OK cross.right=%.4f\r\n", applied_value);
+        return 1U;
+    }
+    if (strcmp(name, "pos.kp") == 0 || strcmp(name, "position.kp") == 0)
+    {
+        applied_value = BlueSerial_ClampFloat(value, 0.0f, BLUESERIAL_MAX_POSITION_KP);
+        primask = interrupt_global_disable();
+        path_follow_set_position_pid_gains(applied_value, pid_stay.fKi, pid_stay.fKd);
+        interrupt_global_enable(primask);
+        BlueSerial_Printf("OK pos.kp=%.4f\r\n", applied_value);
+        return 1U;
+    }
+    if (strcmp(name, "pos.ki") == 0 || strcmp(name, "position.ki") == 0)
+    {
+        applied_value = BlueSerial_ClampFloat(value, 0.0f, BLUESERIAL_MAX_POSITION_KI);
+        primask = interrupt_global_disable();
+        path_follow_set_position_pid_gains(pid_stay.fKp, applied_value, pid_stay.fKd);
+        interrupt_global_enable(primask);
+        BlueSerial_Printf("OK pos.ki=%.4f\r\n", applied_value);
+        return 1U;
+    }
+    if (strcmp(name, "pos.kd") == 0 || strcmp(name, "position.kd") == 0)
+    {
+        applied_value = BlueSerial_ClampFloat(value, 0.0f, BLUESERIAL_MAX_POSITION_KD);
+        primask = interrupt_global_disable();
+        path_follow_set_position_pid_gains(pid_stay.fKp, pid_stay.fKi, applied_value);
+        interrupt_global_enable(primask);
+        BlueSerial_Printf("OK pos.kd=%.4f\r\n", applied_value);
+        return 1U;
+    }
     if (strcmp(name, "yaw.kp") == 0)
     {
         applied_value = BlueSerial_ClampFloat(value, 0.0f, BLUESERIAL_MAX_YAW_KP);
@@ -1394,6 +1446,9 @@ static void BlueSerial_PrintStatus(void)
     float yaw_ff;
     float cross_left;
     float cross_right;
+    float position_kp;
+    float position_ki;
+    float position_kd;
     uint8 point_target_valid;
     float point_target_x_m;
     float point_target_y_m;
@@ -1412,6 +1467,11 @@ static void BlueSerial_PrintStatus(void)
     yaw_ki = pid_yaw.fKi;
     yaw_kd = pid_yaw.fKd;
     yaw_ff = path_yaw_feedforward_min_degps;
+    cross_left = path_y_crosstalk_left_x_comp_k;
+    cross_right = path_y_crosstalk_right_x_comp_k;
+    position_kp = pid_stay.fKp;
+    position_ki = pid_stay.fKi;
+    position_kd = pid_stay.fKd;
     point_target_valid = g_point_target_valid;
     point_target_x_m = g_point_target_x_m;
     point_target_y_m = g_point_target_y_m;
@@ -1430,6 +1490,9 @@ static void BlueSerial_PrintStatus(void)
                       yaw_kp, yaw_ki, yaw_kd,
                       yaw_ff,
                       (unsigned long)drop_count);
+    BlueSerial_Printf("TUNE cross.left=%.4f cross.right=%.4f pospid=%.4f,%.4f,%.4f\r\n",
+                      cross_left, cross_right,
+                      position_kp, position_ki, position_kd);
     if (point_target_valid)
     {
         BlueSerial_Printf("TARGET pending=1 target_m=%.3f,%.3f\r\n",

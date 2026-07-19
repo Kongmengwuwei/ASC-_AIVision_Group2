@@ -25,7 +25,7 @@
 #define PF_PROFILE_DONE_MIN_SPEED_CMPS   0.0f
 #define PF_SEGMENT_END_SPEED_CMPS        0.0f
 #define PF_POSITION_LOOP_RELEASE_M       0.20f
-#define PF_POSITION_KP                   1.1f
+#define PF_POSITION_KP                   1.0f
 #define PF_POSITION_KI                   0.0f
 #define PF_POSITION_KD                   0.25f
 #define PF_POSITION_MAX_IOUT_CMPS        200.0f
@@ -39,6 +39,11 @@
 #define PF_YAW_KD                        10.5f
 #define PF_YAW_FILTER_ALPHA              0.9f
 #define PF_YAW_FEEDFORWARD_MIN_DEGPS     5.0f
+
+/* Y-to-X crosstalk feedforward boot defaults, copied from the tuned branch.
+ * +Y selects LEFT and -Y selects RIGHT.  X-only motion is unaffected. */
+#define PF_Y_CROSSTALK_LEFT_X_COMP_K      0.010f
+#define PF_Y_CROSSTALK_RIGHT_X_COMP_K    -0.017f
 
 typedef struct
 {
@@ -179,13 +184,9 @@ float path_line_guide_min_cmps = 0.0f;
 float path_yaw_feedforward_min_degps = PF_YAW_FEEDFORWARD_MIN_DEGPS;
 float path_yaw_feedforward_deadband_deg = PF_YAW_TOLERANCE_DEG;
 
-/*
- * Kept as runtime variables for compatibility with the current BlueSerial
- * tuning interface.  Zero defaults preserve the 39af7ab motion behaviour;
- * non-zero values add a signed body-X feedforward while strafing.
- */
-float path_y_crosstalk_left_x_comp_k = 0.0f;
-float path_y_crosstalk_right_x_comp_k = 0.0f;
+/* Runtime copies of the boot defaults; BlueSerial sliders tune these. */
+float path_y_crosstalk_left_x_comp_k = PF_Y_CROSSTALK_LEFT_X_COMP_K;
+float path_y_crosstalk_right_x_comp_k = PF_Y_CROSSTALK_RIGHT_X_COMP_K;
 
 /* Other legacy compensation variables remain link-compatible but unused. */
 float path_yaw_target_base_comp_deg = 0.0f;
@@ -1500,6 +1501,16 @@ void path_follow_init(float grid_size_m, float pulses_per_meter)
     pf_init_pid_object(&pid_world_x, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f);
     pf_init_pid_object(&pid_world_y, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f);
     pf_init_pid_object(&pid_accel_yaw, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f);
+}
+
+void path_follow_set_position_pid_gains(float kp, float ki, float kd)
+{
+    pid_stay.fKp = kp;
+    pid_stay.fKi = ki;
+    pid_stay.fKd = kd;
+    pf_sync_position_pid_gains();
+    PID_Clear(&pid_stay);
+    PID_Clear(&pid_stay_y);
 }
 
 void path_follow_reset_pose(float x_m, float y_m, float yaw_deg)

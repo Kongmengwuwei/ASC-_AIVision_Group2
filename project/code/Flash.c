@@ -21,6 +21,7 @@
 #define MENU_FLAG_SHOW_DATA (1UL << 6)
 #define MENU_FLAG_BLUE_SERIAL (1UL << 7)
 #define MENU_FLAG_CHECKPOINT_VISION (1UL << 8)
+#define MENU_FLAG_LAST_PAIR_INSURANCE (1UL << 9)
 
 static uint32 menu_flash_checksum(uint32 flags, uint32 start_dir, uint32 map_index)
 {
@@ -40,6 +41,7 @@ static uint32 menu_flash_build_flags(const menu_flash_config_t *config)
     if (config->blue_serial) flags |= MENU_FLAG_BLUE_SERIAL;
     if (config->checkpoint_vision) flags |= MENU_FLAG_CHECKPOINT_VISION;
     if (config->identify_id_fallback) flags |= MENU_FLAG_IDENTIFY_ID_FALLBACK;
+    if (config->last_pair_insurance) flags |= MENU_FLAG_LAST_PAIR_INSURANCE;
     return flags;
 }
 
@@ -115,6 +117,7 @@ uint8 Data_load_from_flash(menu_flash_config_t *config)
     config->blue_serial = (flags & MENU_FLAG_BLUE_SERIAL) ? 1U : 0U;
     config->checkpoint_vision = (flags & MENU_FLAG_CHECKPOINT_VISION) ? 1U : 0U;
     config->identify_id_fallback = (flags & MENU_FLAG_IDENTIFY_ID_FALLBACK) ? 1U : 0U;
+    config->last_pair_insurance = (flags & MENU_FLAG_LAST_PAIR_INSURANCE) ? 1U : 0U;
     return 1U;
 }
 

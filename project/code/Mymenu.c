@@ -20,6 +20,7 @@ static bool continuous_levels_switch = false;
 static bool blue_serial_switch = true;
 static bool checkpoint_vision_switch = false;
 static bool identify_id_fallback_switch = false;
+static bool last_pair_insurance_switch = false;
 static bool preset_input_switch = false;
 static bool show_map_switch = true;
 static bool show_data_switch = true;
@@ -134,6 +135,7 @@ static void Menu_Fill_Flash_Config(menu_flash_config_t *config)
     config->blue_serial = blue_serial_switch ? 1U : 0U;
     config->checkpoint_vision = checkpoint_vision_switch ? 1U : 0U;
     config->identify_id_fallback = identify_id_fallback_switch ? 1U : 0U;
+    config->last_pair_insurance = last_pair_insurance_switch ? 1U : 0U;
 }
 
 static void Menu_Load_Flash_Config(void)
@@ -160,6 +162,7 @@ static void Menu_Load_Flash_Config(void)
     blue_serial_switch = (config.blue_serial != 0U);
     checkpoint_vision_switch = (config.checkpoint_vision != 0U);
     identify_id_fallback_switch = (config.identify_id_fallback != 0U);
+    last_pair_insurance_switch = (config.last_pair_insurance != 0U);
 
     control_set_prestart_depart_dir(startup_depart_dir_value);
     control_set_continuous_levels_enabled(continuous_levels_switch ? 1U : 0U);
@@ -167,6 +170,7 @@ static void Menu_Load_Flash_Config(void)
     control_set_identify_prerotate_enabled(identify_prerotate_switch ? 1U : 0U);
     control_set_checkpoint_vision_localization_enabled(checkpoint_vision_switch ? 1U : 0U);
     control_set_identify_id_fallback_enabled(identify_id_fallback_switch ? 1U : 0U);
+    control_set_last_pair_insurance_enabled(last_pair_insurance_switch ? 1U : 0U);
     BlueSerial_SetEnabled(blue_serial_switch ? 1U : 0U);
 }
 
@@ -212,6 +216,7 @@ void Menu_Create(void)
     Create_Menu_File_dynamic(Setting, "PreRotate", &identify_prerotate_switch, bool_Box);
     Create_Menu_File_dynamic(Setting, "ChkVision", &checkpoint_vision_switch, bool_Box);
     Create_Menu_File_dynamic(Setting, "IDSafe", &identify_id_fallback_switch, bool_Box);
+    Create_Menu_File_dynamic(Setting, "LastPair", &last_pair_insurance_switch, bool_Box);
     Create_Menu_File_dynamic(Setting, "BlueEn", &blue_serial_switch, bool_Box);
 }
 
@@ -225,6 +230,7 @@ static void Menu_Sync_Control_State(void)
     continuous_levels_switch = (control_get_continuous_levels_enabled() != 0U);
     checkpoint_vision_switch = (control_get_checkpoint_vision_localization_enabled() != 0U);
     identify_id_fallback_switch = (control_get_identify_id_fallback_enabled() != 0U);
+    last_pair_insurance_switch = (control_get_last_pair_insurance_enabled() != 0U);
     blue_serial_switch = (BlueSerial_GetEnabled() != 0U);
     preset_input_switch = (Algorithm_Test_PresetInput_IsEnabled() != 0U);
 }
@@ -318,6 +324,20 @@ static bool Menu_Handle_Control_Bool(Menu_Item *item, bool value)
         }
         identify_id_fallback_switch = value;
         control_set_identify_id_fallback_enabled(value ? 1U : 0U);
+        Menu_Mark_Config_Dirty();
+        return true;
+    }
+
+    if (item->data == &last_pair_insurance_switch)
+    {
+        if (control_get_stage() != CONTROL_STAGE_IDLE)
+        {
+            last_pair_insurance_switch =
+                (control_get_last_pair_insurance_enabled() != 0U);
+            return true;
+        }
+        last_pair_insurance_switch = value;
+        control_set_last_pair_insurance_enabled(value ? 1U : 0U);
         Menu_Mark_Config_Dirty();
         return true;
     }

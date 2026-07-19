@@ -36,6 +36,8 @@ static uint8 g_control_continuous_levels_enabled = 0U;
 static uint8 g_control_identify_id_fallback_enabled = 0U;
 /* 每个识别驻车点、每次推箱结束后的视觉位置校正，默认关闭以保持原流程。 */
 static uint8 g_control_checkpoint_vision_localization_enabled = 0U;
+/* Optional final-map insurance: retry one remaining box/target pair with Mode1. */
+static uint8 g_control_last_pair_insurance_enabled = 0U;
 
 /*
  * Extra compensation for the first power-on departure move.
@@ -279,6 +281,9 @@ static Position g_pushbox_segment_path[MAX_CAR_PATH] = {{0}};
 static size_t g_pushbox_segment_end_idx = 0U;
 static uint8 g_pushbox_segment_running = 0U;
 static uint8 g_pushbox_checkpoint_localized = 0U;
+static uint8 g_last_pair_insurance_attempted = 0U;
+static uint8 g_last_pair_insurance_replan_pending = 0U;
+static uint8 g_last_pair_map_only_refresh_active = 0U;
 
 /* 识别和推箱检查点共用的一次性视觉定位运行状态。 */
 static uint8 g_checkpoint_visual_localization_active = 0U;
@@ -1010,6 +1015,9 @@ static void reset_level_runtime_state_for_launch(void)
     g_pushbox_segment_end_idx = 0U;
     g_pushbox_segment_running = 0U;
     g_pushbox_checkpoint_localized = 0U;
+    g_last_pair_insurance_attempted = 0U;
+    g_last_pair_insurance_replan_pending = 0U;
+    g_last_pair_map_only_refresh_active = 0U;
     g_checkpoint_visual_localization_active = 0U;
     g_checkpoint_visual_pose_completed = 0U;
     g_checkpoint_map_refresh_required = 0U;
@@ -3017,6 +3025,12 @@ static uint8 finish_checkpoint_map_refresh_if_ready(void)
         return 0U;
     }
 
+    g_last_pair_insurance_replan_pending =
+        (g_control_last_pair_insurance_enabled &&
+         !g_last_pair_insurance_attempted &&
+         Boxes_count == 1U &&
+         Targets_count == 1U) ? 1U : 0U;
+
     /* 推到目标的箱子会从游戏地图消失；新地图仍含 BOX 表示仍有未推进箱子。 */
     g_continuous_extra_depart_wait_required =
         (!Algorithm_Test_PresetInput_IsEnabled() &&
@@ -4073,6 +4087,8 @@ static uint8 pushbox_long_checkpoint_is_before_completion(size_t endpoint_idx)
     return 0U;
 }
 
+static uint8 pushbox_endpoint_is_final_push(size_t endpoint_idx);
+
 static uint8 start_pushbox_segment(size_t start_idx)
 {
     size_t end_idx;
@@ -4089,10 +4105,17 @@ static uint8 start_pushbox_segment(size_t start_idx)
     scan_idx = (start_idx == 0U) ? 0U : (start_idx + 1U);
     for (; scan_idx < g_exec_steps; scan_idx++)
     {
-        if ((g_exec_path[scan_idx].id &
-             (PUSH_START_POINT | PUSH_END_POINT)) != 0U ||
-            (exec_segment_needs_visual_checkpoint(scan_idx) &&
-             pushbox_long_checkpoint_is_before_completion(scan_idx)))
+        uint8 vision_checkpoint =
+            (g_control_checkpoint_vision_localization_enabled &&
+             (((g_exec_path[scan_idx].id &
+                (PUSH_START_POINT | PUSH_END_POINT)) != 0U) ||
+              (exec_segment_needs_visual_checkpoint(scan_idx) &&
+               pushbox_long_checkpoint_is_before_completion(scan_idx)))) ? 1U : 0U;
+        uint8 insurance_checkpoint =
+            (g_control_last_pair_insurance_enabled &&
+             pushbox_endpoint_is_final_push(scan_idx)) ? 1U : 0U;
+
+        if (vision_checkpoint || insurance_checkpoint)
         {
             end_idx = scan_idx;
             break;
@@ -4167,7 +4190,8 @@ static void handle_load_path_stage(void)
         return;
     }
 
-    if (g_control_checkpoint_vision_localization_enabled)
+    if (g_control_checkpoint_vision_localization_enabled ||
+        g_control_last_pair_insurance_enabled)
     {
         if (!start_pushbox_segment(0U))
         {
@@ -4221,6 +4245,26 @@ static uint8 get_return_inward_target(float *target_x_m, float *target_y_m)
                   (float)inward_row_dir * CONTROL_RETURN_DEPOT_INWARD_OFFSET_M;
     *target_y_m = (float)depot_exec.col * GRID_SIZE_M +
                   (float)inward_col_dir * CONTROL_RETURN_DEPOT_INWARD_OFFSET_M;
+    return 1U;
+}
+
+static uint8 process_final_push_map_refresh_without_vision(void)
+{
+    if (!g_last_pair_map_only_refresh_active)
+    {
+        reset_localization_accumulator();
+        g_checkpoint_map_refresh_required = 1U;
+        g_last_pair_map_only_refresh_active = 1U;
+        control_hold_yaw_closed_loop();
+        start_localization_map_prefetch_once();
+    }
+
+    if (!finish_checkpoint_map_refresh_if_ready())
+    {
+        return 0U;
+    }
+
+    g_last_pair_map_only_refresh_active = 0U;
     return 1U;
 }
 
@@ -4298,6 +4342,67 @@ static void finish_pushbox_flow_after_return(void)
     set_control_phase_stage(CONTROL_PHASE_STEP_FINISHED);
 }
 
+static uint8 start_last_pair_insurance_replan(size_t endpoint_idx)
+{
+    static Position exec_path_backup[MAX_CAR_PATH];
+    size_t exec_steps_backup = g_exec_steps;
+    control_plan_mode_t plan_mode_backup = g_control_plan_mode;
+    uint8 plan_ready_backup = g_plan_ready;
+    Position current_car;
+
+    if (endpoint_idx >= g_exec_steps || g_exec_steps > MAX_CAR_PATH)
+    {
+        return 0U;
+    }
+
+    memcpy(exec_path_backup,
+           g_exec_path,
+           g_exec_steps * sizeof(g_exec_path[0]));
+
+    /* The checkpoint target is the car cell at the end of the final physical
+     * push.  Use it as the Mode1 start even if the fresh map omitted CAR. */
+    current_car = g_exec_path[endpoint_idx];
+    path_inverse_remap_exec_point(&current_car);
+    current_car.id = 0U;
+    if (current_car.row >= MAP_ROWS || current_car.col >= MAP_COLS)
+    {
+        return 0U;
+    }
+    car = current_car;
+
+    begin_path_plan_pause();
+    g_control_plan_mode = CONTROL_PLAN_MODE_1;
+    if (!control_plan_path())
+    {
+        memcpy(g_exec_path,
+               exec_path_backup,
+               exec_steps_backup * sizeof(g_exec_path[0]));
+        g_exec_steps = exec_steps_backup;
+        g_control_plan_mode = plan_mode_backup;
+        g_plan_ready = plan_ready_backup;
+        end_path_plan_pause();
+        return 0U;
+    }
+    end_path_plan_pause();
+
+    path_follow_set_pause_indices(NULL, 0U, 0U);
+    path_follow_set_path(NULL, 0U);
+    memset(g_pushbox_segment_path, 0, sizeof(g_pushbox_segment_path));
+    g_pushbox_segment_end_idx = 0U;
+    g_pushbox_segment_running = 0U;
+    g_pushbox_checkpoint_localized = 0U;
+    g_last_pair_map_only_refresh_active = 0U;
+    g_return_heading_rotate_started = 0U;
+    g_return_depot_check_done = 0U;
+    g_return_pose_in_depot = 0U;
+    g_return_inward_move_state = 0U;
+    g_continuous_extra_depart_wait_required = 0U;
+    g_continuous_extra_depart_wait_started = 0U;
+    g_continuous_extra_depart_wait_start_tick = 0U;
+    set_control_phase_stage(CONTROL_PHASE_STEP_LOAD_PATH);
+    return 1U;
+}
+
 /**
  * @brief 推箱执行阶段：轮询 path_follow 状态，路径结束后进入完成态并保持停车。
  */
@@ -4307,7 +4412,8 @@ static void handle_pushbox_execute_path(void)
     float return_yaw_deg = 0.0f;
     float yaw_err_deg = 0.0f;
 
-    if (g_control_checkpoint_vision_localization_enabled)
+    if (g_control_checkpoint_vision_localization_enabled ||
+        g_control_last_pair_insurance_enabled)
     {
         if (g_pushbox_segment_running)
         {
@@ -4325,8 +4431,9 @@ static void handle_pushbox_execute_path(void)
             return;
         }
 
-        if (((g_exec_path[g_pushbox_segment_end_idx].id &
-              (PUSH_START_POINT | PUSH_END_POINT)) != 0U ||
+        if (g_control_checkpoint_vision_localization_enabled &&
+            (((g_exec_path[g_pushbox_segment_end_idx].id &
+               (PUSH_START_POINT | PUSH_END_POINT)) != 0U) ||
              (exec_segment_needs_visual_checkpoint(g_pushbox_segment_end_idx) &&
               pushbox_long_checkpoint_is_before_completion(
                   g_pushbox_segment_end_idx))) &&
@@ -4340,6 +4447,28 @@ static void handle_pushbox_execute_path(void)
                 return;
             }
             g_pushbox_checkpoint_localized = 1U;
+        }
+
+        if (!g_control_checkpoint_vision_localization_enabled &&
+            g_control_last_pair_insurance_enabled &&
+            pushbox_endpoint_is_final_push(g_pushbox_segment_end_idx) &&
+            !g_pushbox_checkpoint_localized)
+        {
+            if (!process_final_push_map_refresh_without_vision())
+            {
+                return;
+            }
+            g_pushbox_checkpoint_localized = 1U;
+        }
+
+        if (g_last_pair_insurance_replan_pending)
+        {
+            g_last_pair_insurance_replan_pending = 0U;
+            g_last_pair_insurance_attempted = 1U;
+            if (start_last_pair_insurance_replan(g_pushbox_segment_end_idx))
+            {
+                return;
+            }
         }
 
         if (g_pushbox_segment_end_idx < (g_exec_steps - 1U))
@@ -4643,6 +4772,16 @@ void control_set_checkpoint_vision_localization_enabled(uint8 enabled)
 uint8 control_get_checkpoint_vision_localization_enabled(void)
 {
     return g_control_checkpoint_vision_localization_enabled;
+}
+
+void control_set_last_pair_insurance_enabled(uint8 enabled)
+{
+    g_control_last_pair_insurance_enabled = (enabled != 0U) ? 1U : 0U;
+}
+
+uint8 control_get_last_pair_insurance_enabled(void)
+{
+    return g_control_last_pair_insurance_enabled;
 }
 
 void control_set_identify_prerotate_enabled(uint8 enabled)

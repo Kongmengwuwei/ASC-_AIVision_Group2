@@ -156,6 +156,11 @@ uint8 control_get_diagonal_path_enabled(void);
 void control_set_checkpoint_vision_localization_enabled(uint8 enabled);
 uint8 control_get_checkpoint_vision_localization_enabled(void);
 
+/* After the final planned push, optionally retry one remaining box/target
+ * pair with a one-shot Mode1 plan before returning to the depot. */
+void control_set_last_pair_insurance_enabled(uint8 enabled);
+uint8 control_get_last_pair_insurance_enabled(void);
+
 /**
  * @brief 设置识别阶段是否启用段前提前转向。
  *

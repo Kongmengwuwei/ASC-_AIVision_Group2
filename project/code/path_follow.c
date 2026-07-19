@@ -25,9 +25,9 @@
 #define PF_PROFILE_DONE_MIN_SPEED_CMPS   0.0f
 #define PF_SEGMENT_END_SPEED_CMPS        0.0f
 #define PF_POSITION_LOOP_RELEASE_M       0.20f
-#define PF_POSITION_KP                   1.1f
+#define PF_POSITION_KP                   3.0f
 #define PF_POSITION_KI                   0.0f
-#define PF_POSITION_KD                   0.25f
+#define PF_POSITION_KD                   1.0f
 #define PF_POSITION_MAX_IOUT_CMPS        200.0f
 #define PF_POSITION_MAX_OUT_CMPS         200.0f
 #define PF_POSITION_FILTER_ALPHA         0.9f

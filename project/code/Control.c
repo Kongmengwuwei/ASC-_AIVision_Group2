@@ -42,7 +42,7 @@ static uint8 g_control_checkpoint_vision_localization_enabled = 0U;
  * Positive values extend the selected Start_Dir move, negative values shorten it.
  * Unit: m. Default +0.05 m keeps the prestart move at 0.35 m total.
  */
-float g_control_prestart_depart_compensate_m = -0.025f;
+float g_control_prestart_depart_compensate_m = -0.0f;
 
 /* ========================= 参数配置�?========================= */
 

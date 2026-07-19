@@ -35,6 +35,7 @@
 #define PF_SPEED_TEST_SETTLE_COUNTS      2       /* 纯S曲线结束后每轮允许的静止计数，count/10ms。 */
 #define PF_SPEED_TEST_SETTLE_TICKS       5U      /* 四轮连续静止50ms后结束测试。 */
 #define PF_SPEED_TEST_SETTLE_TIMEOUT     500U    /* 最长保留5s零速闭环尾段。 */
+#define PF_SEGMENT_TARGET_X_NEG_STEP_M   0.0001f /* 每进入一段，目标 X 累计向负半轴偏 0.01 cm。 */
 
 /* Y-to-X crosstalk feedforward boot defaults, copied from the tuned branch.
  * Unit: X correction / absolute Y command. +Y selects LEFT and -Y selects
@@ -43,13 +44,13 @@
 #define PF_Y_CROSSTALK_RIGHT_X_COMP_K    -0.016f
 #define PF_LATERAL_LEFT_ODOMETRY_SCALE    1.0090f /* 三地图区域五组往返均值：左移里程约多 0.9%。 */
 
-#define PF_POSITION_X_KP                 3.6f    /* 车体 X 前进直走位置环。 */
+#define PF_POSITION_X_KP                 3.4f    /* 车体 X 前进直走位置环。 */
 #define PF_POSITION_X_KI                 0.0f
-#define PF_POSITION_X_KD                 5.9f
+#define PF_POSITION_X_KD                 5.6f
 #define PF_POSITION_Y_KP                 5.4f    /* 车体 Y 左右侧移位置环。 */
 #define PF_POSITION_Y_KI                 0.0f
 #define PF_POSITION_Y_KD                 7.7f
-#define PF_POSITION_BACKWARD_X_KP        4.1f /* 后退 X 位置环独立默认值。 */
+#define PF_POSITION_BACKWARD_X_KP        4.0f /* 后退 X 位置环独立默认值。 */
 #define PF_POSITION_BACKWARD_X_KI        0.0f
 #define PF_POSITION_BACKWARD_X_KD        6.3f
 #define PF_POSITION_X_MAX_IOUT_CMPS      200.0f  /* X轴位置环积分输出上限，单位 cm/s。 */
@@ -57,8 +58,8 @@
 #define PF_POSITION_Y_MAX_IOUT_CMPS      200.0f  /* Y轴位置环积分输出上限，单位 cm/s。 */
 #define PF_POSITION_Y_MAX_OUT_CMPS       200.0f  /* Y轴位置环总输出上限，单位 cm/s。 */
 #define PF_POSITION_FILTER_ALPHA         0.9f    /* 位置环微分滤波系数。 */
-#define PF_LINE_GUIDE_KP                 0.0f    /* 默认启用法向纠偏，单位 (cm/s)/cm。 */
-#define PF_LINE_GUIDE_MIN_CMPS           0.0f    /* 越过死区后的最小法向纠偏速度，单位 cm/s。 */
+#define PF_LINE_GUIDE_KP                 1.0f    /* 默认启用法向纠偏，单位 (cm/s)/cm。 */
+#define PF_LINE_GUIDE_MIN_CMPS           1.0f    /* 越过死区后的最小法向纠偏速度，单位 cm/s。 */
 #define PF_LINE_GUIDE_MAX_CMPS           12.0f   /* 法向纠偏速度上限，单位 cm/s。 */
 #define PF_LINE_GUIDE_DEADBAND_M         0.0025f /* 法向偏差死区，单位 m。 */
 #define PF_LINE_GUIDE_START_BOOST        2.0f    /* 首段刚起步时的法向纠偏倍率。 */
@@ -397,11 +398,16 @@ static void pf_reset_motion_state(void)
     car_direction = 0U;
 }
 
-static void pf_point_to_world(Position point, float grid_m, float *x_m, float *y_m)
+static void pf_point_to_world(Position point,
+                              float grid_m,
+                              size_t segment_count,
+                              float *x_m,
+                              float *y_m)
 {
     if (x_m != NULL)
     {
-        *x_m = g_pf.path_origin_x_m + (float)point.row * grid_m;
+        *x_m = g_pf.path_origin_x_m + (float)point.row * grid_m -
+               (float)segment_count * PF_SEGMENT_TARGET_X_NEG_STEP_M;
     }
     if (y_m != NULL)
     {
@@ -1305,6 +1311,7 @@ static uint8 pf_apply_line_guidance(const pf_geometry_t *geometry,
 
     pf_point_to_world(g_pf.path[g_pf.target_idx - 1U],
                       g_pf.path_grid_m,
+                      g_pf.target_idx - 1U,
                       &start_x_m,
                       &start_y_m);
     segment_dx_m = geometry->target_x_m - start_x_m;
@@ -1685,6 +1692,7 @@ static uint8 pf_prepare_geometry(pf_geometry_t *geometry, path_follow_output_t *
         pf_sync_pause_cursor();
         pf_point_to_world(target,
                           g_pf.path_grid_m,
+                          g_pf.target_idx,
                           &geometry->target_x_m,
                           &geometry->target_y_m);
 
@@ -1697,6 +1705,7 @@ static uint8 pf_prepare_geometry(pf_geometry_t *geometry, path_follow_output_t *
         {
             pf_point_to_world(g_pf.path[g_pf.target_idx - 1U],
                               g_pf.path_grid_m,
+                              g_pf.target_idx - 1U,
                               &segment_start_x_m,
                               &segment_start_y_m);
         }
@@ -2602,6 +2611,7 @@ void path_follow_get_status(path_follow_status_t *status)
         status->target_col = g_pf.path[g_pf.target_idx].col;
         pf_point_to_world(g_pf.path[g_pf.target_idx],
                           g_pf.path_grid_m,
+                          g_pf.target_idx,
                           &status->target_x_m,
                           &status->target_y_m);
     }

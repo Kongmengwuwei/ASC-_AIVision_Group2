@@ -34,6 +34,11 @@ static volatile int32 g_motor_debug_cumulative_target[MOTOR_WHEEL_COUNT];
 static volatile int32 g_motor_debug_cumulative_raw[MOTOR_WHEEL_COUNT];
 static volatile uint32 g_motor_debug_control_ticks;
 
+static uint8 g_motor_right_start_tracking;
+static uint8 g_motor_right_start_inactive_ticks;
+static uint16 g_motor_right_start_ticks;
+static int32 g_motor_right_start_lateral_sum4;
+
 void motor_init(void)
 {
 	gpio_init(MOTOR1_DIR, GPO, GPIO_HIGH, GPO_PUSH_PULL);                            // GPIO 初始化为输出 默认上拉输出高
@@ -186,6 +191,14 @@ void motor_pwm(int up_left_speed,int up_right_speed,int down_left_speed,int down
 	g_motor_debug_final_pwm[MOTOR_WHEEL_DL] = down_left_speed;
 	g_motor_debug_final_pwm[MOTOR_WHEEL_DR] = down_right_speed;
 
+	/* A fully disabled output is a definite motion boundary.  Rearm the launch
+	 * compensation even if motor_control() was bypassed while the car was idle. */
+	if (up_left_speed == 0 && up_right_speed == 0 &&
+		down_left_speed == 0 && down_right_speed == 0)
+	{
+		motor_right_start_compensation_reset();
+	}
+
 #if MOTOR_BOARD_REMAP_LOGICAL_WHEELS
 	int logical_ul = up_left_speed;
 	int logical_ur = up_right_speed;
@@ -326,34 +339,139 @@ static int motor_apply_deadzone_compensation(int pid_output,
     return Limit_int(LIMIT_PWM_MIN, pid_output, LIMIT_PWM_MAX);
 }
 
+void motor_right_start_compensation_reset(void)
+{
+	g_motor_right_start_tracking = 0U;
+	g_motor_right_start_inactive_ticks = 0U;
+	g_motor_right_start_ticks = 0U;
+	g_motor_right_start_lateral_sum4 = 0;
+}
+
+/* Limit the brief forward kick seen when a pure right strafe starts.
+ *
+ * Mecanum body components in logical wheel order UL, UR, DL, DR:
+ *   forward * 4 =  UL + UR + DL + DR
+ *   lateral* 4 = -UL + UR + DL - DR  (negative means right)
+ *
+ * During the encoder-measured launch window, subtracting the same small target
+ * from all four wheels adds a backward body component without changing the
+ * requested right-strafe component.  Work on a copy so callers keep ownership
+ * of their original wheel targets. */
+void motor_limit_right_start_forward_offset(const int *input_speed_encoder,
+                                            int *limited_speed_encoder)
+{
+	int i;
+	int target_forward_sum4;
+	int target_lateral_sum4;
+	int actual_lateral_sum4;
+	uint8 right_strafe_command;
+
+	if (input_speed_encoder == NULL || limited_speed_encoder == NULL)
+	{
+		return;
+	}
+
+	for (i = 0; i < MOTOR_WHEEL_COUNT; ++i)
+	{
+		limited_speed_encoder[i] = input_speed_encoder[i];
+	}
+
+	target_forward_sum4 = input_speed_encoder[MOTOR_WHEEL_UL] +
+	                      input_speed_encoder[MOTOR_WHEEL_UR] +
+	                      input_speed_encoder[MOTOR_WHEEL_DL] +
+	                      input_speed_encoder[MOTOR_WHEEL_DR];
+	target_lateral_sum4 = -input_speed_encoder[MOTOR_WHEEL_UL] +
+	                       input_speed_encoder[MOTOR_WHEEL_UR] +
+	                       input_speed_encoder[MOTOR_WHEEL_DL] -
+	                       input_speed_encoder[MOTOR_WHEEL_DR];
+
+	/* Only touch a mainly lateral right command.  Intentional forward/backward
+	 * diagonal moves remain under the normal kinematics and wheel PIDs. */
+	right_strafe_command =
+		(target_lateral_sum4 <= -(MOTOR_RIGHT_START_MIN_TARGET_COUNTS * 4) &&
+		 target_forward_sum4 >= -(MOTOR_RIGHT_START_MAX_FORWARD_COUNTS * 4) &&
+		 target_forward_sum4 <=  (MOTOR_RIGHT_START_MAX_FORWARD_COUNTS * 4)) ? 1U : 0U;
+
+	if (!right_strafe_command)
+	{
+		if (g_motor_right_start_inactive_ticks < MOTOR_RIGHT_START_REARM_TICKS)
+		{
+			g_motor_right_start_inactive_ticks++;
+		}
+		if (g_motor_right_start_inactive_ticks >= MOTOR_RIGHT_START_REARM_TICKS)
+		{
+			g_motor_right_start_tracking = 0U;
+			g_motor_right_start_ticks = 0U;
+			g_motor_right_start_lateral_sum4 = 0;
+		}
+		return;
+	}
+
+	g_motor_right_start_inactive_ticks = 0U;
+	if (!g_motor_right_start_tracking)
+	{
+		g_motor_right_start_tracking = 1U;
+		g_motor_right_start_ticks = 0U;
+		g_motor_right_start_lateral_sum4 = 0;
+	}
+
+	/* encoder_get() runs before motor_control(), so these are the latest
+	 * filtered logical-wheel increments.  Accumulate only actual right travel. */
+	actual_lateral_sum4 = -up_L_all + up_R_all + down_L_all - down_R_all;
+	if (actual_lateral_sum4 < 0)
+	{
+		g_motor_right_start_lateral_sum4 -= actual_lateral_sum4;
+	}
+
+	if (g_motor_right_start_ticks < MOTOR_RIGHT_START_MAX_TICKS &&
+		g_motor_right_start_lateral_sum4 < (MOTOR_RIGHT_START_DISTANCE_COUNTS * 4))
+	{
+		for (i = 0; i < MOTOR_WHEEL_COUNT; ++i)
+		{
+			limited_speed_encoder[i] =
+				Limit_int(LIMIT_ENCODER_MIN,
+				          input_speed_encoder[i] - MOTOR_RIGHT_START_REVERSE_COUNTS,
+				          LIMIT_ENCODER_MAX);
+		}
+	}
+
+	if (g_motor_right_start_ticks < 0xFFFFU)
+	{
+		g_motor_right_start_ticks++;
+	}
+}
+
 void motor_control(int* input_speed_encoder)
 {
+	int limited_speed_encoder[MOTOR_WHEEL_COUNT];
 	int motorUL_pwm_value = 0;
 	int motorUR_pwm_value = 0;
 	int motorDL_pwm_value = 0;
 	int motorDR_pwm_value = 0;
-	g_motor_debug_target[MOTOR_WHEEL_UL] = input_speed_encoder[MOTOR_WHEEL_UL];
-	g_motor_debug_target[MOTOR_WHEEL_UR] = input_speed_encoder[MOTOR_WHEEL_UR];
-	g_motor_debug_target[MOTOR_WHEEL_DL] = input_speed_encoder[MOTOR_WHEEL_DL];
-	g_motor_debug_target[MOTOR_WHEEL_DR] = input_speed_encoder[MOTOR_WHEEL_DR];
-	g_motor_debug_cumulative_target[MOTOR_WHEEL_UL] += input_speed_encoder[MOTOR_WHEEL_UL];
-	g_motor_debug_cumulative_target[MOTOR_WHEEL_UR] += input_speed_encoder[MOTOR_WHEEL_UR];
-	g_motor_debug_cumulative_target[MOTOR_WHEEL_DL] += input_speed_encoder[MOTOR_WHEEL_DL];
-	g_motor_debug_cumulative_target[MOTOR_WHEEL_DR] += input_speed_encoder[MOTOR_WHEEL_DR];
+	motor_limit_right_start_forward_offset(input_speed_encoder,
+	                                       limited_speed_encoder);
+	g_motor_debug_target[MOTOR_WHEEL_UL] = limited_speed_encoder[MOTOR_WHEEL_UL];
+	g_motor_debug_target[MOTOR_WHEEL_UR] = limited_speed_encoder[MOTOR_WHEEL_UR];
+	g_motor_debug_target[MOTOR_WHEEL_DL] = limited_speed_encoder[MOTOR_WHEEL_DL];
+	g_motor_debug_target[MOTOR_WHEEL_DR] = limited_speed_encoder[MOTOR_WHEEL_DR];
+	g_motor_debug_cumulative_target[MOTOR_WHEEL_UL] += limited_speed_encoder[MOTOR_WHEEL_UL];
+	g_motor_debug_cumulative_target[MOTOR_WHEEL_UR] += limited_speed_encoder[MOTOR_WHEEL_UR];
+	g_motor_debug_cumulative_target[MOTOR_WHEEL_DL] += limited_speed_encoder[MOTOR_WHEEL_DL];
+	g_motor_debug_cumulative_target[MOTOR_WHEEL_DR] += limited_speed_encoder[MOTOR_WHEEL_DR];
 	g_motor_debug_control_ticks++;
 
-	motorUL_pwm_value = Limit_int(LIMIT_PWM_MIN, PID_Add_Calculate(&ULpid, up_L_all, input_speed_encoder[0]), LIMIT_PWM_MAX);   //上左
-	motorUR_pwm_value = Limit_int(LIMIT_PWM_MIN, PID_Add_Calculate(&URpid, up_R_all, input_speed_encoder[1]), LIMIT_PWM_MAX);   //上右
-	motorDL_pwm_value = Limit_int(LIMIT_PWM_MIN, PID_Add_Calculate(&DLpid, down_L_all, input_speed_encoder[2]), LIMIT_PWM_MAX);   //下左
-	motorDR_pwm_value = Limit_int(LIMIT_PWM_MIN, PID_Add_Calculate(&DRpid, down_R_all, input_speed_encoder[3]), LIMIT_PWM_MAX);   //下右
+	motorUL_pwm_value = Limit_int(LIMIT_PWM_MIN, PID_Add_Calculate(&ULpid, up_L_all, limited_speed_encoder[0]), LIMIT_PWM_MAX);   //上左
+	motorUR_pwm_value = Limit_int(LIMIT_PWM_MIN, PID_Add_Calculate(&URpid, up_R_all, limited_speed_encoder[1]), LIMIT_PWM_MAX);   //上右
+	motorDL_pwm_value = Limit_int(LIMIT_PWM_MIN, PID_Add_Calculate(&DLpid, down_L_all, limited_speed_encoder[2]), LIMIT_PWM_MAX);   //下左
+	motorDR_pwm_value = Limit_int(LIMIT_PWM_MIN, PID_Add_Calculate(&DRpid, down_R_all, limited_speed_encoder[3]), LIMIT_PWM_MAX);   //下右
 	g_motor_debug_pid_pwm[MOTOR_WHEEL_UL] = motorUL_pwm_value;
 	g_motor_debug_pid_pwm[MOTOR_WHEEL_UR] = motorUR_pwm_value;
 	g_motor_debug_pid_pwm[MOTOR_WHEEL_DL] = motorDL_pwm_value;
 	g_motor_debug_pid_pwm[MOTOR_WHEEL_DR] = motorDR_pwm_value;
-	motorUL_pwm_value = motor_apply_deadzone_compensation(motorUL_pwm_value, input_speed_encoder[0], motor_deadzone_fwd[MOTOR_WHEEL_UL], motor_deadzone_rev[MOTOR_WHEEL_UL]);
-	motorUR_pwm_value = motor_apply_deadzone_compensation(motorUR_pwm_value, input_speed_encoder[1], motor_deadzone_fwd[MOTOR_WHEEL_UR], motor_deadzone_rev[MOTOR_WHEEL_UR]);
-	motorDL_pwm_value = motor_apply_deadzone_compensation(motorDL_pwm_value, input_speed_encoder[2], motor_deadzone_fwd[MOTOR_WHEEL_DL], motor_deadzone_rev[MOTOR_WHEEL_DL]);
-	motorDR_pwm_value = motor_apply_deadzone_compensation(motorDR_pwm_value, input_speed_encoder[3], motor_deadzone_fwd[MOTOR_WHEEL_DR], motor_deadzone_rev[MOTOR_WHEEL_DR]);
+	motorUL_pwm_value = motor_apply_deadzone_compensation(motorUL_pwm_value, limited_speed_encoder[0], motor_deadzone_fwd[MOTOR_WHEEL_UL], motor_deadzone_rev[MOTOR_WHEEL_UL]);
+	motorUR_pwm_value = motor_apply_deadzone_compensation(motorUR_pwm_value, limited_speed_encoder[1], motor_deadzone_fwd[MOTOR_WHEEL_UR], motor_deadzone_rev[MOTOR_WHEEL_UR]);
+	motorDL_pwm_value = motor_apply_deadzone_compensation(motorDL_pwm_value, limited_speed_encoder[2], motor_deadzone_fwd[MOTOR_WHEEL_DL], motor_deadzone_rev[MOTOR_WHEEL_DL]);
+	motorDR_pwm_value = motor_apply_deadzone_compensation(motorDR_pwm_value, limited_speed_encoder[3], motor_deadzone_fwd[MOTOR_WHEEL_DR], motor_deadzone_rev[MOTOR_WHEEL_DR]);
 	motor_pwm(motorUL_pwm_value, motorUR_pwm_value,motorDL_pwm_value,motorDR_pwm_value);
 }
 

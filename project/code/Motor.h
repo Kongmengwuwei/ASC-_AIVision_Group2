@@ -79,6 +79,16 @@
 #define MOTOR_DR_DEADZONE_FWD             550
 #define MOTOR_DR_DEADZONE_REV             637
 
+/* Right-strafe launch compensation.
+ * 1 target count is about 0.82 cm/s with the current encoder calibration.
+ * Limit the correction to the first 5 cm measured by the wheel encoders. */
+#define MOTOR_RIGHT_START_MIN_TARGET_COUNTS       5
+#define MOTOR_RIGHT_START_MAX_FORWARD_COUNTS      4
+#define MOTOR_RIGHT_START_REVERSE_COUNTS          1
+#define MOTOR_RIGHT_START_DISTANCE_COUNTS         610
+#define MOTOR_RIGHT_START_MAX_TICKS               50U
+#define MOTOR_RIGHT_START_REARM_TICKS              5U
+
 #define MOTOR_WHEEL_COUNT                  4
 #define MOTOR_WHEEL_UL                     0
 #define MOTOR_WHEEL_UR                     1
@@ -130,6 +140,9 @@ void encoder_get(void);
 int Limit_int(int left_limit, int target_num, int right_limit);
 void motor_pwm(int up_left_speed,int up_right_speed,int down_left_speed,int down_right_speed);
 void motor_control(int* input_speed_encoder);
+void motor_limit_right_start_forward_offset(const int *input_speed_encoder,
+                                            int *limited_speed_encoder);
+void motor_right_start_compensation_reset(void);
 void motor_speed_debug_reset(void);
 void motor_speed_debug_get_snapshot(motor_speed_debug_snapshot_t *snapshot);
 //void encoder_read_filtered(int *enc1, int *enc2, int *enc3, int *enc4);

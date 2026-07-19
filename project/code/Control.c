@@ -52,13 +52,16 @@ float g_control_prestart_depart_compensate_m = -0.0f;
  */
 #define CONTROL_REQ_MAP_RETRY_TIMEOUT_TICKS 500U
 #define CONTROL_REQ_CAR_RETRY_TIMEOUT_TICKS 200U
-#define CONTROL_LOCALIZE_STOP_STABLE_TICKS 20U
-#define CONTROL_LOCALIZE_POST_STOP_DRAIN_TICKS 20U
+#define CONTROL_LOCALIZE_STOP_STABLE_TICKS 10U
+#define CONTROL_LOCALIZE_POST_STOP_DRAIN_TICKS 10U
 #define CONTROL_LOCALIZE_WHEEL_STOP_ENCODER_TOL 5
 #define CONTROL_LOCALIZE_MAX_SAMPLES 5U
 #define CONTROL_LOCALIZE_TWO_SAMPLE_MATCH_M 0.03f
-/* 检查点视觉位置偏离事件目标超过 5 cm 时，先回移到目标点再继续流程。 */
-#define CONTROL_CHECKPOINT_REPOSITION_THRESHOLD_M 0.05f
+/* 检查点视觉位置偏离事件目标超过 3 cm 时，先回移到目标点再继续流程。 */
+#define CONTROL_CHECKPOINT_REPOSITION_THRESHOLD_M 0.03f
+/* A compressed straight/slanted segment of at least three grid cells ends at
+ * a visual checkpoint when checkpoint localization is enabled. */
+#define CONTROL_LONG_SEGMENT_CHECKPOINT_MIN_CELLS 3U
 #define CONTROL_PRESET_RECOGNITION_DELAY_MS 500U
 /* 推炸弹到爆炸点后停留 0.5s，等待爆炸效果生效 */
 #define CONTROL_BOMB_EXPLOSION_PAUSE_MS 500U
@@ -70,6 +73,8 @@ float g_control_prestart_depart_compensate_m = -0.0f;
 /* 10 ms 控制节拍；检测到仍有未推进箱子时，下一关发车前额外等待 5 s。 */
 #define CONTROL_CONTINUOUS_EXTRA_DEPART_WAIT_TICKS 500U
 #define CONTROL_DEPOT_CELL_HALF_EXTENT_M (0.5f * GRID_SIZE_M)
+/* Return half a cell past the depot center, toward the outside of the map. */
+#define CONTROL_RETURN_DEPOT_INWARD_OFFSET_M (0.5f * GRID_SIZE_M)
 
 
 /**
@@ -240,6 +245,7 @@ static uint8 g_continuous_preset_base_index = 0U;
 static uint8 g_return_heading_rotate_started = 0U;
 static uint8 g_return_depot_check_done = 0U;
 static uint8 g_return_pose_in_depot = 0U;
+static uint8 g_return_inward_move_state = 0U;
 static uint8 g_pushbox_entry_heading_rotate_started = 0U;
 static uint8 g_wait_new_map_frame = 0U;
 static uint8 g_wait_map_frame_base = 0U;
@@ -783,6 +789,28 @@ static uint8 is_identification_marker(uint8 marker_id)
     return ((marker_id & IDENTIFICATION) != 0U) ? 1U : 0U;
 }
 
+static uint8 exec_segment_needs_visual_checkpoint(size_t end_idx)
+{
+    int32 d_row;
+    int32 d_col;
+    int32 distance_sq;
+    int32 threshold_sq =
+        (int32)CONTROL_LONG_SEGMENT_CHECKPOINT_MIN_CELLS *
+        (int32)CONTROL_LONG_SEGMENT_CHECKPOINT_MIN_CELLS;
+
+    if (end_idx == 0U || end_idx >= g_exec_steps)
+    {
+        return 0U;
+    }
+
+    d_row = (int32)g_exec_path[end_idx].row -
+            (int32)g_exec_path[end_idx - 1U].row;
+    d_col = (int32)g_exec_path[end_idx].col -
+            (int32)g_exec_path[end_idx - 1U].col;
+    distance_sq = d_row * d_row + d_col * d_col;
+    return (distance_sq >= threshold_sq) ? 1U : 0U;
+}
+
 static uint8 resolve_map_dir_from_delta(int32 d_row, int32 d_col, control_map_dir_t *dir_out)
 {
     if (dir_out == NULL)
@@ -965,6 +993,7 @@ static void reset_level_runtime_state_for_launch(void)
     g_return_heading_rotate_started = 0U;
     g_return_depot_check_done = 0U;
     g_return_pose_in_depot = 0U;
+    g_return_inward_move_state = 0U;
     g_pushbox_entry_heading_rotate_started = 0U;
     g_identify_safe_move_prepared = 0U;
     g_identify_safe_move_running = 0U;
@@ -2561,7 +2590,9 @@ static uint8 prepare_identify_endpoints(void)
     {
         /* 爆炸事件也必须成为分段端点，确保暂停结束后立即推进运行时地图。 */
         if (is_identification_marker(g_exec_path[i].id) ||
-            (g_exec_path[i].id & BOMB_EXPLOSION) != 0U)
+            (g_exec_path[i].id & BOMB_EXPLOSION) != 0U ||
+            (g_control_checkpoint_vision_localization_enabled &&
+             exec_segment_needs_visual_checkpoint(i)))
         {
             if (g_identify_endpoint_count >= MAX_CAR_PATH)
             {
@@ -3875,16 +3906,13 @@ static void handle_identify_execute_path(void)
             g_identify_segment_map_event_applied = 1U;
         }
 
-        /* 炸弹推动发生在识别路径内，不会进入普通推箱分段；到达爆炸点后单独校正。 */
+        /* Bomb endpoints and long compressed segments share the same visual
+         * checkpoint and 3 cm target-reposition flow. */
         if (g_control_checkpoint_vision_localization_enabled &&
-            (g_exec_path[endpoint_idx].id & BOMB_EXPLOSION) != 0U &&
+            ((g_exec_path[endpoint_idx].id & BOMB_EXPLOSION) != 0U ||
+             exec_segment_needs_visual_checkpoint(endpoint_idx)) &&
             !g_identify_checkpoint_localized)
         {
-            /* st.active becomes false only after the configured explosion
-             * pause has completed.  Drop any pre-explosion pose data, then
-             * localize immediately without another fixed delay. */
-            uart_stop_car_stream();
-            uart_blob_clear_pending_data();
             begin_checkpoint_visual_localization(&g_exec_path[endpoint_idx], 0U);
             if (!process_checkpoint_visual_localization())
             {
@@ -4024,6 +4052,27 @@ static void handle_plan_path_stage(void)
     end_path_plan_pause();
 }
 
+static uint8 pushbox_long_checkpoint_is_before_completion(size_t endpoint_idx)
+{
+    size_t i;
+
+    if (endpoint_idx >= g_exec_steps)
+    {
+        return 0U;
+    }
+
+    /* Once the final PUSH_END point has been passed, all remaining segments
+     * belong to the depot return and must not create long-line checkpoints. */
+    for (i = endpoint_idx; i < g_exec_steps; i++)
+    {
+        if ((g_exec_path[i].id & PUSH_END_POINT) != 0U)
+        {
+            return 1U;
+        }
+    }
+    return 0U;
+}
+
 static uint8 start_pushbox_segment(size_t start_idx)
 {
     size_t end_idx;
@@ -4041,7 +4090,9 @@ static uint8 start_pushbox_segment(size_t start_idx)
     for (; scan_idx < g_exec_steps; scan_idx++)
     {
         if ((g_exec_path[scan_idx].id &
-             (PUSH_START_POINT | PUSH_END_POINT)) != 0U)
+             (PUSH_START_POINT | PUSH_END_POINT)) != 0U ||
+            (exec_segment_needs_visual_checkpoint(scan_idx) &&
+             pushbox_long_checkpoint_is_before_completion(scan_idx)))
         {
             end_idx = scan_idx;
             break;
@@ -4136,6 +4187,80 @@ static void handle_load_path_stage(void)
     set_control_phase_stage(CONTROL_PHASE_STEP_EXECUTE_PATH);
 }
 
+static uint8 get_return_inward_target(float *target_x_m, float *target_y_m)
+{
+    Position depot_exec;
+    Position depot_raw;
+    Position arena_neighbor_exec;
+    int inward_row_dir;
+    int inward_col_dir;
+
+    if (target_x_m == NULL || target_y_m == NULL || g_exec_steps == 0U)
+    {
+        return 0U;
+    }
+
+    depot_exec = g_exec_path[g_exec_steps - 1U];
+    depot_raw = depot_exec;
+    path_inverse_remap_exec_point(&depot_raw);
+    if (depot_raw.col != 0U ||
+        (depot_raw.row != 4U && depot_raw.row != 5U))
+    {
+        return 0U;
+    }
+
+    /* col=1 is the adjacent arena cell.  Move in the opposite direction
+     * from it so the target lies half a cell deeper inside the depot. */
+    arena_neighbor_exec = depot_raw;
+    arena_neighbor_exec.col = 1U;
+    path_remap_exec_point(&arena_neighbor_exec);
+    inward_row_dir = (int)depot_exec.row - (int)arena_neighbor_exec.row;
+    inward_col_dir = (int)depot_exec.col - (int)arena_neighbor_exec.col;
+
+    *target_x_m = (float)depot_exec.row * GRID_SIZE_M +
+                  (float)inward_row_dir * CONTROL_RETURN_DEPOT_INWARD_OFFSET_M;
+    *target_y_m = (float)depot_exec.col * GRID_SIZE_M +
+                  (float)inward_col_dir * CONTROL_RETURN_DEPOT_INWARD_OFFSET_M;
+    return 1U;
+}
+
+static uint8 finish_return_inward_move_if_ready(void)
+{
+    path_follow_status_t st = {0};
+    float target_x_m = 0.0f;
+    float target_y_m = 0.0f;
+
+    if (g_return_inward_move_state == 2U)
+    {
+        return 1U;
+    }
+
+    if (g_return_inward_move_state == 1U)
+    {
+        path_follow_get_status(&st);
+        if (st.active)
+        {
+            return 0U;
+        }
+        g_return_inward_move_state = 2U;
+        control_hold_yaw_closed_loop();
+        return 1U;
+    }
+
+    if (!get_return_inward_target(&target_x_m, &target_y_m))
+    {
+        g_return_inward_move_state = 2U;
+        return 1U;
+    }
+
+    control_hold_yaw_closed_loop();
+    path_follow_start_pose_correction(target_x_m, target_y_m);
+    g_return_inward_move_state = 1U;
+    car_go_flag = 1U;
+    car_stop_flag = 0U;
+    return 0U;
+}
+
 static uint8 return_pose_is_in_depot(float x_m, float y_m)
 {
     Position depots[2] = {
@@ -4200,8 +4325,11 @@ static void handle_pushbox_execute_path(void)
             return;
         }
 
-        if ((g_exec_path[g_pushbox_segment_end_idx].id &
-             (PUSH_START_POINT | PUSH_END_POINT)) != 0U &&
+        if (((g_exec_path[g_pushbox_segment_end_idx].id &
+              (PUSH_START_POINT | PUSH_END_POINT)) != 0U ||
+             (exec_segment_needs_visual_checkpoint(g_pushbox_segment_end_idx) &&
+              pushbox_long_checkpoint_is_before_completion(
+                  g_pushbox_segment_end_idx))) &&
             !g_pushbox_checkpoint_localized)
         {
             begin_checkpoint_visual_localization(
@@ -4230,6 +4358,11 @@ static void handle_pushbox_execute_path(void)
         {
             return;
         }
+    }
+
+    if (!finish_return_inward_move_if_ready())
+    {
+        return;
     }
 
     if (!g_return_depot_check_done)

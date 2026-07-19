@@ -1422,11 +1422,132 @@ static uint8 lookup_saved_id_by_cell(const control_identify_id_record_t *records
     return 0U;
 }
 
+/*
+ * Rebind IDs for boxes which changed cells between the recognition map and the
+ * fresh map fetched after recognition.  Unchanged cells are handled first by
+ * apply_saved_identify_ids_to_current_map().  The remaining old/new cells are
+ * paired with a minimum-total-Manhattan-distance assignment so that two moved
+ * boxes are not matched greedily in the wrong order.
+ */
+static void apply_moved_box_ids(const size_t saved_indices[MAX_BOXES],
+                                const size_t current_indices[MAX_BOXES],
+                                size_t moved_count)
+{
+    int row_potential[MAX_BOXES + 1] = {0};
+    int col_potential[MAX_BOXES + 1] = {0};
+    int matched_row[MAX_BOXES + 1] = {0};
+    int previous_col[MAX_BOXES + 1] = {0};
+    int min_cost[MAX_BOXES + 1] = {0};
+    uint8 col_used[MAX_BOXES + 1] = {0U};
+    size_t row = 0U;
+    size_t col = 0U;
+
+    if (moved_count == 0U || moved_count > MAX_BOXES)
+    {
+        return;
+    }
+
+    for (row = 1U; row <= moved_count; row++)
+    {
+        int col0 = 0;
+
+        matched_row[0] = (int)row;
+        for (col = 0U; col <= moved_count; col++)
+        {
+            min_cost[col] = 0x3FFF;
+            col_used[col] = 0U;
+            previous_col[col] = 0;
+        }
+
+        do
+        {
+            int row0 = 0;
+            int delta = 0x3FFF;
+            int next_col = 0;
+
+            col_used[col0] = 1U;
+            row0 = matched_row[col0];
+
+            for (col = 1U; col <= moved_count; col++)
+            {
+                int old_row = (int)g_saved_box_id_records[saved_indices[row0 - 1]].row;
+                int old_col = (int)g_saved_box_id_records[saved_indices[row0 - 1]].col;
+                int new_row = (int)boxes[current_indices[col - 1U]].row;
+                int new_col = (int)boxes[current_indices[col - 1U]].col;
+                int row_delta = old_row - new_row;
+                int col_delta = old_col - new_col;
+                int cost = 0;
+                int reduced_cost = 0;
+
+                if (col_used[col])
+                {
+                    continue;
+                }
+                if (row_delta < 0)
+                {
+                    row_delta = -row_delta;
+                }
+                if (col_delta < 0)
+                {
+                    col_delta = -col_delta;
+                }
+                cost = row_delta + col_delta;
+                reduced_cost = cost - row_potential[row0] - col_potential[col];
+                if (reduced_cost < min_cost[col])
+                {
+                    min_cost[col] = reduced_cost;
+                    previous_col[col] = col0;
+                }
+                if (min_cost[col] < delta)
+                {
+                    delta = min_cost[col];
+                    next_col = (int)col;
+                }
+            }
+
+            for (col = 0U; col <= moved_count; col++)
+            {
+                if (col_used[col])
+                {
+                    row_potential[matched_row[col]] += delta;
+                    col_potential[col] -= delta;
+                }
+                else
+                {
+                    min_cost[col] -= delta;
+                }
+            }
+            col0 = next_col;
+        } while (matched_row[col0] != 0);
+
+        do
+        {
+            int prior_col = previous_col[col0];
+            matched_row[col0] = matched_row[prior_col];
+            col0 = prior_col;
+        } while (col0 != 0);
+    }
+
+    for (col = 1U; col <= moved_count; col++)
+    {
+        size_t saved_index = saved_indices[matched_row[col] - 1];
+        size_t current_index = current_indices[col - 1U];
+        boxes[current_index].id = g_saved_box_id_records[saved_index].id;
+    }
+}
+
 static void apply_saved_identify_ids_to_current_map(void)
 {
     size_t i = 0U;
+    size_t j = 0U;
     size_t box_cnt = Boxes_count;
     size_t target_cnt = Targets_count;
+    size_t unmatched_saved_indices[MAX_BOXES] = {0U};
+    size_t unmatched_current_indices[MAX_BOXES] = {0U};
+    size_t unmatched_saved_count = 0U;
+    size_t unmatched_current_count = 0U;
+    uint8 saved_box_matched[MAX_BOXES] = {0U};
+    uint8 current_box_matched[MAX_BOXES] = {0U};
     uint8 id = 0U;
 
     if (!g_saved_identify_ids_ready)
@@ -1445,10 +1566,44 @@ static void apply_saved_identify_ids_to_current_map(void)
 
     for (i = 0U; i < box_cnt; i++)
     {
-        if (lookup_saved_id_by_cell(g_saved_box_id_records, MAX_BOXES, boxes[i].row, boxes[i].col, &id))
+        for (j = 0U; j < MAX_BOXES; j++)
         {
-            boxes[i].id = id;
+            if (!g_saved_box_id_records[j].valid || saved_box_matched[j])
+            {
+                continue;
+            }
+            if (g_saved_box_id_records[j].row == boxes[i].row &&
+                g_saved_box_id_records[j].col == boxes[i].col)
+            {
+                boxes[i].id = g_saved_box_id_records[j].id;
+                saved_box_matched[j] = 1U;
+                current_box_matched[i] = 1U;
+                break;
+            }
         }
+    }
+
+    for (i = 0U; i < MAX_BOXES; i++)
+    {
+        if (g_saved_box_id_records[i].valid && !saved_box_matched[i])
+        {
+            unmatched_saved_indices[unmatched_saved_count++] = i;
+        }
+    }
+    for (i = 0U; i < box_cnt; i++)
+    {
+        if (!current_box_matched[i])
+        {
+            unmatched_current_indices[unmatched_current_count++] = i;
+        }
+    }
+
+    /* A count mismatch is more likely to be a map miss/false detection. */
+    if (unmatched_saved_count == unmatched_current_count)
+    {
+        apply_moved_box_ids(unmatched_saved_indices,
+                            unmatched_current_indices,
+                            unmatched_saved_count);
     }
 
     for (i = 0U; i < target_cnt; i++)

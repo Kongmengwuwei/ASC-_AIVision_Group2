@@ -15,6 +15,8 @@
 #define PATH_DYNAMIC_OBJECT_BOMB 2U
 #define PATH_IDENTIFY_OBJECT_MASK_CAPACITY 16U
 #define PATH_IDENTIFY_DISTANCE_EPSILON 0.0001f
+#define PATH_IDENTIFY_NEAR_DISTANCE_CELLS 1
+#define PATH_IDENTIFY_FAR_DISTANCE_CELLS  3
 /* 防止异常超长输入触发候选验证的平方级开销；正常 10x14 识别路线远低于该值。 */
 #define PATH_IDENTIFY_POSTPROCESS_MAX_RAW_STEPS (MAP_ROWS * MAP_COLS * 2U)
 
@@ -55,8 +57,8 @@ static uint8 s_raw_stage_index[MAX_CAR_PATH] = {0U};
 static uint8 s_stage_model_valid = 0U;
 /* 运行期开关：1 允许动态规划选择斜线捷径，0 时只保留水平/竖直执行段。 */
 static uint8 g_path_diagonal_enabled = 1U;
-/* 识别路径默认启用“既有路径上的一格识别替换”。 */
-static uint8 g_path_identify_near_postprocess_enabled = 1U;
+/* 识别路径近距离替换后处理默认关闭；保留运行期开关便于对照测试。 */
+static uint8 g_path_identify_near_postprocess_enabled = 0U;
 
 void path_remap_exec_point(Position *p)
 {
@@ -1267,6 +1269,9 @@ static uint8 path_identify_view_distance(const path_map_snapshot_t *stage_map,
     int32 d_col;
     int32 distance;
     Position middle;
+    int32 row_step;
+    int32 col_step;
+    int32 step;
 
     if (!path_snapshot_counts_valid(stage_map) ||
         !path_is_map_cell_valid(stand) || !path_is_map_cell_valid(object))
@@ -1276,17 +1281,28 @@ static uint8 path_identify_view_distance(const path_map_snapshot_t *stage_map,
     d_row = (int32)object->row - (int32)stand->row;
     d_col = (int32)object->col - (int32)stand->col;
     distance = path_abs_i32(d_row) + path_abs_i32(d_col);
-    if ((distance != 1 && distance != 2) || (d_row != 0 && d_col != 0))
+    if ((distance != PATH_IDENTIFY_NEAR_DISTANCE_CELLS &&
+         distance != PATH_IDENTIFY_FAR_DISTANCE_CELLS) ||
+        (d_row != 0 && d_col != 0))
         return 0U;
-    if (distance == 1)
-        return 1U;
+    if (distance == PATH_IDENTIFY_NEAR_DISTANCE_CELLS)
+        return PATH_IDENTIFY_NEAR_DISTANCE_CELLS;
 
     middle = *stand;
-    middle.row = (uint8)((int32)middle.row + (d_row > 0 ? 1 : (d_row < 0 ? -1 : 0)));
-    middle.col = (uint8)((int32)middle.col + (d_col > 0 ? 1 : (d_col < 0 ? -1 : 0)));
-    middle.id = 0U;
-    return path_cell_has_blocker(stage_map, NULL,
-                                 middle.row, middle.col, 1U) ? 0U : 2U;
+    row_step = (d_row > 0) ? 1 : ((d_row < 0) ? -1 : 0);
+    col_step = (d_col > 0) ? 1 : ((d_col < 0) ? -1 : 0);
+    for (step = 1; step < distance; step++)
+    {
+        middle.row = (uint8)((int32)stand->row + row_step * step);
+        middle.col = (uint8)((int32)stand->col + col_step * step);
+        middle.id = 0U;
+        if (path_cell_has_blocker(stage_map, NULL,
+                                  middle.row, middle.col, 1U))
+        {
+            return 0U;
+        }
+    }
+    return PATH_IDENTIFY_FAR_DISTANCE_CELLS;
 }
 
 /* 与 Control.collect_identify_targets_on_exec_point() 保持一致：每个朝向只
@@ -1299,7 +1315,7 @@ static void path_identify_collect_at_marker(const path_map_snapshot_t *pre_map,
 {
     int32 chosen_kind[4] = {-1, -1, -1, -1};
     int32 chosen_index[4] = {-1, -1, -1, -1};
-    uint8 chosen_distance[4] = {3U, 3U, 3U, 3U};
+    uint8 chosen_distance[4] = {4U, 4U, 4U, 4U};
     size_t i;
     int32 direction;
 
@@ -1375,7 +1391,7 @@ static void path_identify_collect_at_marker(const path_map_snapshot_t *pre_map,
             metrics->box_mask |= bit;
             if (event != NULL)
                 event->box_mask |= bit;
-            if (chosen_distance[direction] == 1U)
+            if (chosen_distance[direction] == PATH_IDENTIFY_NEAR_DISTANCE_CELLS)
                 metrics->near_count++;
             else
             {
@@ -1389,7 +1405,7 @@ static void path_identify_collect_at_marker(const path_map_snapshot_t *pre_map,
             metrics->target_mask |= bit;
             if (event != NULL)
                 event->target_mask |= bit;
-            if (chosen_distance[direction] == 1U)
+            if (chosen_distance[direction] == PATH_IDENTIFY_NEAR_DISTANCE_CELLS)
                 metrics->near_count++;
             else
             {

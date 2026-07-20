@@ -25,6 +25,7 @@
 #define MENU_FLAG_LAST_PAIR_INSURANCE (1UL << 9)
 #define MENU_FLAG_CHECKPOINT_VISION_EVERY_POINT (1UL << 10)
 #define MENU_FLAG_CHECKPOINT_VISION_REDUCED (1UL << 11)
+#define MENU_FLAG_CHECKPOINT_VISION_MINIMAL (1UL << 12)
 
 static uint32 menu_flash_checksum(uint32 flags, uint32 start_dir, uint32 map_index)
 {
@@ -40,7 +41,11 @@ static uint32 menu_flash_build_flags(const menu_flash_config_t *config)
     if (config->show_map) flags |= MENU_FLAG_SHOW_MAP;
     if (config->show_data) flags |= MENU_FLAG_SHOW_DATA;
     if (config->blue_serial) flags |= MENU_FLAG_BLUE_SERIAL;
-    if (config->checkpoint_vision_mode == CONTROL_CHECKPOINT_VISION_MODE_REDUCED)
+    if (config->checkpoint_vision_mode == CONTROL_CHECKPOINT_VISION_MODE_MINIMAL)
+    {
+        flags |= MENU_FLAG_CHECKPOINT_VISION_MINIMAL;
+    }
+    else if (config->checkpoint_vision_mode == CONTROL_CHECKPOINT_VISION_MODE_REDUCED)
     {
         flags |= MENU_FLAG_CHECKPOINT_VISION_REDUCED;
     }
@@ -130,6 +135,10 @@ uint8 Data_load_from_flash(menu_flash_config_t *config)
     if (flags & MENU_FLAG_CHECKPOINT_VISION_EVERY_POINT)
     {
         config->checkpoint_vision_mode = CONTROL_CHECKPOINT_VISION_MODE_EVERY_POINT;
+    }
+    else if (flags & MENU_FLAG_CHECKPOINT_VISION_MINIMAL)
+    {
+        config->checkpoint_vision_mode = CONTROL_CHECKPOINT_VISION_MODE_MINIMAL;
     }
     else if (flags & MENU_FLAG_CHECKPOINT_VISION_REDUCED)
     {

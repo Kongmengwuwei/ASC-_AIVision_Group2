@@ -208,7 +208,7 @@ static const path_follow_scurve_band_cfg_t g_default_speed_bands[PATH_FOLLOW_SCU
 
 path_follow_scurve_band_cfg_t g_path_follow_scurve_band_cfg[PATH_FOLLOW_SCURVE_BAND_COUNT] =
 {
-    {0.30f,   0.40f, 1.05f, 3.50f},
+    {0.30f,   0.40f, 1.05f, 7.00f},
     {0.50f,   0.50f, 1.05f, 3.50f},
     {0.70f,   0.65f, 1.05f, 3.50f},
     {0.90f,   0.75f, 1.05f, 3.50f},

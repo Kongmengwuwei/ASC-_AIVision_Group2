@@ -28,7 +28,7 @@ static uint8 g_control_prestart_depart_dir = 0U;
 static uint8 g_control_continuous_levels_enabled = 0U;
 /* Risky ID repair is opt-in. Normal recognition results are not rewritten by default. */
 static uint8 g_control_identify_id_fallback_enabled = 0U;
-/* 0 off; 1 identify/long/PUSH_END; 2 adds PUSH_START; 3 every point. */
+/* 0 off; 1 identify/PUSH_END; 2 adds long; 3 adds PUSH_START/post-identify; 4 every point. */
 static uint8 g_control_checkpoint_vision_localization_mode =
     CONTROL_CHECKPOINT_VISION_MODE_OFF;
 /* Optional final-map insurance: retry one remaining box/target pair with Mode1. */
@@ -264,6 +264,7 @@ static size_t g_identify_target_count = 0U;
 static size_t g_identify_target_cursor = 0U;
 static uint8 g_identify_rotate_started = 0U;
 static uint8 g_identify_checkpoint_localized = 0U;
+static uint8 g_identify_post_recognition_localized = 0U;
 static uint8 g_identify_targets_collected_at_endpoint = 0U;
 static control_identify_exec_state_t g_identify_exec_state = CONTROL_IDENTIFY_EXEC_IDLE;
 
@@ -585,6 +586,7 @@ static void reset_identify_runtime_state(void)
     g_identify_target_cursor = 0U;
     g_identify_rotate_started = 0U;
     g_identify_checkpoint_localized = 0U;
+    g_identify_post_recognition_localized = 0U;
     g_identify_targets_collected_at_endpoint = 0U;
     g_identify_exec_state = CONTROL_IDENTIFY_EXEC_IDLE;
     reset_identify_recognition_wait();
@@ -832,7 +834,9 @@ static uint8 identify_exec_point_needs_visual_checkpoint(size_t endpoint_idx)
     {
         return 1U;
     }
-    return exec_segment_needs_visual_checkpoint(endpoint_idx);
+    return (g_control_checkpoint_vision_localization_mode >=
+                CONTROL_CHECKPOINT_VISION_MODE_REDUCED &&
+            exec_segment_needs_visual_checkpoint(endpoint_idx)) ? 1U : 0U;
 }
 
 static uint8 resolve_map_dir_from_delta(int32 d_row, int32 d_col, control_map_dir_t *dir_out)
@@ -2696,6 +2700,7 @@ static uint8 start_identify_segment(size_t end_idx)
 
     g_identify_rotate_started = 0U;
     g_identify_checkpoint_localized = 0U;
+    g_identify_post_recognition_localized = 0U;
     g_identify_targets_collected_at_endpoint = 0U;
     g_identify_segment_map_event_applied = 0U;
     memset(g_identify_targets, 0, sizeof(g_identify_targets));
@@ -4045,7 +4050,22 @@ static void handle_identify_execute_path(void)
         break;
 
     case CONTROL_IDENTIFY_EXEC_ADVANCE_ENDPOINT:
-        /* 当前识别点处理完成，保持现有车头朝向，直接推进到下一段。 */
+        endpoint_idx = g_identify_endpoint_indices[g_identify_endpoint_cursor];
+        if (g_control_checkpoint_vision_localization_mode >=
+                CONTROL_CHECKPOINT_VISION_MODE_STANDARD &&
+            g_identify_endpoint_need_action[g_identify_endpoint_cursor] &&
+            g_identify_target_count > 0U &&
+            !g_identify_post_recognition_localized)
+        {
+            begin_checkpoint_visual_localization(&g_exec_path[endpoint_idx], 0U);
+            if (!process_checkpoint_visual_localization())
+            {
+                return;
+            }
+            g_identify_post_recognition_localized = 1U;
+        }
+
+        /* 识别后定位完成，保持现有车头朝向并推进到下一段。 */
         g_identify_rotate_started = 0U;
         if (!advance_identify_endpoint_or_finish())
         {
@@ -4132,7 +4152,9 @@ static uint8 pushbox_exec_point_needs_visual_checkpoint(size_t endpoint_idx)
     {
         return 1U;
     }
-    return (exec_segment_needs_visual_checkpoint(endpoint_idx) &&
+    return (g_control_checkpoint_vision_localization_mode >=
+                CONTROL_CHECKPOINT_VISION_MODE_REDUCED &&
+            exec_segment_needs_visual_checkpoint(endpoint_idx) &&
             pushbox_long_checkpoint_is_before_completion(endpoint_idx)) ? 1U : 0U;
 }
 

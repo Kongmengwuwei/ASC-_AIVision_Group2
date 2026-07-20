@@ -28,7 +28,7 @@ static uint8 g_control_prestart_depart_dir = 0U;
 static uint8 g_control_continuous_levels_enabled = 0U;
 /* Risky ID repair is opt-in. Normal recognition results are not rewritten by default. */
 static uint8 g_control_identify_id_fallback_enabled = 0U;
-/* 0 off; 1 existing checkpoints; 2 every point through final PUSH_END. */
+/* 0 off; 1 identify/long/PUSH_END; 2 adds PUSH_START; 3 every point. */
 static uint8 g_control_checkpoint_vision_localization_mode =
     CONTROL_CHECKPOINT_VISION_MODE_OFF;
 /* Optional final-map insurance: retry one remaining box/target pair with Mode1. */
@@ -49,7 +49,7 @@ float g_control_prestart_depart_compensate_m = -0.0f;
  */
 #define CONTROL_REQ_MAP_RETRY_TIMEOUT_TICKS 500U
 #define CONTROL_REQ_CAR_RETRY_TIMEOUT_TICKS 200U
-#define CONTROL_LOCALIZE_STOP_STABLE_TICKS 10U
+#define CONTROL_LOCALIZE_STOP_STABLE_TICKS 0U
 #define CONTROL_LOCALIZE_POST_STOP_DRAIN_TICKS 10U
 #define CONTROL_LOCALIZE_WHEEL_STOP_ENCODER_TOL 5
 #define CONTROL_LOCALIZE_MAX_SAMPLES 5U
@@ -822,10 +822,17 @@ static uint8 identify_exec_point_needs_visual_checkpoint(size_t endpoint_idx)
     if (g_control_checkpoint_vision_localization_mode ==
         CONTROL_CHECKPOINT_VISION_MODE_EVERY_POINT)
     {
+        /* Path point zero is the already-known current pose, not a newly
+         * reached waypoint. Localizing it would stop immediately after load. */
+        return (endpoint_idx > 0U) ? 1U : 0U;
+    }
+    if (g_control_checkpoint_vision_localization_mode >=
+            CONTROL_CHECKPOINT_VISION_MODE_STANDARD &&
+        (g_exec_path[endpoint_idx].id & BOMB_EXPLOSION) != 0U)
+    {
         return 1U;
     }
-    return (((g_exec_path[endpoint_idx].id & BOMB_EXPLOSION) != 0U) ||
-            exec_segment_needs_visual_checkpoint(endpoint_idx)) ? 1U : 0U;
+    return exec_segment_needs_visual_checkpoint(endpoint_idx);
 }
 
 static uint8 resolve_map_dir_from_delta(int32 d_row, int32 d_col, control_map_dir_t *dir_out)
@@ -4096,7 +4103,12 @@ static uint8 pushbox_long_checkpoint_is_before_completion(size_t endpoint_idx)
 
 static uint8 pushbox_exec_point_needs_visual_checkpoint(size_t endpoint_idx)
 {
-    if (!checkpoint_vision_enabled() || endpoint_idx >= g_exec_steps)
+    /* g_exec_path[0] is the already-localized current pose. It may legally
+     * carry PUSH_START_POINT when the first push begins at the current cell,
+     * but treating it as a checkpoint makes start_pushbox_segment(0) rescan
+     * the same one-point segment forever. */
+    if (!checkpoint_vision_enabled() || endpoint_idx == 0U ||
+        endpoint_idx >= g_exec_steps)
     {
         return 0U;
     }
@@ -4107,10 +4119,21 @@ static uint8 pushbox_exec_point_needs_visual_checkpoint(size_t endpoint_idx)
          * points after the last push deliberately do not localize. */
         return pushbox_long_checkpoint_is_before_completion(endpoint_idx);
     }
-    return ((((g_exec_path[endpoint_idx].id &
-               (PUSH_START_POINT | PUSH_END_POINT)) != 0U) ||
-             (exec_segment_needs_visual_checkpoint(endpoint_idx) &&
-              pushbox_long_checkpoint_is_before_completion(endpoint_idx)))) ? 1U : 0U;
+    if ((g_exec_path[endpoint_idx].id & PUSH_END_POINT) != 0U &&
+        (g_control_checkpoint_vision_localization_mode >=
+             CONTROL_CHECKPOINT_VISION_MODE_STANDARD ||
+         (g_exec_path[endpoint_idx].id & BOMB_EXPLOSION) == 0U))
+    {
+        return 1U;
+    }
+    if (g_control_checkpoint_vision_localization_mode >=
+            CONTROL_CHECKPOINT_VISION_MODE_STANDARD &&
+        (g_exec_path[endpoint_idx].id & PUSH_START_POINT) != 0U)
+    {
+        return 1U;
+    }
+    return (exec_segment_needs_visual_checkpoint(endpoint_idx) &&
+            pushbox_long_checkpoint_is_before_completion(endpoint_idx)) ? 1U : 0U;
 }
 
 static uint8 pushbox_endpoint_is_final_push(size_t endpoint_idx);

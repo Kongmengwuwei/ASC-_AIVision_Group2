@@ -7,8 +7,9 @@
 #define CONTROL_PRESTART_DEPART_DIR_MIN 0U
 #define CONTROL_PRESTART_DEPART_DIR_MAX 4U
 #define CONTROL_CHECKPOINT_VISION_MODE_OFF 0U
-#define CONTROL_CHECKPOINT_VISION_MODE_STANDARD 1U
-#define CONTROL_CHECKPOINT_VISION_MODE_EVERY_POINT 2U
+#define CONTROL_CHECKPOINT_VISION_MODE_REDUCED 1U
+#define CONTROL_CHECKPOINT_VISION_MODE_STANDARD 2U
+#define CONTROL_CHECKPOINT_VISION_MODE_EVERY_POINT 3U
 #define CONTROL_CHECKPOINT_VISION_MODE_MAX CONTROL_CHECKPOINT_VISION_MODE_EVERY_POINT
 
 /**
@@ -140,7 +141,7 @@ uint8 control_get_return_pose_in_depot(void);
  */
 const Position *control_get_exec_path(size_t *steps);
 
-/* 0: off; 1: existing checkpoints; 2: every point through final PUSH_END. */
+/* 0 off; 1 identify/long/PUSH_END; 2 adds PUSH_START; 3 every point. */
 void control_set_checkpoint_vision_localization_mode(uint8 mode);
 uint8 control_get_checkpoint_vision_localization_mode(void);
 
